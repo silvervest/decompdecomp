@@ -308,6 +308,24 @@ def test_a_pc_program_rebuilds_byte_for_byte(tmp_path):
     _rebuilds(tmp_path, xbox=False)
 
 
+def test_a_function_the_ltcg_checks_fail_is_never_taken_from_src(tmp_path):
+    # OnlineListGames-like: its bytes and relocations agree with the original's, but it pushes itself as the
+    # callback where the original pushes another function; only dll2coff's mapping check sees that
+    delink = _tool("delink")
+    code = bytes.fromhex("68 00100010 c3")
+    fns = [{"name": n, "addr": a, "offset": 0, "size": 6, "relocs": [[1, DIR32, "_func_00011100", 0]]}
+           for n, a in (("_func_00011000", 0x11000), ("_func_00011010", 0x11010))]
+    obj = tmp_path / "u.obj"
+    obj.write_bytes(delink.coff(fns, code))
+    (tmp_path / "objdiff.json").write_text(json.dumps({"units": [{"name": "u", "base_path": str(obj)}]}))
+    assert set(export.compiled_functions(tmp_path / "objdiff.json")) == {"_func_00011000", "_func_00011010"}
+    obj.with_suffix(".ltcg.json").write_text(json.dumps({"functions": {
+        "_func_00011000": {"conflicts": ["+0x1: yours refers to this function itself, the original to 0x11100"],
+                           "data": []},
+        "_func_00011010": {"conflicts": [], "data": [], "folded": ["orig 0x3B11A0 -> ..."]}}}))
+    assert set(export.compiled_functions(tmp_path / "objdiff.json")) == {"_func_00011010"}
+
+
 @needs_xdk
 def test_an_xbox_program_rebuilds_byte_for_byte(tmp_path):
     _rebuilds(tmp_path, xbox=True)

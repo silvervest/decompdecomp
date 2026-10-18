@@ -176,6 +176,21 @@ def test_a_claim_on_a_unit_that_doesnt_build_is_released_with_a_note(tmp_path):
     assert note.startswith("u didn't build before this change either") and "FAILED: build/u.dll" in note
 
 
+def test_jump_table_entries_going_elsewhere_are_a_difference(tmp_path):
+    # two cases swapped in the table: same bytes outside the table, labels at the same places, and objdiff (which
+    # doesn't compare where relocations go) reads 100%; the rebuilt program would differ
+    from .test_ltcg import F1, F2, RELOC_SITES, _project, _run_dll2coff
+
+    src, _ = _project(tmp_path)
+    assert _run_dll2coff(tmp_path, src)[1]["functions"]["?F2@@YAHH@Z"]["conflicts"] == []
+    f2 = F2.replace(bytes.fromhex("2d100010 2e100010"), bytes.fromhex("2e100010 2d100010"))
+    text = F1 + b"\xcc" * (0x20 - len(F1)) + f2 + b"\xcc" * 8
+    (tmp_path / "u.dll").write_bytes(_pe([(".text", 0x1000, text), (".data", 0x2000, bytes(8))], RELOC_SITES))
+    assert _run_dll2coff(tmp_path, src)[1]["functions"]["?F2@@YAHH@Z"]["conflicts"] == [
+        "+0x10: goes to +0xE in yours, +0xD in the original (a jump table entry)",
+        "+0x14: goes to +0xD in yours, +0xE in the original (a jump table entry)"]
+
+
 def test_two_jump_tables_and_a_byte_table_relocate_each_entry_once():
     # jmp [eax*4+T1] (3 cases), movzx eax, byte [ecx+B]; jmp [eax*4+T2] (2 cases): T1's scan runs on into T2,
     # whose entries are code addresses too; listed twice, objdiff decoded the byte table after them as code

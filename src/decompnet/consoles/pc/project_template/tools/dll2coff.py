@@ -439,7 +439,11 @@ def mapping(fn: dict, exe: bytes, ours: list[tuple[int, int, int]], lo: int, hi:
             conflicts.append(f"+0x{off:X}: {'inside' if a is None else 'outside'} the function in the original, "
                              f"{'inside' if b is None else 'outside'} it in yours")
             continue
-        if a is None:
+        if a is None:  # inside the function: a jump table entry (or its address) must go to the same place
+            want = struct.unpack_from("<I", exe, fn["offset"] + off)[0] - fn["addr"]
+            if rtype == DIR32 and value - lo != want:
+                conflicts.append(f"+0x{off:X}: goes to +0x{value - lo:X} in yours, +0x{want:X} in the original "
+                                 "(a jump table entry)")
             continue
         pairs += 1
         if fwd.setdefault(a, b) != b:

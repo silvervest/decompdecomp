@@ -263,6 +263,68 @@ def test_xdk_library_code_is_found_by_its_bytes_with_relocations_as_wildcards(tm
     assert [p.name for p in xdklib.libraries(libs, ["XMYLIB", "D3D8LTCG"])] == ["XMYLIB.lib", "libcmt.lib"]
 
 
+def _program(text: bytes, data: bytes = b"") -> scratch_pe.PE:
+    """A program holding hand-assembled code at 0x11000 and data at 0x12000, in the shape both readers give."""
+    sections = [scratch_pe.Section(".text", 0x11000, len(text), 0x1000, len(text), True),
+                scratch_pe.Section(".rdata", 0x12000, max(len(data), 4), 0x2000, len(data), False)]
+    raw = bytes(0x1000) + text.ljust(0x1000, b"\xcc") + data
+    return scratch_pe.PE(raw, 0x10000, 0x3000, 0x11000, 0, sections)
+
+
+def _row(entry: int, end: int) -> dict:
+    return {"entry": entry, "end": end, "name": f"FUN_{entry:08x}", "source": "DEFAULT", "convention": "__cdecl",
+            "purge": 0, "params": 0}
+
+
+def _starts_and_sizes(pe, rows) -> list[tuple[int, int]]:
+    return [(f.addr, f.size) for f in scratch_pe.analyse(pe, rows, linker_padding=True)]
+
+
+def test_a_function_that_returns_midway_keeps_the_code_after_the_ret():
+    # test ecx, ecx; je L; xor eax, eax; ret; L: mov eax, 1; ret -- Ghidra stopped at the first ret and made the
+    # rest a function of its own, as it does with switch cases it can't tie to their switch
+    text = bytes.fromhex("85c9 7403 33c0 c3 b801000000 c3").ljust(0x10, b"\xcc") + b"\xc3"
+    pe = _program(text)
+    rows = [_row(0x11000, 0x11007), _row(0x11007, 0x1100D), _row(0x11010, 0x11011)]
+    assert _starts_and_sizes(pe, rows) == [(0x11000, 0x0D), (0x11010, 1)]
+    # called from somewhere, the same start is a function: shared code, not a false start
+    called = bytes.fromhex("85c9 7403 33c0 c3 b801000000 c3").ljust(0x10, b"\xcc") + bytes.fromhex("e8f2ffffff c3")
+    assert [a for a, _ in _starts_and_sizes(_program(called), rows)] == [0x11000, 0x11007, 0x11010]
+
+
+def test_a_run_of_small_methods_ghidra_missed_becomes_one_function_each():
+    # or eax, -1; ret | xor eax, eax; ret | mov al, 1; ret: each padded with int3 to 16 bytes, only the first known
+    text = b"".join(bytes.fromhex(h).ljust(0x10, b"\xcc") for h in ("83c8ffc3", "33c0c3", "b001c3"))
+    assert _starts_and_sizes(_program(text), [_row(0x11000, 0x11004)]) == [(0x11000, 4), (0x11010, 3), (0x11020, 3)]
+
+
+def test_a_byte_table_ends_at_the_first_byte_past_its_jump_table():
+    import struct
+
+    jt, bt = 0x11018, 0x11020
+    text = (b"\x0f\xb6\x81" + struct.pack("<I", bt)            # movzx eax, byte [ecx + bt]
+            + b"\xff\x24\x85" + struct.pack("<I", jt)          # jmp [eax*4 + jt]
+            + bytes.fromhex("b801000000c3 33c0c3 cc")          # case 0, case 1, padding
+            + struct.pack("<II", 0x1100E, 0x11014)             # the jump table
+            + bytes.fromhex("00010001").ljust(0x10, b"\xcc")   # the byte table, then padding
+            + bytes.fromhex("b802000000c3"))                   # a method only a vtable reaches
+    fns = scratch_pe.analyse(_program(text), [_row(0x11000, 0x11017)], linker_padding=True)
+    assert [(f.addr, f.size) for f in fns] == [(0x11000, 0x24), (0x11030, 6)]
+    assert [r for r in fns[0].relocs if r[2] is None and r[0] >= 0x18] == [(0x18, DIR32, None, 0x0E),
+                                                                          (0x1C, DIR32, None, 0x14)]
+
+
+def test_vtables_and_tail_jumps_seed_ghidra_but_a_lone_word_does_not():
+    import struct
+
+    text = b"".join(bytes.fromhex(h).ljust(0x10, b"\xcc") for h in ("e93b000000", "33c0c3", "b001c3", "c3", "c3"))
+    vtable = struct.pack("<II", 0x11010, 0x11020) + bytes(8) + struct.pack("<I", 0x11030)  # then a lone word
+    pe = _program(text, vtable)
+    # the entry, the vtable's two methods, and the function the entry tail-jumps to; not the lone word's target
+    assert scratch_xbe.function_starts(pe) == [0x11000, 0x11010, 0x11020, 0x11040]
+    assert {0x11010, 0x11020, 0x11030} <= scratch_pe.referenced(pe)
+
+
 def test_xdk_sections_are_set_aside_by_name():
     names = [".text", "XMV", "D3D", "XGRPH", "DSOUND", ".data", "XACTENG", "MYLIB"]
     assert xdklib.library_sections(names, ["XAPILIB", "XACTENG", "D3D8"]) == {"XMV", "D3D", "XGRPH", "DSOUND",

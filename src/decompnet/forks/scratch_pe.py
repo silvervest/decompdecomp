@@ -45,6 +45,11 @@ PAD = 0x90  # what Visual C++ 6 pads a function's section with (the linker pads 
 RICH_BUILDS = {8168: "6.0", 8447: "6.0", 8799: "6.0", 8966: "6.0", 9044: "6.0", 9782: "6.0", 9466: "7.0", 9955: "7.0",
                3052: "7.1", 3077: "7.1", 4035: "7.1", 6030: "7.1"}
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+MAX_FN = 0x40000  # the most of a function's surroundings analyse() reads at once: bigger than any function
+_PADDING = re.compile(rb"\x90*[\xcc\x00]*")  # between functions: Visual C++ 6's nops, then the linker's int3 or zeros
+_NOT_PADDING = re.compile(rb"[^\x90\xcc\x00]")
+_NOPS = re.compile(rb"\x90*")
+_INT3S = re.compile(rb"\xcc*")
 
 
 @dataclass
@@ -290,6 +295,19 @@ def flow_end(md, pe: PE, start: int, limit: int) -> int:
     return end
 
 
+def _flow_end(md, pe: PE, start: int, limit: int) -> int:
+    """flow_end, reading a small window first and a bigger one only when the code reaches its end: a function's
+    surroundings run to the section's end after the last start, and reading all of that for each function found
+    there was quadratic."""
+    size = 0x1000
+    while True:
+        stop = min(limit, start + size)
+        end = flow_end(md, pe, start, stop)
+        if stop >= limit or end < stop - 16:
+            return end
+        size *= 8
+
+
 def referenced(pe: PE) -> frozenset[int]:
     """Code addresses something points at the way only function starts are pointed at: `call rel32` targets, and
     words in data sections (vtables, callback tables) or pushed as immediates (callbacks). Jump tables are left out
@@ -345,10 +363,14 @@ def _mid_code(pe: PE, value: int, starts, start: int, end: int) -> bool:
     return sec is not None and sec.code and value not in starts and not start <= value < end
 
 
-def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False) -> list[Function]:
+def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False, sweep: bool = True) -> list[Function]:
     """Every function's extent, name and relocations, from Ghidra's function list.
 
     A row with `exact` (library code matched byte for byte, scratch_xbe) keeps its extent as given.
+
+    `sweep` (an import's full function list): code after the last row, to its section's end, is looked for missed
+    functions too. A caller re-analysing a few functions passes False: the last row then ends with its own code
+    and padding (else one call analysed all of a big game's .text after it, function after function).
 
     Visual C++ 6 pads a function's own section with nops (0x90), so they're part of the function. From Visual C++ 7
     on (Xbox games, PC games of 2002 on) the compiler pads nothing and the linker fills the space up to the next
@@ -384,36 +406,45 @@ def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False) -> list[
         # start that this function's own flow runs past is part of it
         while i + 1 < len(starts) and doubtful(starts[i + 1]):
             far = next((s for s in starts[i + 2:] if not doubtful(s)), sec.va + sec.size)
-            if flow_end(md, pe, start, min(far, sec.va + sec.size)) <= starts[i + 1]:
+            if _flow_end(md, pe, start, min(far, sec.va + sec.size)) <= starts[i + 1]:
                 break
             del rows[starts.pop(i + 1)]
         limit = min(starts[i + 1] if i + 1 < len(starts) else sec.va + sec.size, sec.va + sec.size)
+        if not sweep and i + 1 == len(starts):  # a few functions re-analysed: the last one's code and padding, not
+            ends = max(_flow_end(md, pe, start, limit), min(rows[start].get("end", start + 1), limit))  # all after it
+            at = pe.offset(ends)
+            limit = min(limit, ends + (_PADDING.match(pe.data, at, at + 0x100).end() - at if at is not None else 0))
+        window = min(limit, start + MAX_FN)  # what's read of the code after it (the last start: not all the rest)
         if rows[start].get("exact"):  # a library function: its size is the library object's, not a guess
-            code_end, end, entries = _tables(md, pe, start, min(rows[start]["end"], limit), limit)
+            code_end, end, entries = _tables(md, pe, start, min(rows[start]["end"], limit), window)
             end = min(rows[start]["end"], limit)
             code_end = min(code_end, end)
         else:
-            code_end = max(start + 1, min(rows[start].get("end", limit), limit), flow_end(md, pe, start, limit))
-            code_end = _whole_instructions(md, pe, start, code_end, limit)
+            code_end = max(start + 1, min(rows[start].get("end", limit), limit), _flow_end(md, pe, start, window))
+            code_end = _whole_instructions(md, pe, start, code_end, window)
             if linker_padding:  # Ghidra's body can run over the linker's int3s into a function it missed
                 code_end = start + max(1, len(pe.read(start, code_end - start).rstrip(b"\xcc")))
-            code_end, end, entries = _tables(md, pe, start, code_end, limit)
-        gap = pe.read(end, limit - end)
-        rest = gap.lstrip(b"\x90").lstrip(b"\xcc\x00")
-        if rest and not rest.strip(b"\x90\xcc\x00") == b"":
+            code_end, end, entries = _tables(md, pe, start, code_end, window)
+        # what follows, up to the next start: padding, or code Ghidra missed (found without copying the gap, which
+        # runs to the section's end after the last start: copied for every function found in it, that was quadratic)
+        off = pe.offset(end) if end < limit else None
+        stop = off + min(limit - end, max(0, sec.offset + sec.size - off)) if off is not None else 0
+        skip = _PADDING.match(pe.data, off, stop).end() if off is not None else 0
+        if off is not None and skip < stop and _NOT_PADDING.search(pe.data, skip, stop):
             # code nobody calls directly (callbacks, vtables) that Ghidra didn't make a function: one of its own,
             # as far as its own flow goes; what follows it (a run of small vtable methods) is looked at in turn
-            missed = limit - len(rest)
-            rows[missed] = {"entry": missed, "end": max(missed + 1, flow_end(md, pe, missed, limit)), "name": "",
-                            "source": "DEFAULT", "purge": 0, "convention": "__cdecl"}
+            missed = end + skip - off
+            flow = _flow_end(md, pe, missed, min(limit, missed + MAX_FN))
+            rows[missed] = {"entry": missed, "end": max(missed + 1, flow), "name": "", "source": "DEFAULT", "purge": 0,
+                            "convention": "__cdecl"}
             starts.insert(i + 1, missed)
             limit = missed
-            gap = pe.read(end, limit - end)
+            stop = off + (limit - end)
         pad = 0
-        if gap and gap.strip(b"\x90") == b"":
+        if off is not None and stop > off and _NOPS.fullmatch(pe.data, off, stop):
             end = limit  # Visual C++ 6's own padding: part of the compiled function's section too
-        elif gap and linker_padding and gap.strip(b"\xcc") == b"":
-            pad = len(gap)
+        elif off is not None and stop > off and linker_padding and _INT3S.fullmatch(pe.data, off, stop):
+            pad = stop - off
         extents[start] = (code_end, end, entries, pad)
         i += 1
 

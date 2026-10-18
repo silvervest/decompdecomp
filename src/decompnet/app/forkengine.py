@@ -25,7 +25,18 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from .. import similarity, toolchains
-from ..forks import catalog, csource, datadiff, drafts, dtksplits, ghidra, scratch_dsd, scratch_dtk, scratch_pe
+from ..forks import (
+    catalog,
+    csource,
+    datadiff,
+    drafts,
+    dtksplits,
+    ghidra,
+    scratch_dsd,
+    scratch_dtk,
+    scratch_pe,
+    scratch_xbe,
+)
 from ..forks.objdiff import ObjdiffError
 from ..forks.project import EDITABLE, STATE, ForkError, ForkProject
 from ..network import Agent, Network, NetworkError
@@ -449,10 +460,12 @@ class ForkEngine:
 
     def create_scratch(self, game: Path, *, compiler: str | None = None, log=print) -> str:
         """A GameCube, Wii, DS or PC game, from scratch: generate the community's project layout for it (dtk-template,
-        ds-decomp; for PC, decompdecomp's own from Ghidra's analysis) and open it like a fork."""
+        ds-decomp; for PC, decompdecomp's own from Ghidra's analysis) and open it like a fork. An Xbox program or disc
+        is read, then refused until Xbox projects are finished (scratch_xbe)."""
         with open(game, "rb") as f:
             head = f.read(0x1000)
-        maker = scratch_dsd if scratch_dsd.is_nds(head) else scratch_pe if scratch_pe.is_pe(head) else scratch_dtk
+        maker = scratch_dsd if scratch_dsd.is_nds(head) else scratch_pe if scratch_pe.is_pe(head) \
+            else scratch_xbe if scratch_xbe.is_xbox(game) else scratch_dtk
         info = maker.game_info(game)
         sha1 = info["sha1"] if maker is not scratch_dtk else hashlib.sha1(info["dol"]).hexdigest()
         for p in self.net.store.all("SELECT slug, config FROM projects"):

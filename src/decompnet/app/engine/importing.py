@@ -222,22 +222,23 @@ class ImportMixin:
 
     def _community_layout(self, data: bytes | Path, name: str = "") -> Path | None:
         """The file, when the game starts as a community-layout project: a GameCube/Wii program (DOL) or disc image
-        (dtk-template), a DS ROM (ds-decomp), or a Windows program (.exe, see scratch_pe). Bytes are saved to a file
-        first."""
-        from ...forks import scratch_dsd, scratch_dtk, scratch_pe
+        (dtk-template), a DS ROM (ds-decomp), a Windows program (.exe, see scratch_pe), or an Xbox program or disc
+        image (scratch_xbe). Bytes are saved to a file first."""
+        from ...forks import scratch_dsd, scratch_dtk, scratch_pe, scratch_xbe, xdvdfs
 
         head = Path(data).open("rb").read(0x1000) if isinstance(data, (str, Path)) else bytes(data[:0x1000])
         small = Path(data).read_bytes() if isinstance(data, (str, Path)) and Path(data).stat().st_size < 64 << 20 else data
-        nds, pe = scratch_dsd.is_nds(head), scratch_pe.is_pe(head)
-        if not nds and not pe and scratch_dtk.disc_kind(head) is None and not (isinstance(small, (bytes, bytearray))
-                                                                              and scratch_dtk.is_dol(small)):
+        nds, pe, xbe = scratch_dsd.is_nds(head), scratch_pe.is_pe(head), scratch_xbe.is_xbe(head)
+        xbox = xbe or xdvdfs.is_xbox_disc(Path(data) if isinstance(data, (str, Path)) else data)
+        if not nds and not pe and not xbox and scratch_dtk.disc_kind(head) is None and not (
+                isinstance(small, (bytes, bytearray)) and scratch_dtk.is_dol(small)):
             return None
         if isinstance(data, (str, Path)):
             return Path(data)
         uploads = self.workspace / ".decomp" / "uploads"
         uploads.mkdir(parents=True, exist_ok=True)
-        path = uploads / (Path(name).name or ("game.nds" if nds else "game.exe" if pe else "main.dol"
-                                              if scratch_dtk.is_dol(data) else "game.iso"))
+        path = uploads / (Path(name).name or ("game.nds" if nds else "game.exe" if pe else "default.xbe" if xbe
+                                              else "main.dol" if scratch_dtk.is_dol(data) else "game.iso"))
         path.write_bytes(data)
         return path
 

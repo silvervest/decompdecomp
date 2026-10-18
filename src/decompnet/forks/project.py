@@ -255,9 +255,10 @@ class ForkProject:
             m = self.manifest
             cmds = m.get("setup", [])
             if m.get("created") == "from scratch" and cmds:  # point at this computer's tools, not the creator's
-                from . import scratch_dsd, scratch_dtk, scratch_pe
+                from . import scratch_dsd, scratch_dtk, scratch_pe, scratch_xbe
 
-                args = {"nds": scratch_dsd, "win32": scratch_pe}.get(m.get("platform"), scratch_dtk).tool_args()
+                args = {"nds": scratch_dsd, "win32": scratch_pe, "xbox": scratch_xbe}.get(m.get("platform"),
+                                                                                       scratch_dtk).tool_args()
                 first = cmds[0]
                 keep = next((i for i, c in enumerate(first) if c.startswith("--")), len(first))
                 cmds = [[*first[:keep], *args], *cmds[1:]]

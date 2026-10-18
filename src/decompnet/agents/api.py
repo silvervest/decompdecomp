@@ -436,6 +436,10 @@ def api_tool_schemas(fork: bool = False) -> list[dict]:
                        "offsets) go to a new file. Kept only if the game still builds identically.",
                        s(path=st("file", True), at=st("function name or .text offset", True),
                          new_name=st("new file path (optional)"), data=st("e.g. .rodata:0x88 .data:0x28 (optional)"))),
+        "standins_for": ("PC and Xbox games built with link-time code generation: starting points for a unit's harness "
+                         "(stand-ins with each callee's convention, a HarnessEntry calling the unit's functions as the "
+                         "original's callers do, the declarations its source needs). Write them with edit_file.",
+                         s(what=st("a unit, its source file or one of its functions", True))),
     }
     if fork:
         defs["compile_and_diff"] = ("Write one complete function definition into its source file, build it and diff "

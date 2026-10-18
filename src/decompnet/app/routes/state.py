@@ -131,6 +131,7 @@ def register(app: App) -> None:
             return bad
         q = request.query_params
         toolchain = q.get("toolchain") or None
+        ltcg = {"1": True, "0": False}.get(q.get("ltcg") or "")  # (Xbox) link-time code generation; else detected
         scope = q.get("scope") or None  # what the project covers, where its console sets library code aside
         if scope not in (None, *SCOPES):
             return fail(ValueError(f"a project covers the game's own code or the whole program, not {scope!r}"))
@@ -168,7 +169,8 @@ def register(app: App) -> None:
 
         def work(log):
             try:
-                slug = net.import_rom(game, toolchain=toolchain, confirmed=True, name=name, log=log, scope=scope)
+                slug = net.import_rom(game, toolchain=toolchain, confirmed=True, name=name, log=log, ltcg=ltcg,
+                                      scope=scope)
             finally:
                 if uploaded:
                     shutil.rmtree(game.parent, ignore_errors=True)

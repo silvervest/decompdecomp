@@ -20,6 +20,10 @@ objdiff, as decompdecomp runs it, doesn't compare what relocations point at. So 
 address mapping check per function: relocation by relocation, the original's target address and ours are paired,
 and the pairs must form a one-to-one mapping. A function whose code reads one global where the original reads two
 (or swaps two callees used twice each) is 100% in objdiff but fails here, and isn't a match.
+It also checks what each reference stands for (`data` in OUT.ltcg.json): a D_<address> or func_<address> name, or a
+global annotated `// GLOBAL: 0x<address> [map symbol]` before its declaration, says which original address it means,
+and must be the address the original refers to there; floats and strings the compiler made are compared by value.
+That catches two globals used once each and swapped, which keeps the mapping one to one.
 Needs capstone (decompdecomp's Python has it). Made by decompdecomp.
 """
 
@@ -48,6 +52,10 @@ DIR32, REL32 = delink.DIR32, delink.REL32
 FUNCTION = re.compile(r"//[ \t]*FUNCTION:[ \t]*(0x[0-9a-fA-F]+)(?:[ \t]+(?!\(|NONMATCHING\b)(\S+))?[^\n]*\n"
                       r"((?:[ \t]*//[^\n]*\n|[ \t]*\n)*)([^\n{;]*\()")
 TARGET = re.compile(r"//[ \t]*TARGET[ \t]+(0x[0-9a-fA-F]+)[ \t]+(\S+)")
+# "// GLOBAL: 0x<va> [map symbol]" then a declaration or definition of the global at that original address
+GLOBAL = re.compile(r"//[ \t]*GLOBAL:[ \t]*(0x[0-9a-fA-F]+)(?:[ \t]+(\S+))?[^\n]*\n"
+                    r"((?:[ \t]*//(?![ \t]*GLOBAL:)[^\n]*\n|[ \t]*\n)*)((?![ \t]*//)[^\n;={(\[]*)?")
+LITERAL = re.compile(r"__real@([0-9a-fA-F]{8}|[0-9a-fA-F]{16})$")
 MAP_LINE = re.compile(r"^\s*([0-9a-fA-F]{4}):([0-9a-fA-F]{8})\s+(\S+)\s+([0-9a-fA-F]{8})\s")
 
 
@@ -99,6 +107,27 @@ class Image:
         return self.base <= va < self.base + self.size
 
 
+class Program:
+    """The original program (a PE .exe or an Xbox XBE): its bytes at an address, for comparing literal values."""
+
+    def __init__(self, data: bytes):
+        self.data, self.sections = data, []  # (va, size in the file, file offset)
+        if data[:4] == b"XBEH":
+            base, count, at = struct.unpack_from("<I", data, 0x104)[0], *struct.unpack_from("<II", data, 0x11C)
+            for i in range(min(count, 256)):
+                _, va, _, offset, raw = struct.unpack_from("<5I", data, at - base + 56 * i)
+                self.sections.append((va, raw, offset))
+        elif data[:2] == b"MZ":
+            img = Image(data)
+            self.sections = [(va, raw_size, raw) for _, va, _, raw, raw_size in img.sections]
+
+    def read(self, va: int, n: int) -> bytes | None:
+        for start, size, offset in self.sections:
+            if start <= va and va + n <= start + size:
+                return self.data[offset + va - start:offset + va - start + n]
+        return None
+
+
 def map_symbols(path: Path) -> dict[str, int]:
     """Every symbol of the linker's map (public and static) -> its address."""
     out = {}
@@ -138,6 +167,65 @@ def annotations(paths: list[Path]) -> tuple[dict[int, str], list[str]]:
                 continue
             out.setdefault(int(va, 16), sym)
     return out, problems
+
+
+def global_annotations(paths: list[Path]) -> dict[str, int]:
+    """Map symbol (or the declared name) -> original address, from `// GLOBAL: 0x<address> [symbol]` before a
+    global's declaration: for globals with real names, which (unlike D_<address>) don't say where they are."""
+    out = {}
+    for p in paths:
+        for va, sym, _, decl in GLOBAL.findall(p.read_text(encoding="utf-8", errors="replace")):
+            names_in = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", decl)
+            if sym or names_in:
+                out.setdefault(sym or names_in[-1], int(va, 16))
+    return out
+
+
+def global_symbol(syms: dict[str, int], name: str) -> str | None:
+    """The map symbol of a global declared as `name`: `name` itself, its C name `_name` or its C++ name `?name@...`."""
+    if name in syms:
+        return name
+    cand = [s for s in syms if s == f"_{name}" or s.startswith(f"?{name}@")]
+    return cand[0] if len(cand) == 1 else None
+
+
+def _show(data: bytes, name: str) -> str:
+    if name.startswith("__real@") and len(data) == 4:
+        return f"{struct.unpack('<f', data)[0]!r}f"
+    if name.startswith("__real@") and len(data) == 8:
+        return f"{struct.unpack('<d', data)[0]!r}"
+    if name.startswith("??_C@_1"):
+        return "L" + json.dumps(data.decode("utf-16-le", "replace").rstrip("\0"))
+    return json.dumps(data.rstrip(b"\0").decode("latin-1"))
+
+
+def data_check(fn: dict, exe: bytes, program: Program, ours: list[tuple[int, int, int]], lo: int, hi: int,
+               claim, literal) -> dict:
+    """What each reference stands for, against what the original's reference at the same place is. objdiff
+    passes a function that reads one global where the original reads another (each used once, so the address
+    mapping stays one to one), but our references often say which original address they mean: a D_<address> or
+    func_<address> name, a `// GLOBAL:` annotation, one of the unit's own functions. Compiler literals (floats,
+    strings) are compared by value. `claim(our address)` -> (name, the original address it stands for) or None;
+    `literal(our address)` -> (name, its bytes) or None. References that say neither aren't checked."""
+    orig = original_targets(fn, exe)
+    checked, wrong = 0, []
+    for off, _, value in ours:
+        theirs = orig.get(off)
+        if theirs is None or theirs[1] is None or lo <= value < hi:
+            continue
+        a = theirs[1]
+        if (c := claim(value)) is not None:
+            checked += 1
+            if c[1] != a:
+                wrong.append(f"+0x{off:X}: yours refers to {c[0]} (0x{c[1]:X}) where the original refers to 0x{a:X}")
+        elif (lit := literal(value)) is not None:
+            checked += 1
+            got = program.read(a, len(lit[1]))
+            if got != lit[1]:
+                was = _show(got, lit[0]) if got is not None else "nothing it can read"
+                wrong.append(f"+0x{off:X}: yours loads {_show(lit[1], lit[0])} ({lit[0]}) where the original loads {was} "
+                             f"(0x{a:X})")
+    return {"data_checked": checked, "data": wrong}
 
 
 def find_symbol(syms: dict[str, int], want: str) -> tuple[str | None, str]:
@@ -307,6 +395,43 @@ def main() -> None:
             s = wanted.get(m.group(1) + b"_" + m.group(2).upper(), s.encode()).decode()
         return s, va - a
 
+    program = Program(exe)
+    orig_of = {sva: a for a, (_, sva) in found.items()}  # our copy of a unit function -> its original address
+    annotated = {}
+    for name, va in global_annotations(sources).items():
+        if (sym := global_symbol(syms, name)) is not None:
+            annotated[sym] = va
+
+    def claim(va: int) -> tuple[str, int] | None:
+        if va in orig_of:
+            return functions[orig_of[va]]["name"], orig_of[va]
+        i = bisect.bisect_right(addrs, va) - 1
+        if i < 0:
+            return None
+        a, s = by_addr[i]
+        delta = va - a
+        if delta >= 0x1000 or img.section(a) is not img.section(va):
+            return None
+        shown = s if not delta else f"{s}+0x{delta:X}"
+        if s in annotated:
+            return shown, annotated[s] + delta
+        m = names.REF.search(s.encode())
+        return (shown, int(m.group(2), 16) + delta) if m else None
+
+    def literal(va: int) -> tuple[str, bytes] | None:
+        i = bisect.bisect_right(addrs, va) - 1
+        if i < 0 or by_addr[i][0] != va:
+            return None
+        s = by_addr[i][1]
+        if (m := LITERAL.match(s)) is not None:
+            return s, bytes.fromhex(m.group(1))[::-1]
+        if s.startswith("??_C@_0") or s.startswith("??_C@_1"):
+            raw, wide = img.read(va, 512), s.startswith("??_C@_1")
+            step = 2 if wide else 1
+            end = next((k for k in range(0, len(raw) - step + 1, step) if raw[k:k + step] == b"\0" * step), None)
+            return None if end is None else (s, raw[:end + step])
+        return None
+
     cuts, report = [], {"unit": unit, "dll": dll, "functions": {}, "problems": problems}
     for addr in sorted(found):
         sym, start = found[addr]
@@ -316,6 +441,7 @@ def main() -> None:
         cuts.append({"name": fn["name"], "addr": addr, "offset": img.offset(start), "size": end - start,
                      "relocs": relocs})
         check = mapping(fn, exe, targets, start, end)
+        check |= data_check(fn, exe, program, targets, start, end, claim, literal)
         report["functions"][fn["name"]] = {"orig": f"0x{addr:08X}", "ours": f"0x{start:08X}", "symbol": sym,
                                            "size": end - start, "orig_size": fn["size"], "notes": notes, **check}
     data = delink.coff(cuts, img.data)
@@ -328,6 +454,9 @@ def main() -> None:
         print(f"{unit}: {p}")
     for n, c in bad.items():
         print(f"{unit}: {n}: addresses map inconsistently: {'; '.join(c[:4])}")
+    for n, f in report["functions"].items():
+        if f["data"]:
+            print(f"{unit}: {n}: refers to other data than the original: {'; '.join(f['data'][:4])}")
 
 
 if __name__ == "__main__":

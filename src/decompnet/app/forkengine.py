@@ -25,8 +25,8 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from .. import arch, consoles, similarity, toolchains
-from ..forks import csource, datadiff, drafts, dtksplits, ghidra, objdiff
-from ..forks.objdiff import ObjdiffError
+from ..forks import convention, csource, datadiff, drafts, dtksplits, ghidra, objdiff, standins
+from ..forks.objdiff import MappingConflict, ObjdiffError
 from ..forks.project import EDITABLE, GAME, PROGRAM, SCOPES, STATE, ForkError, ForkProject
 from ..hostenv import NO_WINDOW
 from ..network import GAME_CODE, Agent, Network, NetworkError, move_on_brief
@@ -584,11 +584,12 @@ class ForkEngine:
             self.net._event(db, pid, None, "fork", event)
 
     def create_scratch(self, game: Path, console: consoles.Console, *, compiler: str | None = None, log=print,
-                       scope: str | None = None) -> str:
-        """A game of a PROJECT-mode console (GameCube, Wii, PC, DS), from scratch: the console generates the
-        community's kind of project for it (Console.create_project: dtk-template; for PC, decompdecomp's own from
-        Ghidra's analysis; for DS, ds-decomp's), opened like a fork. `scope`: what the project covers (SCOPES), for
-        a console whose import sets library code aside (Console.sets_aside); kept in the project's manifest."""
+                       scope: str | None = None, **options) -> str:
+        """A game of a PROJECT-mode console (GameCube, Wii, PC, DS, Xbox), from scratch: the console generates the
+        community's kind of project for it (Console.create_project: dtk-template; for PC and Xbox, decompdecomp's own
+        from Ghidra's analysis; for DS, ds-decomp's), opened like a fork. `scope`: what the project covers (SCOPES),
+        for a console whose import sets library code aside (Console.sets_aside); kept in the project's manifest.
+        `options`: the user's import choices the console takes (Xbox: ltcg)."""
         if scope is not None and scope not in SCOPES:
             raise NetworkError(f"a project covers the game's own code ({GAME!r}) or the whole program, not {scope!r}")
         scoped = {"scope": scope or GAME} if console.sets_aside else {}
@@ -601,7 +602,7 @@ class ForkEngine:
         slug = self._free_slug(_slug(f"{info['title']} {info['id']}" if info.get("kind") != "dol" else info["title"]))
         dest = self.net.workspace / slug
         try:
-            facts = console.create_project(dest, game, compiler=compiler, log=log, **scoped)
+            facts = console.create_project(dest, game, compiler=compiler, log=log, **scoped, **options)
             if scoped:  # (before the first measuring, which reads it)
                 ForkProject(dest).update_manifest(**scoped)
         except BaseException:
@@ -1922,7 +1923,7 @@ class ForkEngine:
         try:
             d = fp.diff(unit, meta.get("symbol") or fn["name"])
             pct = ("not in your build yet" if d.match_percent is None else
-                   "every instruction matches, but loaded constants differ" if d.literals else
+                   d.why_not() if d.literals else
                    f"{percent_text(d.match_percent)} match")
             asm = d.target_asm().splitlines()
             if len(asm) > 500:
@@ -1930,6 +1931,7 @@ class ForkEngine:
             lines += [f"current state: {pct}", "", "### Target assembly", "```asm", *asm, "```"]
             if cfg.get("origin") == "scratch":
                 lines += self._data_used(proj, d.refs)
+            lines += self._convention_brief(fp, meta, fn)
             if d.literals:
                 lines += ["", d.literals_note()]
             elif d.match_percent is not None and not d.matched:
@@ -1982,6 +1984,52 @@ class ForkEngine:
                       "with any #include \"...\", prototypes or #pragma lines it needs. Structs, globals and helper "
                       "functions go in with edit_file."]
         return "\n".join(lines)
+
+    def standins_for(self, agent: Agent | None, slug: str, what: str) -> str:
+        """Stand-in and driver skeletons for a unit of a PC or Xbox project (forks/standins.py): a unit, its source
+        file or one of its functions. What agents write into harness/ for a game built with link-time code
+        generation."""
+        _, fp, _ = self.get(slug)
+        manifest = fp.manifest or {}
+        if consoles.get(manifest.get("platform")).arch != "x86" or manifest.get("created") != "from scratch":
+            raise NetworkError("standins_for is for PC and Xbox projects made from scratch (their harness/ files)")
+        try:
+            prog = convention.load(fp.root, manifest)
+        except (OSError, KeyError, ValueError) as e:
+            raise NetworkError(f"the project's functions.json or program can't be read: {e}") from None
+        name = what.strip()
+        units = {fn["unit"] for fn in prog.functions.values()}
+        unit = next((u for u in (name, name.rsplit("/", 1)[-1], Path(name).stem) if u in units), None)
+        if unit is None and (addr := prog.find(name)) is not None:
+            unit = prog.functions[addr]["unit"]
+        if unit is None:
+            try:
+                row = self._fn(slug, name)
+            except NetworkError:
+                raise NetworkError(f"{what!r} isn't a unit, source file or function of this project") from None
+            if (addr := prog.find(self._meta(row).get("symbol") or row["name"])) is None:
+                raise NetworkError(f"{what!r} isn't in config/{manifest['version']}/functions.json")
+            unit = prog.functions[addr]["unit"]
+        return standins.render(prog, unit)
+
+    @staticmethod
+    def _convention_brief(fp: ForkProject, meta: dict, fn) -> list[str]:
+        """For a brief, in a project built with link-time code generation: how the original passes the function its
+        arguments (forks/convention.py), which the driver and stand-ins in harness/ must reproduce."""
+        manifest = fp.manifest or {}
+        if not manifest.get("ltcg"):
+            return []
+        try:
+            prog = convention.load(fp.root, manifest)
+            addr = prog.find(meta.get("symbol") or fn["name"])
+            if addr is None:
+                return []
+            found = convention.evidence(prog, addr)
+        except (OSError, KeyError, ValueError, ForkError):
+            return []
+        return ["", "### Calling convention in the original (link-time code generation: the linker picked it for "
+                "its callers; harness/ must call it the same way, standins_for writes a starting point)",
+                *[f"- {line}" if not line.startswith("  ") else line for line in found]]
 
     def _twin_brief(self, proj, fn) -> list[str]:
         """For a brief: the matched function with the same code (relocations aside), and its code made into this
@@ -2290,7 +2338,8 @@ class ForkEngine:
             if was_matched:  # a rewrite of a matched function must keep matching
                 if not matched:
                     undo()
-                    why = "loads other constants" if d.literals else f"is {percent_text(pct)}"
+                    why = (("refers to other globals or callees" if "refers" in d.why_not() else "loads other constants")
+                           if d.literals else f"is {percent_text(pct)}")
                     return {"text": f"❌ {fn['name']} already matches; your version {why}, so the matching one was "
                                     "kept. Call claim_function for a function that still needs work.",
                             "score": score, "matched": False}
@@ -3006,7 +3055,8 @@ class ForkEngine:
             return {"kind": None, "rows": None, "error": f"objdiff: {e}"}
         if d.match_percent is None:
             return {"kind": None, "rows": None}
-        problems = [f"a loaded constant differs: {m.describe()}" for m in d.literals]
+        problems = [f"{'a reference differs' if isinstance(m, MappingConflict) else 'a loaded constant differs'}: "
+                    f"{m.describe()}" for m in d.literals]
         problems += [f"refers to `{mine}` where the original refers to `{orig}`" for orig, mine in d.renamed]
         return {"kind": "matched" if fn["status"] == "matched" else "latest", "rows": [list(r) for r in d.rows],
                 "score": None, "percent": _floor_pct(d.match_percent, d.matched), "problems": problems}

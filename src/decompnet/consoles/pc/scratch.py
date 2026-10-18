@@ -687,7 +687,8 @@ def _run(cmd: list[str], root: Path, what: str, log) -> None:
         raise ForkError(f"{what} failed:\n{tail[-ERROR_TAIL:]}")
 
 
-TEMPLATE_TOOLS = ("configure.py", "delink.py", "names.py", "ltcg.py", "dll2coff.py", "export.py", "ninja_syntax.py")
+TEMPLATE_TOOLS = ("configure.py", "delink.py", "names.py", "ltcg.py", "dll2coff.py", "export.py", "ninja_syntax.py",
+                  "cldeps.py", "compile.py")
 SETTINGS = ("MSVC_VERSION", "CL_FLAGS", "LTCG")  # configure.py's per-game settings, kept when it's refreshed
 
 

@@ -335,6 +335,56 @@ def cut(md, img: Image, start: int, end: int, name_of) -> tuple[list, list[str],
     return relocs, notes, targets
 
 
+def same_constants(fn: dict, exe: bytes, code: bytes, relocs: list) -> tuple[list, list[int]]:
+    """Our relocations plus the original's where it relocates a field that ours holds as the very same number: a
+    constant the original's delinker took for an address (Xbox programs load at 0x10000, so struct offsets like
+    `cmp eax, [ecx+0xE6C80]`, masks and small immediates fall inside the image; in the harness DLL, at 0x10000000,
+    they are plain numbers). An address our link made can't equal the original's, so equal bytes with no base
+    relocation here mean the original's field is that number too. Both sides then carry the same relocation, as
+    objdiff needs; the export resolves it to the same number. Returns (relocations, the offsets taken over)."""
+    taken = [o for o, *_ in relocs]
+    added = []
+    for off, rtype, name, addend in fn["relocs"]:
+        if rtype != DIR32 or name is None or off + 4 > len(code) or any(abs(o - off) < 4 for o in taken):
+            continue
+        if code[off:off + 4] == exe[fn["offset"] + off:fn["offset"] + off + 4]:
+            added.append((off, DIR32, name, addend))
+            taken.append(off)
+    return sorted(relocs + added), sorted(o for o, *_ in added)
+
+
+ADDRESS_NAME = re.compile(r"^[_@]?(?:D|func)_([0-9A-Fa-f]{8})(?:@\d+)?$")  # export.py's: the address it means
+
+
+def in_original_terms(md, code: bytes, start: int, fn: dict, exe: bytes, relocs: list,
+                      annotated: dict[str, int]) -> list:
+    """Our relocations, those after the first in an instruction written as the original's (name and addend).
+    objdiff relates one relocation per instruction and compares the other fields' bytes, which hold the addend:
+    `mov dword ptr [g_w+0x28], offset g_x+0x4C` against the original's `[D_003FE4E0], offset D_0073A1D0` differs
+    in the immediate even when both mean the same addresses. Which addresses they mean is the mapping and data
+    checks' job, so a field is rewritten only where the export would take it for the original's anyway: a name
+    that says its address (D_/func_<address>, a `// GLOBAL:`) must say the original's, other names pair by place."""
+    orig = {off: (name, addend) for off, rtype, name, addend in fn["relocs"] if rtype == DIR32 and name is not None}
+    ends = sorted((ins.address - start, ins.address - start + ins.size) for ins in md.disasm(code, start))
+    out, last = [], None
+    for r in relocs:
+        off, rtype, name, addend = r
+        k = bisect.bisect_right(ends, (off, 1 << 30)) - 1
+        span = ends[k] if k >= 0 and ends[k][0] <= off < ends[k][1] else None
+        first, last = span is None or span != last, span
+        if first or rtype != DIR32 or name is None or off not in orig:
+            out.append(r)
+            continue
+        want = struct.unpack_from("<I", exe, fn["offset"] + off)[0]
+        m = ADDRESS_NAME.match(name)
+        said = int(m.group(1), 16) if m else annotated.get(name)
+        if said is not None and (said + addend) & 0xFFFFFFFF != want:
+            out.append(r)  # it says another address: left for the data check (and the export) to find
+            continue
+        out.append((off, rtype, *orig[off]))
+    return out
+
+
 def original_targets(fn: dict, exe: bytes) -> dict[int, tuple[int, int | None]]:
     """offset -> (type, the original's target address; None inside the function) of its relocations."""
     out = {}
@@ -345,20 +395,27 @@ def original_targets(fn: dict, exe: bytes) -> dict[int, tuple[int, int | None]]:
     return out
 
 
-def mapping(fn: dict, exe: bytes, ours: list[tuple[int, int, int]], lo: int, hi: int) -> dict:
+def mapping(fn: dict, exe: bytes, ours: list[tuple[int, int, int]], lo: int, hi: int,
+            skip: set[int] = frozenset(), folded=None) -> dict:
     """The harness's address check: relocation by relocation the original's target and ours make a pair; one
     original address must always pair with the same one of ours and the other way round. References inside the
-    function (jump tables) are compared by offset."""
-    orig = original_targets(fn, exe)
+    function (jump tables) are compared by offset. `skip`: the original's relocations that are constants in both
+    (same_constants). `folded(original, ours, ours too)`: the original's address is one vtable that the game's
+    whole-program link folded (identical COMDAT folding) where ours keeps two, which a harness link can't
+    reproduce: a note ("folded"), not a conflict, as the LTCG harness has it."""
+    orig = {off: t for off, t in original_targets(fn, exe).items() if off not in skip}
     fwd: dict[int, int] = {}
     back: dict[int, int] = {}
-    conflicts, unpaired, pairs = [], [], 0
+    conflicts, unpaired, pairs, notes = [], [], 0, []
     for off, rtype, value in ours:
         theirs = orig.pop(off, None)
         if theirs is None:
             unpaired.append(f"+0x{off:X}: a relocation in yours only")
             continue
         a, b = theirs[1], (None if lo <= value < hi else value)
+        if a is not None and value == lo:  # a callback or a recursive reference: ours names the function itself
+            conflicts.append(f"+0x{off:X}: yours refers to this function itself, the original to 0x{a:X}")
+            continue
         if (a is None) != (b is None):
             conflicts.append(f"+0x{off:X}: {'inside' if a is None else 'outside'} the function in the original, "
                              f"{'inside' if b is None else 'outside'} it in yours")
@@ -367,11 +424,37 @@ def mapping(fn: dict, exe: bytes, ours: list[tuple[int, int, int]], lo: int, hi:
             continue
         pairs += 1
         if fwd.setdefault(a, b) != b:
-            conflicts.append(f"orig 0x{a:X} -> yours 0x{fwd[a]:X} and 0x{b:X}")
+            text = f"orig 0x{a:X} -> yours 0x{fwd[a]:X} and 0x{b:X}"
+            (notes if folded is not None and folded(a, fwd[a], b) else conflicts).append(text)
         if back.setdefault(b, a) != a:
             conflicts.append(f"yours 0x{b:X} <- orig 0x{back[b]:X} and 0x{a:X}")
     unpaired += [f"+0x{off:X}: a relocation in the original only" for off in sorted(orig)]
-    return {"pairs": pairs, "conflicts": sorted(set(conflicts)), "unpaired": unpaired}
+    return {"pairs": pairs, "conflicts": sorted(set(conflicts)), "unpaired": unpaired, "folded": sorted(set(notes))}
+
+
+def original_vtables(config: Path) -> set[int]:
+    """The original's vtable addresses a project lists beside functions.json: vtables.json (a list of addresses,
+    numbers or "0x..." strings) or vtables.csv (the address in the first column, a header line allowed)."""
+    out: set[int] = set()
+    js, csv = config.with_name("vtables.json"), config.with_name("vtables.csv")
+    if js.is_file():
+        out.update(int(v, 0) if isinstance(v, str) else int(v) for v in json.loads(js.read_text(encoding="utf-8")))
+    if csv.is_file():
+        for line in csv.read_text(encoding="utf-8", errors="replace").splitlines():
+            head = line.split(",", 1)[0].strip()
+            if re.fullmatch(r"0[xX][0-9a-fA-F]+|[0-9]+", head):
+                out.add(int(head, 0))
+    return out
+
+
+def vtable_fold(listed: set[int], starts: set[int], exe_word, our_name):
+    """folded() for mapping(): both of ours are vtables (MSVC names them ??_7Class@@6B@) and the original's is
+    one, by the project's list or because its first word points at one of the game's functions."""
+    def folded(a: int, b1: int, b2: int) -> bool:
+        if not all(our_name(b)[0].startswith("??_7") and our_name(b)[1] == 0 for b in (b1, b2)):
+            return False
+        return a in listed or exe_word(a) in starts
+    return folded
 
 
 def main() -> None:
@@ -471,15 +554,25 @@ def main() -> None:
             return None if end is None else (s, raw[:end + step])
         return None
 
+    def word(va: int) -> int | None:
+        raw = program.read(va, 4)
+        return None if raw is None else struct.unpack("<I", raw)[0]
+
+    folded = vtable_fold(original_vtables(Path(config)), set(unit_of), word, name_of)
     cuts, report = [], {"unit": unit, "dll": dll, "functions": {}, "problems": problems}
     for addr in sorted(found):
         sym, start = found[addr]
         end = extent(img, start, starts)
         relocs, notes, targets = cut(md, img, start, end, name_of)
         fn = functions[addr]
+        code = img.read(start, end - start)
+        relocs, constants = same_constants(fn, exe, code, relocs)
+        relocs = in_original_terms(md, code[:code_end(md, img, start, end) - start], start, fn, exe, relocs,
+                                   annotated)
         cuts.append({"name": fn["name"], "addr": addr, "offset": img.offset(start), "size": end - start,
                      "relocs": relocs})
-        check = mapping(fn, exe, targets, start, end)
+        check = mapping(fn, exe, targets, start, end, skip=set(constants), folded=folded)
+        check["constants"] = [f"+0x{o:X}" for o in constants]
         check |= data_check(fn, exe, program, targets, start, end, claim, literal, bounds(md, img, start, end))
         report["functions"][fn["name"]] = {"orig": f"0x{addr:08X}", "ours": f"0x{start:08X}", "symbol": sym,
                                            "size": end - start, "orig_size": fn["size"], "notes": notes, **check}

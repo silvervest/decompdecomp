@@ -386,11 +386,26 @@ def compiled_functions(objdiff: Path | None) -> dict[str, tuple]:
         if not path.is_file():
             continue
         sections, symbols = read_coff(path.read_bytes())
+        refused = judged_not_matching(path)
         for sym in symbols.values():
+            if sym.name in refused:
+                continue
             if sym.storage == 2 and sym.section > 0 and sym.value == 0 and \
                     sections[sym.section - 1].name.startswith(".text"):
                 out.setdefault(sym.name, (sections[sym.section - 1], symbols, sym.section))
     return out
+
+
+def judged_not_matching(obj: Path) -> set[str]:
+    """Functions of an LTCG unit's object that its address mapping or data check fails (dll2coff's <obj>.ltcg.json):
+    their bytes and relocations can agree with the original's while one refers to another function or global (a
+    callback naming the wrong function), which only those checks see. The judge doesn't count them as matched, so
+    the export keeps the original's code for them too."""
+    try:
+        side = json.loads(obj.with_suffix(".ltcg.json").read_text(encoding="utf-8")).get("functions") or {}
+    except (OSError, ValueError):
+        return set()
+    return {name for name, f in side.items() if f.get("conflicts") or f.get("data")}
 
 
 def same_code(prog: Program, fn: dict, sec: ObjSection) -> bool:

@@ -55,7 +55,15 @@ Link-time code generation (LTCG)
   registers it saves, and a few call sites with what they load just before the call.
 - `standins_for(unit)` writes a starting point for a unit's harness from the original's references: stand-ins for
   the data and functions it uses from elsewhere (each with its convention), a HarnessEntry with the call sites of
-  each of the unit's functions, and the declarations its source needs. Write them with edit_file, then shape them.
+  each of the unit's functions, the declarations its source needs, and the structs and classes its functions and
+  callees look like member functions of (with their fields). Write them with edit_file, then shape them.
+- Member functions under LTCG: `this` can arrive in any register (Accum::Add gets it in esi). The register is the
+  linker's choice, not the source's, so write a member function when the brief says the function is one
+  ("`this` arrives in esi: it's the base of the fields this function uses"); it still matches. The linker moves a
+  free function's pointer argument into a register the same way, so the code alone can't always tell a member
+  function from a free function taking a pointer: prefer the member function when its struct has other member
+  functions (`get_class`), and a free function when its name or callers say so. A function that uses two registers
+  at the same offsets (`Dot(a, b)`) is a function of two objects: the brief says "Two objects alike".
 - A unit is linked in harness mode once its driver `harness/<unit>.drv.cpp` defines
   `extern "C" __declspec(dllexport) void HarnessEntry(...)`:
   - the driver calls the unit's functions the way the original's call sites do: look at a caller's code right

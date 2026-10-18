@@ -26,7 +26,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from .. import arch, consoles, similarity, toolchains
-from ..forks import convention, csource, datadiff, drafts, dtksplits, ghidra, objdiff, standins
+from ..forks import convention, csource, datadiff, drafts, dtksplits, ghidra, methods, objdiff, standins
 from ..forks.objdiff import MappingConflict, ObjdiffError
 from ..forks.project import EDITABLE, GAME, PROGRAM, SCOPES, STATE, ForkError, ForkProject
 from ..hostenv import NO_WINDOW
@@ -2216,6 +2216,7 @@ class ForkEngine:
             if cfg.get("origin") == "scratch":
                 lines += self._data_used(proj, d.refs)
             lines += self._convention_brief(fp, meta, fn)
+            lines += self._method_brief(fp, meta, fn)
             if d.literals:
                 lines += ["", d.literals_note()]
             elif d.match_percent is not None and not d.matched:
@@ -2318,9 +2319,83 @@ class ForkEngine:
             found = convention.evidence(prog, addr)
         except (OSError, KeyError, ValueError, ForkError):
             return []
+        try:
+            objs = methods.recover(prog, True)
+        except Exception:  # a heuristic: it never stands between an agent and the function
+            logging.getLogger("decompdecomp").exception("finding member functions failed")
+            objs = None
+        if objs is not None and addr in objs.of:
+            g = objs.of[addr]
+            found.insert(1, f"`this` arrives in {g.methods[addr]}: it's the base of the fields this function uses, "
+                            f"so it looks like a member function of {g.keyword} {g.name} (below); declare it as one "
+                            f"and the linker still passes `this` there")
         return ["", "### Calling convention in the original (link-time code generation: the linker picked it for "
                 "its callers; harness/ must call it the same way, standins_for writes a starting point)",
                 *[f"- {line}" if not line.startswith("  ") else line for line in found]]
+
+    @staticmethod
+    def _objects(fp: ForkProject):
+        """(the program, its member functions and object types (forks/methods.py), whether it's LTCG) for a PC or
+        Xbox project made from scratch, or None."""
+        manifest = fp.manifest or {}
+        if consoles.get(manifest.get("platform")).arch != "x86":
+            return None
+        try:
+            prog = convention.load(fp.root, manifest)
+        except (OSError, KeyError, ValueError, ForkError):
+            return None
+        ltcg = bool(manifest.get("ltcg"))
+        return prog, methods.recover(prog, ltcg), ltcg
+
+    @classmethod
+    def _method_brief(cls, fp: ForkProject, meta: dict, fn) -> list[str]:
+        """For a brief: whether the function looks like a member function, of which struct or class, and how to
+        write it (an agent wrote Accum::Add as a free function taking an Accum * when nothing said so)."""
+        try:
+            found = cls._objects(fp)
+            if found is None:
+                return []
+            prog, objs, ltcg = found
+            addr = prog.find(meta.get("symbol") or fn["name"])
+            return methods.brief(prog, objs, addr, ltcg) if addr is not None else []
+        except Exception:  # a heuristic: it never stands between an agent and the function
+            logging.getLogger("decompdecomp").exception("finding member functions failed")
+            return []
+
+    def get_class(self, slug: str, what: str = "") -> str:
+        """The structs and classes found in a PC or Xbox program's code (forks/methods.py): all of them, or the one
+        a function, vtable or global object belongs to."""
+        _, fp, _ = self.get(slug)
+        found = self._objects(fp)
+        if found is None:
+            raise NetworkError("get_class reads PC and Xbox projects made from scratch (and MIPS ROM projects)")
+        prog, objs, _ = found
+        if not objs.groups:
+            return ("No member functions found: no function uses a register parameter as the base of field accesses, "
+                    "and no constructor stores a vtable.")
+        what = what.strip()
+        if not what:
+            return (f"{len(objs.groups)} structs and classes, found from functions that use `this` as the base of "
+                    f"field accesses (most functions first; get_class(function, vtable or D_ object) has one's fields, "
+                    f"functions and a declaration to start from):\n"
+                    + "\n".join(f"- {g.keyword} {g.name}: {len(g.methods)} member functions, {len(g.fields)} fields "
+                                f"seen, at least 0x{g.size_seen():X} bytes; {g.why[0]}" for g in objs.groups[:60]))
+        addr = prog.find(what)
+        if addr is None and (m := re.search(r"([0-9A-Fa-f]{5,8})(?![0-9A-Fa-f])", what)):
+            addr = int(m.group(1), 16)
+        if addr is None:
+            try:
+                row = self._fn(slug, what)
+                addr = prog.find(self._meta(row).get("symbol") or row["name"])
+            except NetworkError:
+                addr = None
+        g = objs.find(addr) if addr is not None else None
+        if g is None:
+            if addr is not None and addr in objs.ambiguous:
+                return "\n".join(methods.brief(prog, objs, addr, False)[1:])
+            raise NetworkError(f"`{what}` isn't a member function, vtable or global object of the {len(objs.groups)} "
+                               f"structs and classes found in this program's code: get_class() lists them")
+        return methods.describe(prog, g, focus=addr)
 
     def _twin_brief(self, proj, fn) -> list[str]:
         """For a brief: the matched function with the same code (relocations aside), and its code made into this

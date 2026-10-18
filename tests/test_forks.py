@@ -462,3 +462,32 @@ def test_c_code_going_into_a_cpp_file_gets_c_linkage(tmp_path, monkeypatch):
     assert net.forks.c_linkage({"root": str(tmp_path)}, row("fn_1_1", "c"), row("fn_1_BB34", "b"), source) is None  # C++ to C++
     static = source.replace("int fn_1_BB34", "static int fn_1_BB34")
     assert net.forks.c_linkage({"root": str(tmp_path)}, row("fn_1_1EE74", "a"), row("fn_1_BB34", "b"), static) is None
+
+
+def test_progress_counts_the_games_own_code_with_middleware_set_aside_by_range(tmp_path):
+    from decompnet.app.forkengine import _set_aside
+    from decompnet.forks import objdiff
+    from decompnet.forks.project import ForkProject
+
+    conf = tmp_path / "config" / "v"
+    conf.mkdir(parents=True)
+    fns = [{"name": f"_func_{a:08X}", "addr": a, "size": 0x10} for a in (0x11000, 0x11010, 0x200000, 0x200010)]
+    (conf / "functions.json").write_text(json.dumps({"units": {"game": fns[:2], "rw": fns[2:3], "lib": fns[3:]}}))
+    (conf / "set_aside.json").write_text(json.dumps({
+        "_func_00200010": "library code (d3d8.lib)",  # what an import writes: symbol -> why
+        "ranges": [{"from": "0x200000", "to": "0x200010", "why": "RenderWare 3.6"}]}))
+    (tmp_path / ".decomp.wtf.json").write_text(json.dumps({"version": "v", "platform": "pc"}))
+    aside = _set_aside(ForkProject(tmp_path))  # found beside functions.json, even without the manifest naming it
+    assert aside == {"_func_00200010": "library code (d3d8.lib)", "_func_00200000": "RenderWare 3.6"}
+    rep = {"measures": {"total_functions": 4, "matched_functions": 2, "total_code": "64", "matched_code": "32",
+                        "matched_code_percent": 50.0},
+           "units": [{"name": "game", "functions": [{"name": "_func_00011000", "size": "16", "fuzzy_match_percent": 100},
+                                                    {"name": "_func_00011010", "size": "48", "fuzzy_match_percent": 50}]},
+                     {"name": "rw", "functions": [{"name": "_func_00200000", "size": "16", "fuzzy_match_percent": 100}]},
+                     {"name": "lib", "functions": [{"name": "_func_00200010", "size": "16"}]}]}
+    m = objdiff.game_measures(rep, set(aside))
+    assert (m["total_functions"], m["matched_functions"], m["total_code"], m["matched_code"]) == (2, 1, "64", "16")
+    assert m["matched_code_percent"] == 25.0 and m["all_functions"] == 4 and m["set_aside_functions"] == 2
+    assert objdiff.game_measures(rep, set()) == rep["measures"]
+    assert objdiff.expand_set_aside({"functions": {"0x11010": "CRT"}}, {"units": {"game": fns}}) == \
+        {"_func_00011010": "CRT"}

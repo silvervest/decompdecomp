@@ -47,20 +47,31 @@ def _headless() -> Path:
     return base / ("analyzeHeadless.bat" if os.name == "nt" else "analyzeHeadless")
 
 
-def _run_script(binary: Path, script: str, timeout: float, *, analyse: bool = True) -> list[dict]:
+def _run_script(binary: Path, script: str, timeout: float, *, analyse: bool = True, image: bytes | None = None,
+                layout: str | None = None, import_args: tuple[str, ...] = ()) -> list[dict]:
     """Import `binary` into a throwaway Ghidra project, run one of our post-scripts on it and return the JSON objects
     it wrote, one per line ([] when it took longer than `timeout`). A Ghidra that didn't get to run the script says
-    why (ForkError): that was "found no functions" before, which sent the user after packers and DRM."""
+    why (ForkError): that was "found no functions" before, which sent the user after packers and DRM. `image`: import
+    these bytes under the binary's name instead (with `import_args` saying how: a loader, a processor); `layout`:
+    lines for the DecompWtfLayout pre-script (sections and entry points of a program Ghidra has no loader for)."""
     with tempfile.TemporaryDirectory(prefix="decompwtf-ghidra-") as tmp:
         scripts = Path(tmp) / "scripts"
         scripts.mkdir()
-        src = resources.files("decompnet.forks").joinpath("ghidra_scripts", script)
-        (scripts / script).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        for name in (script, *(["DecompWtfLayout.java"] if layout is not None else [])):
+            src = resources.files("decompnet.forks").joinpath("ghidra_scripts", name)
+            (scripts / name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
         out = Path(tmp) / "out.jsonl"
         target = Path(tmp) / binary.name
-        shutil.copyfile(binary, target)
-        argv = [str(_headless()), tmp, "decompwtf", "-import", str(target), "-scriptPath", str(scripts),
-                "-postScript", script, str(out), "-deleteProject", *([] if analyse else ["-noanalysis"])]
+        if image is None:
+            shutil.copyfile(binary, target)
+        else:
+            target.write_bytes(image)
+        pre = []
+        if layout is not None:
+            (Path(tmp) / "layout.txt").write_text(layout, encoding="utf-8")
+            pre = ["-preScript", "DecompWtfLayout.java", str(Path(tmp) / "layout.txt")]
+        argv = [str(_headless()), tmp, "decompwtf", "-import", str(target), *import_args, "-scriptPath", str(scripts),
+                *pre, "-postScript", script, str(out), "-deleteProject", *([] if analyse else ["-noanalysis"])]
         try:
             res = subprocess.run(capped(argv), capture_output=True, text=True, timeout=timeout, env=_env(),
                                  encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
@@ -105,3 +116,13 @@ def functions(program: Path, timeout: float = 3600) -> list[dict]:
     """Every function Ghidra's analysis finds in a whole program (a Windows .exe: Ghidra reads its imports, exports and
     the C runtime's functions too): {"entry", "end", "name", "source", "purge", "convention", "params", "thunk"}."""
     return _run_script(program, "DecompWtfFunctions.java", timeout)
+
+
+def functions_in_image(name: str, image: bytes, base: int, layout: str, timeout: float = 3600) -> list[dict]:
+    """Every function Ghidra's analysis finds in a program it has no loader for (an Xbox XBE): `image` is the program
+    as it lies in memory from `base` (each section's bytes at its address), imported as raw x86 code with the
+    Windows calling conventions; `layout` cuts it into sections and seeds the entry points (DecompWtfLayout.java).
+    Rows as functions() gives them."""
+    args = ("-loader", "BinaryLoader", "-loader-baseAddr", f"0x{base:X}", "-processor", "x86:LE:32:default",
+            "-cspec", "windows")
+    return _run_script(Path(name), "DecompWtfFunctions.java", timeout, image=image, layout=layout, import_args=args)

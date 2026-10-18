@@ -552,15 +552,18 @@ class ForkEngine:
                                "pick your copy of one of those versions")
 
     def check_rom(self, slug: str, log=print) -> dict:
-        """A DS game started from scratch: rebuild its ROM and compare it with the user's copy (scratch_dsd.check_rom);
-        what it says is kept in the project's .decomp.wtf.json and shown on the project."""
+        """A game started from scratch: rebuild its ROM or program and compare it with the user's copy
+        (scratch_dsd.check_rom for DS, the project's `ninja export` for PC and Xbox: scratch_pe.check_program); what
+        it says is kept in the project's .decomp.wtf.json and shown on the project."""
         proj, fp, cfg = self.get(slug)
         manifest = fp.manifest or {}
-        if cfg.get("origin") != "scratch" or manifest.get("platform") not in ("nds", "gc", "wii"):
+        if cfg.get("origin") != "scratch" or manifest.get("platform") not in ("nds", "gc", "wii", "win32", "xbox"):
             raise NetworkError("only games started from scratch rebuild here")
         with self._build_locks[proj["id"]]:  # not while an agent's compile builds in the same tree
             if manifest.get("platform") == "nds":
                 result = scratch_dsd.check_rom(fp.root, manifest["version"], log=log)
+            elif manifest.get("platform") in ("win32", "xbox"):
+                result = scratch_pe.check_program(fp, manifest["version"], log=log)
             else:
                 ok, tail = fp.verify(log=log)
                 diff = scratch_dtk._differing(fp.root, manifest["version"], tail) or []
@@ -2429,7 +2432,10 @@ class ForkEngine:
             "matched_bytes": agg["matched_bytes"] or 0, "attempts": agg["attempts"] or 0,
             "context_version": 0, "folder": proj["root"], "room": self.net._room_info(slug),
             "measures": m, "uncovered": self.uncovered(slug) if cfg.get("ready") and fp.linkable() else None,
-            "rebuild": (fp.manifest or {}).get("rebuild") if cfg.get("origin") == "scratch" else None,
+            # (a PC or Xbox game can always be rebuilt: its export runs on the button, so it shows before the first)
+            "rebuild": ((fp.manifest or {}).get("rebuild") or ({"identical": None, "detail": "not rebuilt yet"} if
+                        (fp.manifest or {}).get("platform") in ("win32", "xbox") else None))
+                       if cfg.get("origin") == "scratch" else None,
         }
 
     def function_diff(self, slug: str, name: str) -> dict:

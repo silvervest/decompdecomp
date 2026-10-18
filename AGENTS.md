@@ -56,7 +56,8 @@ compilers are only installed after the user accepts that in Setup; don't add cod
    `app/forkengine.py` drives them. From-scratch importers generate such a project:
    `forks/scratch_dtk.py` (GameCube/Wii, dtk-template), `forks/scratch_dsd.py` (DS, ds-decomp, template in
    `forks/ds_template/`) and `forks/scratch_pe.py` (Windows PC: Ghidra finds functions, decompdecomp delinks them
-   into COFF objects itself, template in `forks/pc_template/`). A new from-scratch platform that has a
+   into COFF objects itself, template in `forks/pc_template/`; Xbox reads its XBE in `forks/scratch_xbe.py`; both
+   rebuild the program with the template's `tools/export.py`, `ninja export`). A new from-scratch platform that has a
    delinker/objdiff story belongs here. Fork-mode helpers that read objects with pyelftools must tolerate COFF
    (PC, Xbox): treat an `ELFError` as "no verdict".
 

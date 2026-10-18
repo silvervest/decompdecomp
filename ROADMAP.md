@@ -26,7 +26,7 @@ start). Keep this table true when a feature ships or reaches another platform.
 | Compiler map and the judge's survey | ✓ | ✓ | ✓ | — | — | — | — | — | — |
 | Range checks: a range applies after its neighbours confirm it | ✓ | ✓ | ✓ | — | — | — | — | — | — |
 | C++ classes from the code (`get_class`) | ✓ | ✓ | ✓ | — | — | — | — | — | — |
-| Rebuildable export | ✓ | ✓ | ✓ | ✓ | the project | the project | — | — | the project |
+| Rebuildable export | ✓ | ✓ | ✓ | ✓ | the project | the project | `ninja export` (homemade programs) | `ninja export`: the game's linker and imagebld, LTCG units from their harness links | the project |
 | LTCG games (`/GL`: register conventions, cross-file inlining) | | | | | | | | harness mode, detected at import (or chosen); convention evidence, stand-in drafts, data check | |
 | Rooms: decompile together | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
 
@@ -35,8 +35,12 @@ Where to start on a gap:
   compiler map and class recovery read MIPS in `compilermap.quirks` and `classes.scan`, and want an ARM reader.
 - **PowerPC (GameCube, Wii) and x86 (PC)**: class recovery and the compiler map work on a project's objects in fork
   mode, not on a ROM; the readers are the part to write (CodeWarrior's vtable pointer is often not at offset 0).
-- **Windows PC**: autopilot needs drafts that compile (Ghidra's output doesn't, as it is); the export needs a linker
-  story (the project is delinked COFF objects).
+- **Windows PC**: autopilot needs drafts that compile (Ghidra's output doesn't, as it is). The export
+  (`tools/export.py`) is tested on homemade programs only: a real game's import table and resources are carried as
+  bytes and its headers are your copy's, and a program with base relocations (.reloc) is untested (it links /FIXED).
+- **PC and Xbox export**: data has no relocations of its own, so the rebuilt program can't move (the modding-ready
+  check below is the next step). A game built with link-time code generation is rebuilt from each unit's harness
+  link; a whole-program /LTCG link of the matched source needs all of the game's code as source.
 - **Function-end reports** cut MIPS functions (`engine._cut`); GBA has its own splitter (`_split_gba`).
 - **Xbox**: rooms haven't been run on Xbox (the room tests use a DS game). Twins and the permuter have only been
   seen on a small test program built with the XDK, not on a real game yet.

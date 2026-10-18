@@ -486,7 +486,7 @@ def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False, sweep: b
                         and not _mid_code(pe, op.imm & 0xFFFFFFFF, names, start, end):
                     name, addend = symbol(op.imm & 0xFFFFFFFF)
                     fn.relocs.append((at + ins.imm_offset, DIR32, name, addend))
-        for off in entries:
+        for off in sorted(set(entries)):  # a table two jumps go through is found twice (Burnout 3 has such switches)
             fn.relocs.append((off, DIR32, None, struct.unpack("<I", pe.read(start + off, 4))[0] - start))
         fn.relocs.sort()
         out.append(fn)
@@ -603,6 +603,36 @@ def _run(cmd: list[str], root: Path, what: str, log) -> None:
         raise ForkError(f"{what} failed:\n{tail[-1500:]}")
 
 
+def check_program(fp: ForkProject, version: str, log=print) -> dict:
+    """The project's export (`ninja export`, the template's tools/export.py): the game's program rebuilt with its own
+    linker from the matched functions and the rest of the user's copy, compared byte for byte. {"identical",
+    "detail", "compiled", "functions"}; a project made before the export existed gets the template's tool first."""
+    tool = fp.root / "tools" / "export.py"
+    if not tool.exists():  # made by an older decompdecomp: the template's export and its ninja rule
+        shutil.copyfile(TEMPLATE / "tools" / "export.py", tool)
+        cfg = fp.root / "tools" / "configure.py"
+        new = (TEMPLATE / "tools" / "configure.py").read_text(encoding="utf-8")
+        old = cfg.read_text(encoding="utf-8")
+        if "def linker()" not in old:  # its settings (compiler, flags, LTCG) kept, the rest the template's
+            keep = {k: m.group(0) for k in ("MSVC_VERSION", "CL_FLAGS", "LTCG")
+                    if (m := re.search(rf"^{k} = .*$", old, re.M))}
+            for k, line in keep.items():
+                new = re.sub(rf"^{k} = .*$", lambda _, line=line: line, new, count=1, flags=re.M)
+            cfg.write_text(new, encoding="utf-8")
+        for cmd in (fp.manifest or {}).get("setup", [])[:1]:  # configure again, for the export rule
+            fp.run([sys.executable if cmd[0] == "python" else cmd[0], *cmd[1:]], log=log)
+    ok, tail = fp.run(["ninja", "export"], log=log, timeout=3600)
+    report = fp.root / "build" / version / "export" / "export.json"
+    try:
+        rep = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"identical": False, "detail": (tail.strip().splitlines() or ["the export failed"])[-1][-300:]}
+    detail = f"{rep['compiled_count']} of {rep['functions']} functions from src/; " + \
+        ("identical to your copy" if rep["identical"] else "; ".join(rep["differences"][:3]) or "differs")
+    return {"identical": bool(rep["identical"] and ok), "detail": detail, "compiled": rep["compiled_count"],
+            "functions": rep["functions"]}
+
+
 def create(root: Path, game: Path, *, compiler: str | None = None, log=print) -> dict:
     """Make the project in `root` (which must not exist yet) and build it once. Returns facts about the game."""
     from . import ghidra
@@ -700,6 +730,9 @@ copy of its program and compared with what `src/` compiles to, function by funct
 1. Put your own copy of the game's program here as `orig/{version}{suffix}` (never commit it).
 2. `python tools/configure.py {version} --msvc <Visual C++ folder> [--wibo <wibo>]{" --xdk <your XDK's xbox folder>" if platform == "xbox" else ""}`, then `ninja`.
 3. Decompiled code goes in `src/`; `objdiff.json` shows each function's progress in [objdiff](https://github.com/encounter/objdiff).
+4. `ninja export` rebuilds the game's program from the matched functions and the rest of your copy, with the game's
+   own linker{" (and the XDK's imagebld)" if platform == "xbox" else ""}, and checks it byte for byte:
+   `build/{version}/export/export.json` says what came from `src/` and what differs.
 
 Compiler: Visual C++ {compiler} (change `MSVC_VERSION` and `CL_FLAGS` in tools/configure.py if the game was built
 with another version or other flags). `config/{version}/functions.json` holds what the analysis found: every

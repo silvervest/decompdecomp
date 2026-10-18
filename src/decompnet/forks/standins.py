@@ -46,7 +46,8 @@ def _type(reads: list[tuple[int, int, bool]]) -> tuple[str, str]:
     size, flt = reads[0][1], any(f for _, _, f in reads)
     if flt:
         return ("double {name}" if size == 8 else "float {name}"), "used as a float" if size != 8 else "a double"
-    return {1: "u8 {name}", 2: "u16 {name}", 8: "u64 {name}"}.get(size, "int {name}"), f"{size or 4} bytes"
+    return {1: "u8 {name}", 2: "u16 {name}", 8: "u64 {name}"}.get(size, "int {name}"), \
+        "1 byte" if size == 1 else f"{size or 4} bytes"
 
 
 def skeleton(prog: Program, unit: str) -> dict[str, str]:
@@ -115,9 +116,14 @@ def skeleton(prog: Program, unit: str) -> dict[str, str]:
         if setup:
             lines.append(f"//   called from {prog.functions[caller]['name']}: {'; '.join(setup)} -> call")
         args = [f"int {r}" for r in conv.register_params()]  # LTCG's own registers: say which by the names
-        args += [f"int arg{n // 4}" for n in conv.stack if 4 <= n <= 64 and n % 4 == 0]
+        slots = sorted({n for n in conv.stack if 4 <= n <= 64 and n % 4 == 0} |
+                       set(range(4, 4 + (conv.ret or 0), 4)))  # `ret N` pops N bytes of arguments
+        args += [f"int arg{n // 4}" for n in slots]
         params = ", ".join(args) or "void"
-        lines.append(f"int {name}({params}) {{ return 0; }}  // TODO: the signature your source declares")
+        todo = "TODO: the signature your source declares"
+        if "ecx" in conv.reads:
+            todo += "; it takes ecx: `this` (a method) or __fastcall's first argument"
+        lines.append(f"int {name}({params}) {{ return 0; }}  // {todo}")
         externs.append(f"int {name}({params});")
     if imports:
         lines += ["", f"// kernel or DLL imports (link them: // HARNESS-LINK: xboxkrnl.lib on Xbox): "

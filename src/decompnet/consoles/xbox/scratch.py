@@ -20,12 +20,15 @@ an XBE, setting the XDK's own library code aside) is the next step, so create() 
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import struct
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ... import toolchains
 from ...forks.project import ForkError
 from ..pc.scratch import PE, Section
 from . import xboxkrnl, xdvdfs
@@ -225,8 +228,44 @@ NOT_YET = ("Xbox projects aren't finished yet: decompdecomp reads this game's pr
            "DS game for now")
 
 
-def tool_args() -> list[str]:
-    raise ForkError(NOT_YET)
+def wibo(log=lambda *_: None) -> Path | None:
+    """The wibo that runs the XDK's Windows tools here (None on Windows, which runs them itself).
+
+    Stock wibo 1.2.0 runs CL.Exe, which is all the PC path needs (delink and objdiff, no link step), but the XDK's
+    Link.Exe (and /LTCG, and Lib.Exe) need APIs it lacks: `wibo-xbox` is wibo with those added, a superset, so it
+    runs every XDK tool. DECOMP_WIBO_XBOX points at a local build of it (for working on wibo itself). Without
+    wibo-xbox, plain compiles still work with the stock wibo."""
+    if sys.platform == "win32":
+        return None
+    if (own := os.environ.get("DECOMP_WIBO_XBOX")):
+        if not Path(own).is_file():
+            raise ForkError(f"DECOMP_WIBO_XBOX points at {own}, which isn't there: build wibo-xbox or unset it")
+        return Path(own)
+    reg = toolchains.registry()
+    if "wibo-xbox" in reg and reg["wibo-xbox"].supported:
+        toolchains.ensure("wibo-xbox", log=log)
+        return toolchains.binary("wibo-xbox")
+    if toolchains.get("wibo").supported:
+        log("using the stock wibo: it compiles Xbox code, but linking with the XDK's linker needs wibo-xbox")
+        toolchains.ensure("wibo", log=log)
+        return toolchains.binary("wibo")
+    raise ForkError("no wibo for this computer: Xbox games' Windows compilers run through wibo on Linux and macOS")
+
+
+def tool_args(log=lambda *_: None) -> list[str]:
+    """configure.py arguments: the [msvc] pack's Visual C++ (7.1 is the XDK's own compiler, the same files), the
+    user's own XDK for the headers, and wibo."""
+    if toolchains.installed("msvc") is None:
+        raise ForkError("Xbox games are built with Visual C++ 7.1, which is proprietary: install it in Setup "
+                        "(Visual C++) if you accept that, then try again")
+    try:
+        xdk = toolchains.local_folder("xdk")
+    except toolchains.ToolchainError as e:
+        raise ForkError(f"Xbox games are built against the XDK's headers and libraries. {e}") from None
+    args = ["--msvc", str(toolchains.path("msvc")), "--xdk", str(xdk)]
+    if (w := wibo(log)) is not None:
+        args += ["--wibo", str(w)]
+    return args
 
 
 def create(root: Path, game: Path, *, compiler: str | None = None, log=print) -> dict:

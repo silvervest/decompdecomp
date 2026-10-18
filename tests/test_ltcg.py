@@ -265,6 +265,18 @@ def test_the_image_scan_for_function_pointers_runs_once_per_program():
     assert scratch_pe.referenced(pe) == {BASE + 0x1010} and scratch_pe.referenced(pe) is not first
 
 
+def test_re_analysing_a_few_functions_stops_at_the_last_ones_code_unless_asked_to_sweep():
+    code = bytes.fromhex("33c0c3") + b"\xcc" * 13 + bytes.fromhex("b801000000c3") + b"\xcc" * 10 + \
+        bytes.fromhex("b802000000c3")
+    pe = scratch_pe.PE(code, BASE, 0x2000, BASE + 0x1000, 0,
+                       [scratch_pe.Section(".text", BASE + 0x1000, len(code), 0, len(code), True)])
+    rows = [{"entry": BASE + 0x1000, "end": BASE + 0x1003, "name": "", "source": "DEFAULT"}]
+    swept = scratch_pe.analyse(pe, rows, linker_padding=True)
+    assert [f.addr - BASE for f in swept] == [0x1000, 0x1010, 0x1020]  # an import: code nobody calls is found
+    few = scratch_pe.analyse(pe, rows, linker_padding=True, sweep=False)
+    assert [(f.addr - BASE, f.size, f.pad) for f in few] == [(0x1000, 3, 13)]
+
+
 def test_a_function_the_map_lacks_is_reported_and_left_out(tmp_path):
     src, _ = _project(tmp_path)
     src.write_text(src.read_text().replace("int F2(int x)", "int Missing(int x)"))
@@ -463,11 +475,12 @@ CONV_CODE = {
     0x1010: bytes.fromhex("be00200010" "6a05" "e8e4ffffff" "a104200010" "c3"),  # A: mov esi, D; push 5; call C
     0x1030: bytes.fromhex("56" "8bf1" "8b06" "5e" "c3"),  # S: push esi; mov esi, ecx; mov eax, [esi]; pop esi
     0x1040: bytes.fromhex("b900200010" "e8e6ffffff" "c3"),  # B: mov ecx, D; call S
+    0x1050: bytes.fromhex("e8abffffff" "c3"),  # W: call C (passes its own ESI on)
 }
 
 
 def _conv_program(tmp_path: Path) -> tuple[Path, dict]:
-    text = bytearray(b"\xcc" * 0x50)
+    text = bytearray(b"\xcc" * 0x60)
     for at, code in CONV_CODE.items():
         text[at - 0x1000:at - 0x1000 + len(code)] = code
     (tmp_path / "orig").mkdir()
@@ -476,7 +489,8 @@ def _conv_program(tmp_path: Path) -> tuple[Path, dict]:
     info = {"units": {"u": [fn("_func_10001010", 0x1010, [[1, DIR32, "_D_10002000", 0], [8, REL32, "_C", 0],
                                                         [13, DIR32, "_D_10002004", 0]]),
                             fn("_func_10001040", 0x1040, [[1, DIR32, "_D_10002000", 0], [6, REL32, "_S", 0]])],
-                      "v": [fn("_C", 0x1000, []), fn("_S", 0x1030, [])]}}
+                      "v": [fn("_C", 0x1000, []), fn("_S", 0x1030, [])],
+                      "w": [fn("_W", 0x1050, [[1, REL32, "_C", 0]])]}}
     (tmp_path / "config" / "game").mkdir(parents=True)
     (tmp_path / "config" / "game" / "functions.json").write_text(json.dumps(info))
     manifest = {"platform": "win32", "version": "game", "game": {"path": "orig/game.exe"}, "ltcg": True}
@@ -495,6 +509,13 @@ def test_the_brief_shows_a_functions_register_parameters_and_how_its_callers_set
     assert (c.reads, c.stack, c.ret, c.register_params()) == (["esi"], [4], 4, ["esi"])
     s = prog.convention(BASE + 0x1030)
     assert (s.reads, s.saves, s.ret, s.register_params()) == (["ecx"], ["esi"], 0, [])
+    assert prog.convention(BASE + 0x1050).reads == ["esi"]  # W only passes ESI on to C
+    assert c.clobbers == ["eax"] and s.clobbers == ["eax"]  # (S saves ESI)
+    # a register the callee leaves alone is still the caller's after the call: an argument read there
+    code = bytes.fromhex("e8 0b000000" "8b02" "c3") + b"\xcc" * 8 + bytes.fromhex("8b01" "c3")  # call G; mov eax, [edx]
+    got = convention.analyse(code[:8], 0x1000, lambda a: ({"ecx"}, {"eax"}) if a == 0x1010 else None)
+    assert got.reads == ["ecx", "edx"]
+    assert convention.analyse(code[:8], 0x1000).reads == []  # (not knowing G: EAX, ECX and EDX are gone after it)
     lines = ForkEngine._convention_brief(SimpleNamespace(root=root, manifest=manifest), {"symbol": "_C"}, {"name": "C"})
     text = "\n".join(lines)
     assert "- reads before writing: esi; stack arguments: [esp+4]; ret 4" in text

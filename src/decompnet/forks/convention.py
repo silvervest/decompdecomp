@@ -11,7 +11,9 @@ with link-time code generation (forks/ltcg.py), whose functions get conventions 
 
 Everything comes from the project's own copy of the program and config/<version>/functions.json (each function's
 extent and relocations, as scratch_pe found them).
-shortcut: per function, not across calls: a register a function only passes on to its callee isn't counted as read.
+A register a function only passes on to a direct callee counts as read (the callee's own reads, followed through
+call chains up to 40 deep). shortcut: calls through pointers pass nothing on, and frames addressed through EBP
+show no stack arguments (`ret N` still says how many bytes it pops).
 """
 
 from __future__ import annotations
@@ -50,6 +52,7 @@ class Convention:
     ret: int | None = None  # bytes `ret N` pops; None: no ret (never returns, or only tail calls)
     saves: list[str] = field(default_factory=list)  # callee-saved registers it pushes and pops
     xmm: list[str] = field(default_factory=list)  # XMM registers read before written (float parameters)
+    clobbers: list[str] = field(default_factory=list)  # registers it may leave changed (its callees' too)
 
     def describe(self) -> str:
         regs = ", ".join(self.reads) or "none"
@@ -103,8 +106,11 @@ def instructions(code: bytes, addr: int) -> list:
     return list(_md.disasm(code[:stop - addr], addr))
 
 
-def analyse(code: bytes, addr: int) -> Convention:
-    """The convention of the function whose bytes (its extent) are `code`, at `addr`."""
+def analyse(code: bytes, addr: int, callee=None) -> Convention:
+    """The convention of the function whose bytes (its extent) are `code`, at `addr`. `callee(address)`: (the
+    registers a direct callee reads before writing, the ones it may change) or None, so a register only passed on to
+    it counts as read here too (LTCG keeps an argument where the callee wants it: Accum::Add(this=ESI, p=EDX, k=EAX)
+    passes EAX on), and one it leaves alone stays an argument across the call (Accum::Add reads EDX after it)."""
     ins = instructions(code, addr)
     if not ins:
         return Convention()
@@ -138,7 +144,7 @@ def analyse(code: bytes, addr: int) -> Convention:
     defined: list[frozenset | None] = [None] * len(ins)
     delta: list[int | None] = [None] * len(ins)
     defined[0], delta[0] = frozenset(), 0
-    reads, xmm, stack, saves = set(), set(), set(), set()
+    reads, xmm, stack, saves, written = set(), set(), set(), set(), set()
     pushes: list[int] = [0] * len(ins)
     work = [0]
     while work:
@@ -156,6 +162,12 @@ def analyse(code: bytes, addr: int) -> Convention:
         if m == "lea" and len(ops) == 2 and ops[1].type == x86.X86_OP_MEM and ops[1].mem.base == ops[0].reg \
                 and not ops[1].mem.index and ops[1].mem.disp == 0:
             rd = set()  # lea ecx, [ecx]: alignment padding
+        known = None  # a direct callee's (reads, clobbers)
+        if callee is not None and m in ("call", "jmp") and ops and ops[0].type == x86.X86_OP_IMM \
+                and (ops[0].imm & 0xFFFFFFFF) not in at and (ops[0].imm & 0xFFFFFFFF) != addr:
+            known = callee(ops[0].imm & 0xFFFFFFFF)
+            if known is not None:
+                rd = rd | known[0]  # passed on to the callee
         for r in rd - d:
             if r in GPR:
                 reads.add(r)
@@ -167,9 +179,13 @@ def analyse(code: bytes, addr: int) -> Convention:
                                                                          or m in ("lea", "push")):
                 stack.add(op.mem.disp + dl)
         d |= wr
+        written |= wr
         ndl, npush = dl, pushes[k]
         if m == "call":
-            d |= SCRATCH
+            # what the callee changes (LTCG callers count on the rest: an argument can sit in EDX across a call)
+            gone = known[1] if known is not None else SCRATCH
+            d |= gone
+            written |= gone
         if dl is not None:
             if m == "push":  # (the prologue's saves aren't arguments for the next call)
                 ndl, npush = dl - 4, npush + (0 if prologue else 1)
@@ -194,8 +210,9 @@ def analyse(code: bytes, addr: int) -> Convention:
                 work.append(s)
     rets = [i for i in ins if i.mnemonic == "ret"]
     ret = None if not rets else (rets[0].operands[0].imm if rets[0].operands else 0)
+    clobbers = sorted((written & TRACKED) - saves, key=lambda r: (r in XMM, r))
     return Convention(sorted(reads, key=GPR.index), sorted(stack), ret, sorted(saves, key=GPR.index),
-                      sorted(xmm, key=XMM.index))
+                      sorted(xmm, key=XMM.index), clobbers)
 
 
 # ------------------------------------------------------------------------------------------- the project's side
@@ -216,7 +233,25 @@ class Program:
         return self.pe.read(addr, fn["size"])
 
     def convention(self, addr: int) -> Convention:
-        return analyse(self.code(addr), addr)
+        memo = self.__dict__.setdefault("_conventions", {})
+        if addr not in memo:
+            memo[addr] = None  # a guard while it's worked out (recursion): a callee in a cycle passes nothing on
+            memo[addr] = analyse(self.code(addr), addr, self._reads)
+        return memo[addr]
+
+    def _reads(self, addr: int) -> tuple[set[str], set[str]] | None:
+        if addr not in self.functions:
+            return None
+        memo = self.__dict__.setdefault("_conventions", {})
+        depth = self.__dict__.get("_depth", 0)
+        if (addr in memo and memo[addr] is None) or (addr not in memo and depth > 40):
+            return None  # in a cycle, or a call chain too deep to follow
+        self.__dict__["_depth"] = depth + 1
+        try:
+            c = self.convention(addr)
+        finally:
+            self.__dict__["_depth"] = depth
+        return set(c.reads) | set(c.xmm), set(c.clobbers)
 
     def find(self, what: str) -> int | None:
         """A function by its symbol, func_<address> name or address."""
@@ -338,7 +373,7 @@ SAMPLE = 1500  # functions looked at (evenly spread): enough for a verdict, quic
 # a file's own static functions such conventions without LTCG too (a non-LTCG Xbox test program: 1 of 16, 6%), but
 # only LTCG gives them to functions called across files (a real LTCG game: 48%).
 THRESHOLD = 0.15
-MIN_CONFIRMED = 8
+MIN_CONFIRMED = 4  # (an XDK sample with 6 functions of its own, built with LTCG: 4 of 14)
 
 
 def detect(prog: Program, skip: set[int] = frozenset()) -> dict:

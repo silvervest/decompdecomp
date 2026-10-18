@@ -48,9 +48,53 @@ except ImportError:  # pragma: no cover
     sys.exit("tools/dll2coff.py needs capstone (pip install capstone): decompdecomp's own Python has it")
 
 DIR32, REL32 = delink.DIR32, delink.REL32
-# "// FUNCTION: 0x<va> [symbol substring]" then the definition's first line; the symbol never starts with "(".
-FUNCTION = re.compile(r"//[ \t]*FUNCTION:[ \t]*(0x[0-9a-fA-F]+)(?:[ \t]+(?!\(|NONMATCHING\b)(\S+))?[^\n]*\n"
-                      r"((?:[ \t]*//[^\n]*\n|[ \t]*\n)*)([^\n{;]*\()")
+# "// FUNCTION: 0x<va> [symbol substring]" before a definition; the symbol never starts with "(". Comments, blank and
+# preprocessor lines, declarations and types may come between it and the definition (the app places the externs
+# and prototypes an agent sends there): definition() finds it the way the app's csource.find does.
+FUNCTION = re.compile(r"^[ \t]*//[ \t]*FUNCTION:[ \t]*(0x[0-9a-fA-F]+)(?:[ \t]+(?!\(|NONMATCHING\b)(\S+))?[^\n]*(?:\n|$)",
+                      re.M)
+_COMMENT_OR_STRING = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', re.S)
+
+
+def _blank(text: str) -> str:
+    """Same length, with comments and strings blanked, so braces and parentheses inside them don't count."""
+    return _COMMENT_OR_STRING.sub(lambda m: re.sub(r"[^\n]", " ", m.group()), text)
+
+
+def definition(text: str, clean: str, pos: int, bound: int) -> str | None:
+    """The first line of the first function definition in text[pos:bound], up to its "(" (a declaration, a type or
+    a brace initialiser before it is skipped), or None."""
+    start_pos = pos
+    while True:
+        brace = clean.find("{", pos, bound)
+        if brace < 0:  # no body here: a definition a macro writes (`HEADER_INLINE(void F(int a))`), the first line
+            at = start_pos  # with a "(" that isn't a declaration (`;`) or a preprocessor line
+            for ln in clean[start_pos:bound].split("\n"):
+                s = ln.strip()
+                if "(" in s and not s.startswith("#") and not s.endswith(";"):
+                    lead = at + len(ln) - len(ln.lstrip())
+                    return text[lead:at + ln.rindex("(") + 1]
+                at += len(ln) + 1
+            return None
+        head_at = max(clean.rfind(";", pos, brace), clean.rfind("}", pos, brace), pos - 1) + 1
+        head = "\n".join(ln for ln in clean[head_at:brace].split("\n") if not ln.lstrip().startswith("#"))
+        if "(" not in head or re.match(r"\s*(?:typedef\s+)?(?:struct|class|union|enum|namespace)\b", head):
+            depth, k = 0, brace
+            while k < len(clean):  # past the type (or initialiser)
+                depth += (clean[k] == "{") - (clean[k] == "}")
+                k += 1
+                if depth == 0:
+                    break
+            pos = k
+            continue
+        at = head_at
+        for ln in clean[head_at:brace].split("\n"):  # its first line: the one with the "(" (not a #pragma)
+            if "(" in ln and not ln.lstrip().startswith("#"):
+                start = at + len(ln) - len(ln.lstrip())
+                # up to its last "(" (`__declspec(noinline) bool A::F(`); the real text: extern "C" keeps its "C"
+                return text[start:at + ln.rindex("(") + 1]
+            at += len(ln) + 1
+        return None
 TARGET = re.compile(r"//[ \t]*TARGET[ \t]+(0x[0-9a-fA-F]+)[ \t]+(\S+)")
 # "// GLOBAL: 0x<va> [map symbol]" then a declaration or definition of the global at that original address
 GLOBAL = re.compile(r"//[ \t]*GLOBAL:[ \t]*(0x[0-9a-fA-F]+)(?:[ \t]+(\S+))?[^\n]*\n"
@@ -160,7 +204,15 @@ def annotations(paths: list[Path]) -> tuple[dict[int, str], list[str]]:
         text = p.read_text(encoding="utf-8", errors="replace")
         for va, sym in TARGET.findall(text):
             out[int(va, 16)] = sym
-        for va, sym, _, decl in FUNCTION.findall(text):
+        clean = _blank(text)
+        found = list(FUNCTION.finditer(text))
+        for n, m in enumerate(found):
+            va, sym = m.group(1), m.group(2)
+            bound = found[n + 1].start() if n + 1 < len(found) else len(text)
+            decl = None if sym else definition(text, clean, m.end(), bound)
+            if not sym and decl is None:
+                problems.append(f"{p}: FUNCTION {va}: no function definition follows it")
+                continue
             sym = sym or symbol_hint(decl)
             if sym is None:
                 problems.append(f"{p}: FUNCTION {va}: give the map symbol after the address (an operator, "

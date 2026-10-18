@@ -295,6 +295,26 @@ def test_annotations_name_map_symbols_and_constructors_need_an_explicit_one(tmp_
     assert len(problems) == 1 and "FUNCTION 0x200" in problems[0]
 
 
+def test_declarations_between_an_annotation_and_its_definition_are_skipped(tmp_path):
+    # The app places the externs an agent sends right before the definition, after its annotation and comments.
+    # The annotation once took a comment line with a "(" in it for the definition (`?latch@@`), so the function
+    # fell out of the unit's object and its match was lost at the next measurement.
+    p = tmp_path / "a.cpp"
+    p.write_text("// FUNCTION: 0x001734c0 (NONMATCHING the count (in ESI))\n"
+                 "// resets its catch-up latch (m_a04/m_a31) instead.\n"
+                 "extern const float D_003B16C0;\n"
+                 "extern \"C\" int Proto(int a);\n"
+                 "#pragma optimize(\"\", off)\n"
+                 "struct CTmp { int f(int); };\n"
+                 "float CB3AIDriver::CalcCatchupSpeed(float speed)\n{ return speed; }\n"
+                 "// FUNCTION: 0x500\n"
+                 "extern \"C\" int CFn(\n    int a)\n{ return a; }\n"
+                 "// FUNCTION: 0x600\nextern int g_only;\n")
+    hints, problems = dll2coff.annotations([p])
+    assert hints == {0x1734C0: "?CalcCatchupSpeed@CB3AIDriver@@"}
+    assert len(problems) == 2 and "FUNCTION 0x500" in problems[0] and "no function definition" in problems[1]
+
+
 def test_a_unit_joins_harness_mode_once_its_driver_defines_harness_entry(tmp_path):
     h = tmp_path / "harness"
     h.mkdir()

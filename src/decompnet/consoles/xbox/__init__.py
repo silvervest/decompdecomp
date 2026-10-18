@@ -76,11 +76,11 @@ class Xbox(Console):
 
         return scratch.read_data(fp.root, fp.manifest or {}, name, length)
 
-    def refresh_project(self, fp, log=print) -> None:
+    def refresh_project(self, fp, log=print) -> list[str]:
         """The project's tools/ brought up to the PC template it was made from (consoles/pc/scratch.py)."""
         from ..pc import scratch
 
-        scratch.refresh_tools(fp, log=log)
+        return scratch.refresh_tools(fp, log=log)
 
     def check_rebuild(self, fp, version: str, log=print) -> dict:
         """The project's `ninja export`: the XBE linked again with the XDK's linker and imagebld, compared byte for

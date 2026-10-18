@@ -19,10 +19,12 @@
 #                       testing; its updates follow that branch) or a folder with decompdecomp's source. Run from a
 #                       git checkout, the checkout is used (and updates follow its branch; main's are releases).
 # The same through the environment: DECOMP_SOURCE=..., DECOMP_BRANCH=<name>.
+# This fork (Xbox support), on Linux or in a WSL 2 distribution of your own:
+#   curl -fsSL https://raw.githubusercontent.com/silvervest/decompdecomp/<branch>/site/public/install.sh | DECOMP_BRANCH=<branch> bash
 set -euo pipefail
 
 VERSION="1.0.5-alpha.2"
-REPO="n-delic/decompdecomp"
+REPO="silvervest/decompdecomp"  # our fork (Xbox support); upstream is n-delic/decompdecomp
 START=1
 SOURCE="${DECOMP_SOURCE:-}"
 [ -z "$SOURCE" ] && [ -n "${DECOMP_BRANCH:-}" ] && SOURCE="branch:${DECOMP_BRANCH}"

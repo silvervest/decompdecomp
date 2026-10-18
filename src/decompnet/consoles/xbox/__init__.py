@@ -66,5 +66,17 @@ class Xbox(Console):
 
         return scratch.tool_args()
 
+    def read_data(self, fp, name: str, length: int) -> str | None:
+        """The program's data isn't in the target objects: it's read from the user's copy, as on PC."""
+        from ..pc import scratch
+
+        return scratch.read_data(fp.root, fp.manifest or {}, name, length)
+
+    def read_program(self, data: bytes):
+        """The program in the shape the PC path reads a Windows one into (consoles/pc/scratch.py read_program)."""
+        from . import scratch
+
+        return scratch.read_xbe(data)
+
 
 XBOX = Xbox()

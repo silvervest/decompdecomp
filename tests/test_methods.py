@@ -144,6 +144,25 @@ def test_agents_claiming_at_once_never_see_a_convention_still_being_worked_out(t
     assert add2 not in fresh.__dict__.get("_conventions", {})
 
 
+def test_a_match_that_is_lost_gets_its_score_back_so_the_queue_doesnt_say_it_is_done(tmp_path):
+    # A reopened match kept best_score 0 (identical): briefs said "score 0" and agents released it as done.
+    from decompnet.app.forkengine import ForkEngine
+    from decompnet.store import Store
+
+    store = Store(tmp_path / "t.db")
+    with store.tx() as db:
+        db.execute("INSERT INTO functions(id,project_id,name,size,n_insns,status,best_score,best_source,unit,meta,asm) "
+                   "VALUES(1,7,'F',40,10,'matched',0,'int F() {}','u','{\"symbol\": \"_F\"}','')")
+        db.execute("INSERT INTO functions(id,project_id,name,size,n_insns,status,best_score,best_source,unit,meta,asm) "
+                   "VALUES(2,7,'G',40,10,'open',0,'int G() {}','u','{\"symbol\": \"_G\"}','')")
+    eng = ForkEngine.__new__(ForkEngine)
+    eng.net = SimpleNamespace(store=store)
+    eng._apply_scores({"id": 7, "root": str(tmp_path)}, "u", {"_F": 52.7, "_G": 90.0})
+    rows = {r["name"]: r for r in store.all("SELECT name, status, best_score FROM functions")}
+    assert rows["F"]["status"] == "open" and rows["F"]["best_score"] > 0  # reopened now
+    assert rows["G"]["best_score"] > 0  # reopened before the fix: mended at the next measurement
+
+
 def test_briefs_and_standins_say_which_struct_a_function_belongs_to(tmp_path):
     from decompnet.app.forkengine import ForkEngine
 

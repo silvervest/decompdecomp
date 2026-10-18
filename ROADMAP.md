@@ -4,9 +4,6 @@ What's planned for decompdecomp, roughly in order, and why. Every item keeps the
 byte-identical after linking (ROM mode) or objdiff 100% (fork mode). Nothing here accepts code that only does the
 same thing.
 
-Every console gets every feature it can: one pipeline, ROM mode and project mode alike. A "—" in the table below is
-a gap to close, each with its item here (CONTRIBUTING.md, "Every console gets every feature").
-
 Want to work on one? Open an issue first, so two people don't build the same thing. CONTRIBUTING.md has the rest.
 
 ## What works where
@@ -15,40 +12,34 @@ Each feature and the platforms it covers today. A — is a gap: pick one up (the
 start). Keep this table true when a feature ships or reaches another platform. Each column's code is its console's
 folder, `src/decompnet/consoles/<id>/`; a new console adds a column (CONTRIBUTING.md, "Consoles").
 
-| Feature | N64 | PS1 | PS2 | GameCube · Wii | Windows PC | DS | Public decomps |
-| :-- | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
-| Status | recommended | beta | beta | beta | beta | beta | the project's own |
-| Start from your own copy | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | fork by address |
-| Judge | link · compare | link · compare | link · compare | objdiff | objdiff | objdiff | objdiff |
-| Machine drafts (m2c, Ghidra for x86) | ✓ | ✓ | ✓ | ✓ | ✓ Ghidra | — | by architecture |
-| Autopilot: free matches from drafts | ✓ | ✓ | ✓ | ✓ | — | — | — |
-| Drafts follow the header, made in the background; `redraft` | ✓ | ✓ | ✓ | — | — | — | — |
-| C++ methods drafted as `Class::method` | ✓ | ✓ | ✓ | — | — | — | — |
-| Twins: free matches from identical code | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Permuter on near misses | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Hand-written assembly set aside | ✓ | ✓ | ✓ | ✓ | — | BIOS call stubs, pieces of functions | MIPS, PowerPC, ARM's BIOS stubs and pieces of functions |
-| Pieces of functions joined to their function | — | — | — | — | — | ✓ (`recover.merge_pieces`) | — |
-| Agents' verdict "no C makes this" (3 agents of 2 models: set aside, red in the map) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Check again (and before helpers start, once after each update) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Kernel stubs set aside and named | — | set aside (BIOS calls) | ✓ | — | — | — | — |
-| Function-end reports (`report_boundary`) | ✓ | ✓ | ✓ | — | — | — | — |
-| Compiler ranges and suggestions | ✓ | ✓ | ✓ | from scratch: per source file (`try_compiler`, Settings); else the project's build | the project's build | per source file (`try_compiler`, Settings) | the project's build |
-| Flag search (`search_flags`) | ✓ | ✓ | ✓ | the project's build | the project's build | the project's build | the project's build |
-| Compiler map and the judge's survey | ✓ | ✓ | ✓ | — | — | — | — |
-| Range checks: a range applies after its neighbours confirm it | ✓ | ✓ | ✓ | — | — | — | — |
-| C++ classes from the code (`get_class`) | ✓ | ✓ | ✓ | — | — | — | — |
-| Struct layouts from loads and stores (`guess_struct`) | ✓ | ✓ | ✓ | — | — | — | — |
-| The game's own debug symbols: names, types, prototypes | — | — | ✓ symbol table, STABS; the compiler of each object file | — | — | — | — |
-| Twins across your games | ✓ | ✓ | ✓ | — | — | — | — |
-| Shared knowledge (two models agree) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Polish matched code (still matching) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Tidy each source file once it's polished (shared types in one header, names, dead declarations) | — | — | — | ✓ | ✓ | ✓ | ✓ |
-| Real names for the game's symbols (`rename_symbol`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | dtk and ds-decomp projects |
-| Save and restore (`progress/`, Open a saved project) | ✓ | ✓ | ✓ | the project's git; best attempts saved | the project's git; best attempts saved | the project's git; best attempts saved | the project's git; best attempts saved |
-| Reimport: a new split, matched work kept (Settings) | ✓ | ✓ | ✓ | — | — | — | — |
-| Rebuildable export | ✓ | ✓ | ✓ | the project | — | the project | the project |
-| Progress bars for foreground jobs | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Rooms: decompile together | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Feature | N64 | PS1 | PS2 | GameCube · Wii | Windows PC | DS | Xbox | Public decomps |
+| :-- | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
+| Status | recommended | beta | beta | beta | beta | beta | beta | the project's own |
+| Start from your own copy | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ XBE or disc, your own XDK | fork by address |
+| Judge | link · compare | link · compare | link · compare | objdiff | objdiff | objdiff | objdiff | objdiff |
+| Machine drafts (m2c, Ghidra for x86) | ✓ | ✓ | ✓ | ✓ | ✓ Ghidra | — | as PC (untested) | by architecture |
+| Autopilot: free matches from drafts | ✓ | ✓ | ✓ | ✓ | — | — | — | — |
+| Drafts follow the header, made in the background; `redraft` | ✓ | ✓ | ✓ | — | — | — | — | — |
+| C++ methods drafted as `Class::method` | ✓ | ✓ | ✓ | — | — | — | — | — |
+| Twins: free matches from identical code | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
+| Permuter on near misses | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
+| Hand-written assembly set aside | ✓ | ✓ | ✓ | ✓ | — | BIOS call stubs | — | MIPS, PowerPC, ARM's BIOS stubs |
+| Kernel stubs set aside and named | — | set aside (BIOS calls) | ✓ | — | — | — | ✓ XDK library code | — |
+| Function-end reports (`report_boundary`) | ✓ | ✓ | ✓ | — | — | — | — | — |
+| Compiler ranges and suggestions | ✓ | ✓ | ✓ | the project's build | the project's build | per source file (`try_compiler`, Settings) | the project's build | the project's build |
+| Flag search (`search_flags`) | ✓ | ✓ | ✓ | the project's build | the project's build | the project's build | the project's build | the project's build |
+| Compiler map and the judge's survey | ✓ | ✓ | ✓ | — | — | — | — | — |
+| Range checks: a range applies after its neighbours confirm it | ✓ | ✓ | ✓ | — | — | — | — | — |
+| C++ classes from the code (`get_class`) | ✓ | ✓ | ✓ | — | — | — | — | — |
+| Struct layouts from loads and stores (`guess_struct`) | ✓ | ✓ | ✓ | — | — | — | — | — |
+| The game's own debug symbols: names, types, prototypes | — | — | ✓ symbol table, STABS | — | — | — | — | — |
+| Twins across your games | ✓ | ✓ | ✓ | — | — | — | — | — |
+| Shared knowledge (two models agree) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Polish matched code (still matching) | ✓ | ✓ | ✓ | — | — | — | — | — |
+| Save and restore (`progress/`, Open a saved project) | ✓ | ✓ | ✓ | the project's git | the project's git | the project's git | the project's git | the project's git |
+| Rebuildable export | ✓ | ✓ | ✓ | the project | — | the project | — | the project |
+| LTCG games (`/GL`: register conventions, cross-file inlining) | | | | | | | — | |
+| Rooms: decompile together | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
 
 Where to start on a gap:
 - **PowerPC (GameCube, Wii) and x86 (PC)**: class recovery and the compiler map work on a project's objects in fork
@@ -56,75 +47,14 @@ Where to start on a gap:
 - **Windows PC**: autopilot needs drafts that compile (Ghidra's output doesn't, as it is); the export needs a linker
   story (the project is delinked COFF objects).
 - **Function-end reports** cut MIPS functions (`engine._cut`).
-- **Tidying a ROM project**: its C is the database's, one function at a time, with one shared header per segment
-  (`edit_context`), so there's no file to tidy (`app/readable.py`, `_untidy`). The header is the place to start: its
-  types and names, then the functions' C that uses them, each still matching.
 - **Struct layouts** read MIPS loads and stores (`arch/mips_fields.py`); another processor adds its reader as its
   `Arch.field_accesses`, and structs.py does the rest. Still open on MIPS: the PS2's fifth to eighth arguments
   (t0-t3), and a pointer into the middle of a struct handed to a callee (`&this->pos`).
-- **Twins across games** and **restoring a save** work on ROM projects (`app/twins.py`, `app/saves.py`). In project
-  mode a project's matched C is its git repository; what's missing there is matching identical code across your
-  games (their objects, not a ROM, hold it) and opening a save's best attempts in a new copy of the project.
+- **Polish, saves, twins across games** work on ROM projects (`app/readable.py`, `app/saves.py`, `app/twins.py`).
+  A project-mode console's work is its git repository; polishing there needs objdiff to judge a rewrite.
 
 ## Recently done
 
-- **Polishing reaches every function, then tidies each file.** A floor of 8 instructions and a ceiling of 400 kept
-  polishing off a game's smallest and biggest functions for good: every size comes now, the middle first, and a
-  function three tries didn't make readable is left. Once a source file's functions are all readable, a helper tidies
-  it: types it shares with other files in one header, fields and classes named, the globals it still knows by
-  address named (read_data first), dead declarations gone, one naming style (`tidy_done`).
-- **Real names on Windows PC.** A PC project names functions and data by address (`func_0041B470`, `D_0066DDA4`),
-  and `tools/names.py` pairs them with the original's symbols by that address, so rename_symbol refused them. A real
-  name is kept by address in `config/<version>/functions.json` ("names"), and names.py takes it as that address in C
-  and C++ (a method's too): the function and its callers still match. The report keeps the original's symbol, so the
-  function's row does too, and agents find and call it by its real name.
-- **The compiler of each object file, from a PS2 game's symbols.** Games linked by CodeWarrior's linker are often
-  GCC's code with CodeWarrior's C library: the three with symbols had GCC's mark on 91-93% of their object files.
-  The one that built most of the code is the game's, and SN's GCC is told from Sony's by its own code; the others'
-  object files get their ranges at import, and Check again suggests them to older projects through the range check.
-- **Every compiler of the console, then the test of them all** (N64, PS1, PS2). The import offers to install the
-  console's missing compilers, and a project page offers it until the first match; the compiler test then tries
-  every one. A guess from the program alone can miss: one game's GCC code leaves its return delay slots empty as
-  often as CodeWarrior's.
-- **PS2 programs splat couldn't read** (#44): one without section headers, one whose DNAS block is marked as
-  register info, one whose sections have no names, one with an empty section below its code. All import now.
-
-- **A CodeWarrior version per source file on GameCube and Wii** (#26). A project started from scratch builds a
-  source file with its own version when its `Object(...)` names one (`mw_version="GC/1.2.5"` in configure.py, which
-  dtk-template reads): `try_compiler` switches a function's file, or tries them `"all"`, and Settings switches a
-  file, a range or the whole game, keeping every file whose matches still hold. An agent found a file whose code
-  matched only with GC/1.2.5 and GC/1.1 where the project built everything with GC/1.3.2; a file that mixes versions
-  is split first (`split_file`), then the new file switches. Public decomp forks still build with their project's
-  own compilers.
-- **Visible progress while waiting.** Saved projects, room setup, exports, project checks, compiler changes and
-  installations show a labelled work bar beside their logs. The bar clears on completion or failure; saved-project
-  cancellation clears it too. Each action says when it starts and finishes, or why it stopped. Upload percentages
-  still measure bytes transferred.
-- **Names in project mode.** rename_symbol renames a function or a global in a project too: in the game's symbols
-  (DS: ds-decomp's symbols.txt; GameCube, Wii: dtk's) and in every source and header file, kept only when the game
-  still rebuilds byte for byte and every match holds. Polishing's names were local only before (func_0205d0f4,
-  data_0222f194 stayed). Windows PC's names come from addresses (`names.py`): it says it can't rename yet.
-- **Polishing on every console.** Helpers that make matched code readable (real names, types, a comment) worked on
-  ROM projects only: a DS game at 57% had nothing to choose. In project mode a rewrite goes through the project's
-  own file and is judged like any compile of a matched function: committed when it and the file's other matches
-  still match, else the file is put back. Helpers there keep the function's name and describe types in the project's
-  headers (edit_file).
-- **Agents join what the rules miss** (project mode). `join_functions(function, with_function, reason)`: once 3
-  agents of 2 models say two functions are one the analysis cut, the console joins them (DS: `recover.join_functions`,
-  across two source files too), checked as an analysis is (the game rebuilt byte for byte, else taken back), never a
-  matched function; a refused join is remembered. Check again only ever joins, so what agents joined stays. Other
-  project consoles keep the agents' agreement until they can join.
-- **What no C makes is out of agents' way, and progress counts the rest.** On a DS game 159 of 557 open functions
-  were pieces of others (ds-decomp's symbols in the middle of functions: a lone epilogue, a register save running on
-  into the next symbol, a lone `bx ip`), each given up on by five to seven agents in turn. ARM code that pops pc
-  without having pushed, jumps through a register its caller set, uses r4-r11 before saving them or never returns
-  is set aside (`arm.piece`), and a
-  DS project joins such pieces to the function they belong to (`recover.merge_pieces`, checked by dsd): on that game
-  119 joined, 4 functions matched at once with the C agents had written, no match lost, the ROM still identical.
-  What shapes can't tell, agents can: `release_function(..., not_c=true)` with the reason, and once 3 agents of 2
-  models agree the function is set aside, red in the map, until the user gives it back. Percentages and counts leave
-  set-aside code out. **Check again** (About this project) looks at a project with what the running version knows;
-  it also runs before helpers start, once after each update.
 - **PlayStation (PS1) games from your own copy** (beta): a disc image (BIN, ISO or CHD; SYSTEM.CNF says which
   program it boots) or its PS-X EXE, with the disc's overlays. Functions are built as PSY-Q games were: GCC 2.6.3,
   2.7.2 or 2.8.1, then maspsx, which does what Sony's assembler ASPSX did, then GNU as; the import tries the three on
@@ -179,9 +109,6 @@ Where to start on a gap:
   has a colour on its agents' names, the same on every screen, and the Agents tab lists what the room's other
   computers' agents are on. A git project's join waits to be let in (with approval on, it failed), and a declined
   or removed guest is told so.
-- **Room presence during slow syncs.** A separate heartbeat keeps members online while importing the host's work
-  or rebuilding a source project. Sync failures and recovery are logged, and syncing continues automatically
-  after a temporary connection failure. Applies to ROM and project rooms on every console.
 - **A standalone app.** Its own window (GTK and WebKitGTK) and a tray icon, so closing the window doesn't stop
   helper agents; **Quit** ends everything the app started. Only helpers the app starts work on projects: the old
   `decomp mcp` bridge is gone, and the first start removes its registrations from your agents. A development copy is
@@ -191,10 +118,6 @@ Where to start on a gap:
 - **One notification centre** (the bell) for every project, and **Report a problem** on every page.
 - **Save and restore** (ROM projects): the work as plain files in `progress/`, every few minutes; **Open a saved
   project** rebuilds it on another computer from your own copy, and judges every function again.
-- **Reimport a ROM project** (Settings): replace the split from a newly selected copy, keeping matched C only where
-  its target is unchanged, plus notes, settings, saves and the names agents gave (functions are paired by address).
-  A matched function the new split doesn't have keeps its C in a note. Project mode can't yet: its project's own
-  analysis makes the functions, and Check again redoes what decompdecomp adds to it.
 - **Polish matched code** (ROM projects): helpers give matched functions real names, types and a comment; a change
   counts only when the function still matches. The project shows matched and readable.
 - **Shared knowledge**: what agents learn about a game reaches every agent once helpers of two different models
@@ -271,38 +194,6 @@ A window that shows, for each agent you use, what's left of its limits: the 5-ho
 and Codex, and a monthly limit or the credit left on an API key where the provider says it. Helpers already wait for a
 usage limit to reset; this shows it before they hit it, so you can pick which agents to start.
 
-### Big functions for every model
-
-In a DS game at 58%, functions under 400 instructions were mostly matched, and 25 of the 29 over 400 were open:
-40% of the code left, 10 of them never compiled. Agents of free models released them as "too big to transcribe in
-one go", and they're right about the medium: a big function's Ghidra draft is 10-25 KB of C, more than one
-compile_and_diff a model with a small output limit can send, and its assembly takes most of a small context.
-
-The big ones that matched show the way. A 2,793-instruction switch matched in 2 compiles as 125 lines of C, and a
-1,272-instruction one by a free model, in 2 compiles too: their cases are long runs of the same calls with other
-numbers, and the agent wrote one-letter macros for them (`#define A(x) func_0206d4f8(x, 1)`). Two of the untried big
-functions are in that file, macros defined, and their briefs don't show the match: a matched look-alike's C is shown
-only under 3,000 characters.
-
-1. **Briefs for big functions** (no new tool). Over 400 instructions, the brief says how such functions matched
-   (macros for the runs of calls that repeat, the file's own macros listed), and shows a matched look-alike's C
-   whatever its length, with its macros.
-2. **One case at a time.** A `compile_part(function, part, code)` tool: the function's current C stays in its file,
-   one part (a switch case, from the target's jump table: ARM's `add pc, pc, r0, lsl #2` and the branches after it;
-   or a block between labels) is replaced, the unit is built and judged as always, and the answer is that part's
-   rows of the diff. A first compile sends the skeleton (prologue, the switch, empty cases, epilogue). Each call
-   carries 100-200 instructions' worth, which any model handles. The judge doesn't change: the function matches
-   when objdiff says 100% for all of it.
-3. **Several agents on one function, at once.** With parts, a big function can be held in parts: each agent claims
-   a part, works on it with compile_part, and its change stays when the function's score gets no worse and no
-   other part's rows get worse (the compiler allocates registers over the whole function, so a case can move
-   another's; such a change is refused, saying which part moved). Agents see each other's parts land, through the
-   file, and notes per part. Briefs give each agent its part's assembly only.
-
-Measure each step on that DS game's 25: how many get tried and how far, against the week before. Step 2 is what
-matters most for free models: step 3 adds speed, and contention on one file, so it waits until 2 shows parts can be
-worked on alone.
-
 ### Library decomps built locally
 
 Twins across your games already match library code you matched once. The next step: match library decomps and
@@ -327,28 +218,6 @@ Windows PC (MSVC: `this` in ecx) work the same way with their own instruction re
 The export rebuilds the game byte for byte; mods need code that can move. Build a second copy with padding inserted
 and report every address that is still hard-coded ("93% movable, 41 addresses left"). The matching build stays as
 it is.
-
-### A list of open rooms (to investigate)
-
-Asked for by a user: a page where you see the rooms running now and join one. Hosts would still host their own
-rooms, as now (the host's decompdecomp is the room, through its tunnel or address); a small directory server would
-only list the public rooms whose hosts chose to list them: the game's name and hash, the platform, % matched, members,
-and the room's address, dropped when the host stops answering. Joining is unchanged: the guest's own copy of the game
-must have the host's SHA-1, and only the work travels.
-
-Before building it, find out:
-
-- **Is it allowed?** What a public directory of rooms means legally for the project, in the places it's used: what
-  it may show (titles are trademarks: name only, no box art or screenshots), whether listing a room makes the
-  directory responsible for what the room does, and what notice-and-takedown it needs. Check that nothing a listed
-  room sends is the game's code or data, for git projects too (forkroom.py: what a joining guest gets of the host's
-  tree).
-- **Who runs it, and for what cost.** The site is static (GitHub Pages), so the list needs a host of its own; a
-  small worker with a heartbeat per room may be enough.
-- **Abuse and privacy.** Listing is opt-in per room and off by default; a room on a plain address shows the host's
-  IP, so only tunnelled rooms could be listed; room names need limits, and a host or the directory can delist one.
-
-The answer goes here: build it, build part of it, or not, and why.
 
 ### A shareable progress card
 

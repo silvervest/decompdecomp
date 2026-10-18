@@ -9,10 +9,9 @@ Where things live:
 
 - **The patches** are commits on the `xbox` branch of our wibo fork, https://github.com/silvervest/wibo (on top of
   tag 1.2.0). `wibo.ref` pins the commit Xbox projects use.
-- **The release binary** `wibo-xbox-x86_64` is a GitHub release of this repository, built by
-  `.github/workflows/wibo-xbox.yml` when a `wibo-xbox-*` tag is pushed. It builds the pinned commit in wibo's own
-  Alpine image, as wibo's CI does (static, with wibo's test suite run first). `toolchains.toml`'s `[wibo-xbox]` entry
-  pins it by sha256.
+- **The release binary** is a release of that fork. wibo's own CI builds it when a tag (e.g. `1.2.0-xbox.1`) is
+  pushed there: static, in wibo's Alpine image, after wibo's test suite. The fork publishes it instead of leaving a
+  draft. `toolchains.toml`'s `[wibo-xbox]` entry pins the release's `wibo-x86_64` by sha256.
 - **The local recipe** is `build.sh`:
 
 ```sh
@@ -25,8 +24,10 @@ default preset is `release64-clang`. With GCC, use `WIBO_PRESET=release64`. If t
 `ld.lld`, pass them through `WIBO_CMAKE_ARGS` (for example
 `-DLIBCLANG_LIBRARY=/path/libclang.so -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld`).
 
-To change the patches: commit on the fork's `xbox` branch, update `commit=` in `wibo.ref`, push a new `wibo-xbox-*`
-tag here, then pin the new release's sha256 in `toolchains.toml`.
+To change the patches:
+1. Commit on the fork's `xbox` branch.
+2. Push a new tag there (`1.2.0-xbox.N`) and wait for the fork's CI to publish the release.
+3. Update `commit=` in `wibo.ref`, and the URL and sha256 of `[wibo-xbox]` in `toolchains.toml`.
 
 ## What the patches add
 

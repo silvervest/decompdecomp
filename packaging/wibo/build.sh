@@ -3,8 +3,8 @@
 #
 #   packaging/wibo/build.sh [output-dir]       (default: packaging/wibo/out)
 #
-# The release binary decompdecomp installs is built by .github/workflows/wibo-xbox.yml from the same commit, in wibo's
-# own Alpine image (static, with wibo's tests). This script is the local recipe: it clones the pinned commit into
+# The release binary decompdecomp installs is a release of the wibo fork, built by wibo's own CI from the same commit
+# in wibo's Alpine image (static, with wibo's tests). This script is the local recipe: it clones the pinned commit into
 # <output-dir>/wibo-src, builds the 64-bit Linux release binary and prints its sha256. The binary is <output-dir>/wibo.
 #
 # With Docker (WIBO_DOCKER=1) it builds as the release does: a static binary in wibo's Alpine image. Without Docker it

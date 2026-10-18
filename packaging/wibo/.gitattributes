@@ -1,0 +1,2 @@
+# git am needs the patches byte-for-byte, so they must never be converted to CRLF on Windows checkouts
+patches/*.patch -text

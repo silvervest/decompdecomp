@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ... import toolchains
+from ...forks import convention
 from ...forks import ltcg as ltcg_mode
 from ...forks.project import ForkError
 from ..pc import scratch as scratch_pe
@@ -454,11 +455,19 @@ def create(root: Path, game: Path, *, compiler: str | None = None, ltcg: bool | 
     groups |= {f"xdk_{u.removeprefix('text_')}": fns for u, fns in scratch_pe.units(library).items()}
     log(f"{len(functions)} functions, {len(library)} of them the XDK's library code (set aside); "
         f"{info['compiler_why']}: Visual C++ {compiler}")
-    # link-time code generation (forks/ltcg.py): an explicit choice until something detects it
+    # link-time code generation (forks/ltcg.py): the user's choice (the import's switch, or DECOMP_XBOX_LTCG), else
+    # what the program's call sites say (forks/convention.py)
+    if ltcg is None and os.environ.get("DECOMP_XBOX_LTCG", "") != "":
+        ltcg = os.environ["DECOMP_XBOX_LTCG"] != "0"
+    found_ltcg = None
     if ltcg is None:
-        ltcg = os.environ.get("DECOMP_XBOX_LTCG", "") not in ("", "0")
-    lt = {"cl_flags": LTCG_CL_FLAGS, "prepare": ltcg_mode.prepare, "manifest": {"ltcg": True}} if ltcg else \
-        {"cl_flags": CL_FLAGS}
+        found_ltcg = convention.detect_functions(xbe, game_fns)
+        ltcg = found_ltcg["ltcg"]
+        log(f"link-time code generation? {found_ltcg['why']}"
+            + "".join(f"\n  e.g. {e}" for e in found_ltcg["examples"][:2]))
+    evidence = {"ltcg_detected": found_ltcg} if found_ltcg else {}
+    lt = {"cl_flags": LTCG_CL_FLAGS, "prepare": ltcg_mode.prepare, "manifest": {"ltcg": True, **evidence}} if ltcg \
+        else {"cl_flags": CL_FLAGS, "manifest": evidence}
     if ltcg:
         log("link-time code generation: units are built in harness mode once their driver (harness/) calls them")
     return scratch_pe.write_project(

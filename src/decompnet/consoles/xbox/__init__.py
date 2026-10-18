@@ -35,6 +35,7 @@ class Xbox(Console):
     guides = ("x86", "xbox", "cpp")
     compiler_guide = "xbox"  # given up front; it starts by pointing at the x86 guide, which holds what PC shares
     ram = (0x00010000, 0x80000000)  # an XBE loads at 0x10000; the kernel lives above 0x80000000
+    import_options = ("ltcg",)  # built with link-time code generation or not (None: told from the program)
 
     def sniff(self, head: bytes, file) -> bool:
         from . import scratch, xdvdfs
@@ -51,10 +52,12 @@ class Xbox(Console):
     def default_compiler(self, info: dict, splat_guess: str) -> str:
         return ""  # the program's library version table says which XDK, so which Visual C++, built it
 
-    def create_project(self, root: Path, game: Path, *, compiler: str | None = None, log=print) -> dict:
+    def create_project(self, root: Path, game: Path, *, compiler: str | None = None, ltcg: bool | None = None,
+                       log=print) -> dict:
+        """`ltcg`: the user's choice of link-time code generation (None: told from the program)."""
         from . import scratch
 
-        return scratch.create(root, game, compiler=compiler, log=log)
+        return scratch.create(root, game, compiler=compiler, ltcg=ltcg, log=log)
 
     def game_info(self, game: Path) -> dict:
         from . import scratch

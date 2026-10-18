@@ -250,6 +250,8 @@ function setupCompilers(info) {
   const p = info.platform, select = $("compilerPick"), note = $("compilerNote");
   const con = consoleOf(p) || { mode: "", compilers: [], packs: [], default_compiler: "" };
   $("compilerRow").hidden = false; note.hidden = true; $("mwConsent").hidden = true; $("mwAccept").checked = false;
+  // a console's own choice at import (Xbox: whether the game was built with link-time code generation)
+  $("ltcgRow").hidden = !(con.import_options || []).includes("ltcg"); $("ltcgPick").value = "";
   $("allCompilers").hidden = true;
   // where the import recognises library code: the project covers the game's own code, or the whole program
   $("scopeRow").hidden = !con.sets_aside; $("scopePick").value = "game";
@@ -383,9 +385,10 @@ $("analyse").onclick = async () => {
     try { await ensureCodeWarrior(); } catch (e) { importFailed(CW_PACK[packOf(picked.info.platform)].title, e, $("jobLog").textContent); return; }
   }
   const body = picked.buf instanceof Blob ? picked.buf : new Blob([picked.buf]);
+  const ltcg = $("ltcgRow").hidden ? "" : $("ltcgPick").value;
   const scope = $("scopeRow").hidden ? "" : $("scopePick").value;
   const all = !$("allCompilers").hidden && $("allAccept").checked ? "&all_compilers=1&accept=1" : "";
-  runImport(`confirmed=1${tc ? `&toolchain=${encodeURIComponent(tc)}` : ""}${scope ? `&scope=${scope}` : ""}${all}`, body, title, picked.name);
+  runImport(`confirmed=1${tc ? `&toolchain=${encodeURIComponent(tc)}` : ""}${ltcg ? `&ltcg=${ltcg}` : ""}${scope ? `&scope=${scope}` : ""}${all}`, body, title, picked.name);
 };
 $("pathPick").onclick = (e) => {
   e.stopPropagation();

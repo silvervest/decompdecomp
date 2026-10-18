@@ -338,12 +338,14 @@ HANDLERS: dict[str, Callable[..., str]] = {
         net.forks.split_file(agent, _fork(net, slug, "split_file"), path, at, new_name, data),
     "join_functions": lambda net, agent, slug, function, with_function, reason:
         net.forks.propose_join(agent, _fork(net, slug, "join_functions"), function, with_function, reason),
+    "standins_for": lambda net, agent, slug, what: net.forks.standins_for(agent, _fork(net, slug, "standins_for"), what),
 }
 
 ROM_ONLY = {"get_context", "edit_context", "split_function", "report_boundary", "get_class",
             "guess_struct", "redraft",
             "compiler_map", "search_flags"}
-FORK_ONLY = {"read_file", "search_code", "edit_file", "file_status", "split_file", "join_functions", "tidy_done"}
+FORK_ONLY = {"read_file", "search_code", "edit_file", "file_status", "split_file", "join_functions", "tidy_done",
+             "standins_for"}
 
 
 def tool_names(fork: bool) -> list[str]:
@@ -670,6 +672,15 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
         alone, a switch whose cases are in the next symbol. Say what in the code shows it. Once agents of two models
         say so of the same two, they're joined, if the game still builds byte for byte; never a matched function."""
         return await run(ctx, "join_functions", function=function, with_function=with_function, reason=reason)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def standins_for(ctx: Context, what: str) -> str:
+        """Forks only (PC, Xbox; for games built with link-time code generation): starting points for a unit's
+        harness, from the original's references: stand-ins for the data and functions it uses from elsewhere
+        (each callee with the registers it reads and how it's called), a HarnessEntry calling the unit's functions
+        the way the original's callers do, and the declarations its source needs. `what`: a unit, its source file
+        or one of its functions. Write them into harness/ with edit_file, then shape them like the real ones."""
+        return await run(ctx, "standins_for", what=what)
 
     @mcp.prompt(title="Decompile", description="Work loop: claim functions and match them byte for byte.")
     def work(count: str = "5") -> str:

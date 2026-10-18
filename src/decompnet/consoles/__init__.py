@@ -72,6 +72,7 @@ class Console:
     demo = ""  # its homemade demo game: a folder in projects/ whose build.py makes it (tests/test_consoles.py)
     demo_tools: tuple[str, ...] = ()  # what building and importing the demo needs: toolchains, or programs on PATH
     own_features: frozenset[str] = frozenset()  # EXPORT, REBUILD_CHECK
+    import_options: tuple[str, ...] = ()  # PROJECT mode: choices at import its create_project takes ("ltcg": Xbox)
     # PROJECT mode: its import recognises code that isn't the game's own (library code, an SDK, the C runtime) and
     # sets it aside, so the import asks what the project covers and create_project takes `scope` (forks/project.py)
     sets_aside = False
@@ -106,16 +107,19 @@ class Console:
         return False
 
     def import_game(self, net, file: bytes | Path, *, toolchain: str | None = None, flags: list[str] | None = None,
-                    name: str = "", log=print, scope: str | None = None) -> str:
+                    name: str = "", log=print, scope: str | None = None, **options) -> str:
         """Start a project from the user's own copy of the game; returns its slug. The mode's way by default.
-        `scope`: what the project covers, where the console sets library code aside (`sets_aside`); else ignored."""
+        `scope`: what the project covers, where the console sets library code aside (`sets_aside`); else ignored.
+        `options`: the user's choices at import; PROJECT mode hands create_project those the console takes
+        (`import_options`) and drops the rest."""
         if self.mode == ROM:
             return net.import_split(self, self.read_game(file, name), toolchain=toolchain, flags=flags, log=log)
         if self.mode == PROJECT:
             path = Path(file) if isinstance(file, (str, Path)) else net.saved_file(file, name or self.upload_name(file))
             known = toolchain if toolchain in {c.id for c in self.compilers} else None  # (a ROM console's id: not ours)
+            chosen = {k: v for k, v in options.items() if k in self.import_options}
             return net.forks.create_scratch(path, self, compiler=known, log=log,
-                                            scope=scope if self.sets_aside else None)
+                                            scope=scope if self.sets_aside else None, **chosen)
         raise RomError(f"{self.name or 'these'} games can't be started from scratch in this version: continue a public "
                        "decomp of the game instead")
 
@@ -293,7 +297,7 @@ class Console:
                 "compilers": [{"id": c.id, "name": c.name, "built": c.built} for c in self.compilers],
                 "installable": self.installable_compilers(),
                 "default_compiler": self.default_compiler({}, "") if self.mode else "",
-                "sets_aside": self.mode == PROJECT and self.sets_aside}
+                "import_options": list(self.import_options), "sets_aside": self.mode == PROJECT and self.sets_aside}
 
 
 def _registry() -> list[Console]:

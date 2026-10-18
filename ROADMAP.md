@@ -38,7 +38,7 @@ folder, `src/decompnet/consoles/<id>/`; a new console adds a column (CONTRIBUTIN
 | Polish matched code (still matching) | ✓ | ✓ | ✓ | — | — | — | — | — |
 | Save and restore (`progress/`, Open a saved project) | ✓ | ✓ | ✓ | the project's git | the project's git | the project's git | the project's git | the project's git |
 | Rebuildable export | ✓ | ✓ | ✓ | the project | — | the project | — | the project |
-| LTCG games (`/GL`: register conventions, cross-file inlining) | | | | | | | harness mode, chosen at import (no detection yet) | |
+| LTCG games (`/GL`: register conventions, cross-file inlining) | | | | | | | harness mode, detected at import (or chosen); convention evidence, stand-in drafts, data check | |
 | Rooms: decompile together | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
 
 Where to start on a gap:

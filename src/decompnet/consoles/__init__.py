@@ -263,9 +263,11 @@ class Console:
         None where the project can't tell."""
         return None
 
-    def refresh_project(self, fp, log=print) -> None:
+    def refresh_project(self, fp, log=print) -> list[str]:
         """Before a project's first build in a run of the app: bring what this console wrote into it (its tools/) up
-        to this version's, so fixes reach projects made by older ones."""
+        to this version's, so fixes reach projects made by older ones. Returns what changed (the app measures the
+        project again when anything did)."""
+        return []
 
     # for agents
 

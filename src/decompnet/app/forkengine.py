@@ -561,8 +561,24 @@ class ForkEngine:
             return
         self._refreshed.add(proj["id"])
         try:
-            consoles.get((fp.manifest or {}).get("platform")).refresh_project(fp, log=lambda *_: None)
+            changed = consoles.get((fp.manifest or {}).get("platform")).refresh_project(fp, log=lambda *_: None)
         except OSError:
+            changed = []
+        if changed:  # the judge's tools changed: measure every unit with them once, not as agents next touch it
+            threading.Thread(target=self._remeasure, args=(proj["slug"],), daemon=True,
+                             name=f"remeasure-{proj['slug']}").start()
+
+    def _remeasure(self, slug: str) -> None:
+        """Rebuild every unit and measure the project again (after its tools changed: a fix in dll2coff, say, gives
+        back matches the old one lost)."""
+        try:
+            proj, fp, _ = self.get(slug)
+            with self._tree(proj).exclusive():
+                self._build_all(proj, fp)
+                self._scores = {k: v for k, v in self._scores.items() if k[0] != proj["id"]}
+                rep = fp.report()
+            self.sync(slug, log=lambda *_: None, rep=rep)
+        except (NetworkError, ObjdiffError, ForkError, OSError):
             pass
 
     def _keep_scores(self, proj, unit, text: str, scores: dict) -> None:

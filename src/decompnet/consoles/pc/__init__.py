@@ -120,11 +120,11 @@ class WindowsPC(Console):
         key = _address_key(old)
         return rf"\b_*{key}\b" if key else super().rename_pattern(old)
 
-    def refresh_project(self, fp, log=print) -> None:
+    def refresh_project(self, fp, log=print) -> list[str]:
         """The project's tools/ brought up to the template (scratch.refresh_tools)."""
         from . import scratch
 
-        scratch.refresh_tools(fp, log=log)
+        return scratch.refresh_tools(fp, log=log)
 
     def check_rebuild(self, fp, version: str, log=print) -> dict:
         """The project's `ninja export`: the program linked again with the game's own linker, compared byte for byte."""

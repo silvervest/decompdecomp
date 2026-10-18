@@ -148,6 +148,18 @@ def _digest(code: str) -> str:
     return hashlib.sha1(re.sub(r"\s+", " ", code).strip().encode()).hexdigest()
 
 
+def _set_aside(fp: ForkProject) -> dict[str, str]:
+    """Symbol -> why it's set aside, for functions a project made from scratch says aren't the game's (an Xbox
+    game's XDK library code, found by scratch_xbe): the manifest names the file (`set_aside`)."""
+    rel = (fp.manifest or {}).get("set_aside")
+    if not rel:
+        return {}
+    try:
+        return json.loads((fp.root / rel).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
 def _matched_in(rep: dict, broken: set[str] = frozenset()) -> set[tuple[str, str]]:
     """(unit, function) pairs a progress report counts as matched; units that don't build are measured from an old
     object, so nothing in them counts."""
@@ -583,6 +595,7 @@ class ForkEngine:
                 raise NetworkError(f"objdiff couldn't measure the project: {e}") from None
         units = {u.name: u for u in fp.units()}
         rows = [(u["name"], f) for u in rep.get("units", []) for f in u.get("functions", [])]
+        aside = _set_aside(fp)
         counts: dict[str, int] = defaultdict(int)
         for _, f in rows:
             counts[f["name"]] += 1
@@ -630,7 +643,9 @@ class ForkEngine:
                         fuzzy = None if fuzzy is None else min(fuzzy, 99.99)
                 if old is not None:
                     meta.update({k: v for k, v in self._meta(old).items() if k in _ASM_KEYS})
-                status = "matched" if fuzzy is not None and fuzzy >= 100 else "open" if u and u.source else "nosource"
+                if sym in aside:  # library code the importer found (an Xbox game's XDK code): not the game's
+                    meta["asm_code"] = aside[sym]
+                status ="matched" if fuzzy is not None and fuzzy >= 100 else "open" if u and u.source else "nosource"
                 if status == "open" and any(meta.get(k) for k in _ASM_KEYS):
                     status = "asm"  # hand-written assembly (here or in its twin elsewhere): not for agents
                 score = None if fuzzy is None else scaled(fuzzy, n)
@@ -2071,7 +2086,7 @@ class ForkEngine:
 
         proj, fp, _ = self.get(slug)
         name = what.strip().strip("`'\"")
-        if (fp.manifest or {}).get("platform") == "win32":  # the program's data isn't in the target objects
+        if (fp.manifest or {}).get("platform") in ("win32", "xbox"):  # the program's data isn't in the target objects
             return scratch_pe.read_data(fp.root, fp.manifest, name, length)
         held = agent and self.net.store.one("SELECT f.unit FROM claims c JOIN functions f ON f.id=c.function_id "
                                             "WHERE c.agent_id=?", agent.id)

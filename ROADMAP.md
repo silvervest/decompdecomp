@@ -17,8 +17,8 @@ start). Keep this table true when a feature ships or reaches another platform.
 | Judge | link · compare | link · compare | link · compare | link · compare | objdiff | objdiff | objdiff | objdiff | objdiff |
 | Machine drafts (m2c, Ghidra for x86) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ Ghidra | ✓ Ghidra | by architecture |
 | Autopilot: free matches from drafts | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | — | — |
-| Twins: free matches from identical code | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | COFF fingerprints (new; no free match seen yet) | as PC | ✓ |
-| Permuter on near misses | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
+| Twins: free matches from identical code | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ COFF fingerprints | ✓ (an XDK test program: a free match) | ✓ |
+| Permuter on near misses | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (an XDK test program: a method matched) | ✓ |
 | Hand-written assembly set aside | ✓ | ✓ | ✓ | — | ✓ | — | — | — | MIPS, PowerPC |
 | Kernel and BIOS stubs set aside | — | ✓ | ✓ | — | — | — | — | ✓ XDK library code | — |
 | Function-end reports (`report_boundary`) | ✓ | ✓ | ✓ | — | — | — | — | — | — |
@@ -38,12 +38,15 @@ Where to start on a gap:
 - **Windows PC**: autopilot needs drafts that compile (Ghidra's output doesn't, as it is); the export needs a linker
   story (the project is delinked COFF objects).
 - **Function-end reports** cut MIPS functions (`engine._cut`); GBA has its own splitter (`_split_gba`).
-- **Xbox (and PC)**: on a test program built with the XDK, free C++ functions an attempt matched later showed as
-  "not in your build" in the unit-wide diff (`objdiff.diff(..., symbol=None)` scores), which set them back to open
-  (`forkengine._apply_scores`); methods kept their match. Twins and the permuter only see matched functions, so they
-  wait on that. Rooms haven't been run on Xbox (the room tests use a DS game).
+- **Xbox**: rooms haven't been run on Xbox (the room tests use a DS game). Twins and the permuter have only been
+  seen on a small test program built with the XDK, not on a real game yet.
 
 ## Recently done
+
+- **Matches stay matched on PC and Xbox.** A free function that another function of its file calls was listed twice
+  by objdiff (the delinked original carried an undefined copy of its name), and the unscored copy set the match back
+  to open at the next attempt in the file. Each function now counts once, and delink.py refers to the definition.
+  With matches kept, twins and the permuter give free matches on an XDK test program.
 
 - **Range checks** (MIPS ROM projects). An agent's "this range was built by another compiler" is a hypothesis: the
   judge tests the functions next to it (their matches, agents' attempts, the survey, habits), and where nothing

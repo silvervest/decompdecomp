@@ -114,6 +114,68 @@ def test_a_callback_naming_the_function_itself_says_so(tmp_path):
     assert side["conflicts"] == ["+0x1: yours refers to this function itself, the original to 0x11100"]
 
 
+def test_references_the_link_left_unresolved_are_the_originals_and_unchecked(tmp_path):
+    # G calls two functions of its unit nobody has written yet and reads a global only they define: linked with
+    # /FORCE:UNRESOLVED, all three land at the DLL's image base
+    orig = bytes.fromhex("e8 fb000000" "e8 26010000" "b9 a0f20100" "c3")  # call 0x11100; call 0x11130; mov ecx, D
+    ours = bytes.fromhex("e8 fbefffff" "e8 f6efffff" "b9 00000010" "c3")  # call BASE; call BASE; mov ecx, BASE
+    relocs = [[1, scratch_pe.REL32, "_func_00011100", 0], [6, scratch_pe.REL32, "_func_00011130@8", 0],
+              [11, DIR32, "_D_0001F2A0", 0]]
+    (tmp_path / "u.map.link.txt").write_text(
+        'a.obj : error LNK2001: unresolved external symbol "void __cdecl func_00011100(void)" (?func_00011100@@YAXXZ)\n'
+        "a.obj : error LNK2001: unresolved external symbol _func_00011130@8\n")
+    got, side = _judge(tmp_path, orig, relocs, ours, [0x100B], [])
+    assert [(o, n) for o, n, *_ in got] == [(1, "_func_00011100"), (6, "_func_00011130@8"), (11, "_D_0001F2A0")]
+    assert side["conflicts"] == [] and side["data"] == [] and side["unresolved"] == ["+0x1", "+0x6", "+0xB"]
+    report = json.loads((tmp_path / "u.ltcg.json").read_text())
+    assert report["unresolved"] == ["?func_00011100@@YAXXZ", "_func_00011130@8"]
+
+
+def test_the_harness_link_goes_on_when_only_symbols_are_unresolved(tmp_path):
+    ltcg_tool = _tool("ltcg")
+    assert "/FORCE:UNRESOLVED" in ltcg_tool.LINK_FLAGS
+    fake = tmp_path / "link.py"
+    fake.write_text("import sys, pathlib\npathlib.Path(sys.argv[1]).write_text('dll')\nprint(sys.argv[2])\n"
+                    "sys.exit(1)\n")
+    out, log = tmp_path / "u.dll", tmp_path / "u.map.link.txt"
+    unresolved = "a.obj : error LNK2001: unresolved external symbol _f\nu.dll : fatal error LNK1120: 1 unresolved externals"
+    assert ltcg_tool.link(str(out), str(log), [sys.executable, str(fake), str(out), unresolved]) == 0
+    assert log.read_text().startswith("a.obj : error LNK2001") and ltcg_tool.unresolved(log.read_text()) == ["_f"]
+    other = "a.obj : error LNK2005: _f already defined in b.obj"
+    assert ltcg_tool.link(str(out), str(log), [sys.executable, str(fake), str(out), other]) == 1
+
+
+def test_the_brief_says_how_to_name_a_decorated_function():
+    from decompnet.app.forkengine import _naming_hint
+
+    hint = _naming_hint({"symbol": "_func_000115D0@8"}, {"name": "_func_000115D0@8"})
+    assert "__stdcall, popping 8 bytes" in hint and "func_000115D0" in hint and "// FUNCTION: 0x000115D0" in hint
+    assert "__cdecl" in _naming_hint({}, {"name": "_func_00011000"})
+    assert _naming_hint({"symbol": "?Update@CAI@@QAEXXZ"}, {"name": "x"}) == ""
+
+
+def test_a_claim_on_a_unit_that_doesnt_build_is_released_with_a_note(tmp_path):
+    from decompnet.app.engine import RomNetwork
+    from decompnet.app.forkengine import ForkEngine
+
+    net = RomNetwork(tmp_path / "app.db", tmp_path)
+    agent = net.authenticate(net.register_agent("a1"))
+    with net.store.tx() as db:
+        pid = db.execute("INSERT INTO projects(slug,name,root,config) VALUES('p','P',?,'{}')",
+                         (str(tmp_path),)).lastrowid
+        fid = db.execute("INSERT INTO functions(project_id,name,size,n_insns,status,unit,meta,asm) "
+                         "VALUES(?,?,4,1,'open','u','{}','')", (pid, "_func_00011000")).lastrowid
+        db.execute("INSERT INTO claims VALUES(?,?,?,?)", (fid, agent.id, 0, 1e12))
+    engine = ForkEngine.__new__(ForkEngine)
+    engine.net = net
+    fn = net.store.one("SELECT * FROM functions WHERE id=?", fid)
+    said = engine._release_stuck({"id": pid}, fn, agent, "u", "ninja: x\nFAILED: build/u.dll\nlink: error LNK2005")
+    assert "released" in said
+    assert net.store.all("SELECT * FROM claims WHERE function_id=?", fid) == []
+    note = net.store.one("SELECT text FROM notes WHERE function_id=?", fid)["text"]
+    assert note.startswith("u didn't build before this change either") and "FAILED: build/u.dll" in note
+
+
 def test_two_jump_tables_and_a_byte_table_relocate_each_entry_once():
     # jmp [eax*4+T1] (3 cases), movzx eax, byte [ecx+B]; jmp [eax*4+T2] (2 cases): T1's scan runs on into T2,
     # whose entries are code addresses too; listed twice, objdiff decoded the byte table after them as code

@@ -8,6 +8,8 @@ An Xbox game (--xdk: your own XDK's xbox folder) compiles against the XDK's head
 The build cuts every function out of your copy of the game (orig/, see config/VERSION/functions.json) into objects,
 one per source file (tools/delink.py), and compiles src/ with the game's Visual C++ (run through wibo on Linux and
 macOS). objdiff.json (for objdiff and decompdecomp) compares every source file's functions with the original's.
+`ninja export` rebuilds the game's program from the matched functions and your copy, with the game's own linker
+(an Xbox game's: the XDK's, then its imagebld), and says whether it's byte for byte your copy (tools/export.py).
 Made by decompdecomp.
 """
 
@@ -69,8 +71,16 @@ def source_of(unit: str) -> str:
     return cpp.as_posix() if cpp.exists() or not cpp.with_suffix(".c").exists() else cpp.with_suffix(".c").as_posix()
 
 
+def linker() -> Path:
+    """The game's linker: an Xbox game's is the XDK's own (bin/vc71), a PC game's the Visual C++ it was built with."""
+    xbin = Path(args.xdk) / "bin" / "vc71"
+    found = [xbin / "Link.Exe", xbin / "link.exe"] if args.xdk else []
+    return next((p for p in [*found, MSVC / "Bin" / "link.exe", MSVC / "Bin" / "LINK.EXE"] if p.exists()),
+                found[0] if found else MSVC / "Bin" / "link.exe")
+
+
 def main() -> None:
-    units = json.loads(CONFIG.read_text(encoding="utf-8"))["units"]
+    units =json.loads(CONFIG.read_text(encoding="utf-8"))["units"]
     headers = [str(p) for p in files("include", (".h", ".hpp"))]
     with open("build.ninja", "w", encoding="utf-8") as f:
         n = ninja_syntax.Writer(f)
@@ -109,6 +119,14 @@ def main() -> None:
             objs.append(str(obj))
         n.build("all_source", "phony", objs)
         n.build("prepare", "phony", [*targets, *objs])
+        # `ninja export`: the game's program rebuilt from the project and checked byte for byte (tools/export.py)
+        xdk = [f'--xdk "{args.xdk}"'] if args.xdk else []
+        wibo = [f'--wibo "{args.wibo}"'] if WRAP else []
+        n.rule("export", " ".join([f"{PY} tools/export.py {CONFIG} {BUILD / 'export'}", f'--link "{linker()}"',
+                                   *wibo, *xdk]), description="rebuild the game's program and compare it")
+        n.build(str(BUILD / "export" / "export.json"), "export", [*targets, *objs],
+                implicit=["tools/export.py", "objdiff.json"])
+        n.build("export", "phony", [str(BUILD / "export" / "export.json")])
         n.build("build.ninja", "configure", ["tools/configure.py", str(CONFIG), *headers, *harness_files,
                                              *[str(s) for s in files("src", (".c", ".cpp"))]])
         n.default(["prepare"])

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .. import BETA, PROJECT, Compiler, Console
+from .. import BETA, PROJECT, REBUILD_CHECK, Compiler, Console
 
 MSVC_VERSIONS = ["MSVC/6.0", "MSVC/7.0", "MSVC/7.1"]  # the `msvc` pack
 
@@ -37,6 +37,7 @@ class WindowsPC(Console):
     ram = (0x00400000, 0x80000000)  # a 32-bit program's address space above its usual image base
     demo = "demo-pc"
     demo_tools = ("msvc", "objdiff-cli", "wibo", "ghidra", "java")  # Ghidra needs Java 21 or newer
+    own_features = frozenset({REBUILD_CHECK})  # `ninja export` relinks the program (project_template/tools/export.py)
 
     def sniff(self, head: bytes, file) -> bool:
         from .scratch import is_pe
@@ -118,6 +119,12 @@ class WindowsPC(Console):
         Town::func_0041B470 too); a real name given before as itself."""
         key = _address_key(old)
         return rf"\b_*{key}\b" if key else super().rename_pattern(old)
+
+    def check_rebuild(self, fp, version: str, log=print) -> dict:
+        """The project's `ninja export`: the program linked again with the game's own linker, compared byte for byte."""
+        from . import scratch
+
+        return scratch.check_program(fp, version, log=log)
 
 
 def _address_key(name: str) -> str | None:

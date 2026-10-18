@@ -16,6 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import capstone
 import pytest
 
 from decompnet import toolchains
@@ -192,6 +193,22 @@ def test_a_global_annotation_says_which_original_address_a_named_global_is(tmp_p
     p.write_text("// GLOBAL: 0x10 g_x\n// GLOBAL: 0x20 g_y\n\n// GLOBAL: 0x30\n// the table\nfloat g_t[4];\n")
     assert dll2coff.global_annotations([p]) == {"g_x": 0x10, "g_y": 0x20, "g_t": 0x30}
     assert dll2coff.global_symbol({"?g_t@@3PAMA": 1, "_g_x": 2}, "g_t") == "?g_t@@3PAMA"
+    # a reference just past a float isn't the float (the map doesn't name what's there); arrays and structs have
+    # no size in their names
+    assert [dll2coff.scalar_size(s) for s in ("?g_k@@3MB", "?g_n@@3_JA", "?g_t@@3PAMA", "?g_s@@3US@@A", "_D_1")] == \
+        [4, 8, None, None, None]
+
+
+def test_an_address_where_one_global_starts_may_end_the_one_before(tmp_path):
+    # the original loops up to the end of table A (0x30010), which in ours is where B starts
+    src, _ = _project(tmp_path)
+    (tmp_path / "u.map").write_text(MAP.replace("?g_a@@3HA ", "?g_a@@3PAHA").replace(
+        "0002:00000004       _D_00030004                10002004",
+        "0002:00000004       _D_00030010                10002004"))
+    src.write_text("// GLOBAL: 0x30000 g_a\n" + src.read_text())
+    _, report = _run_dll2coff(tmp_path, src)
+    assert report["functions"]["?F2@@YAHH@Z"]["data"] == []  # 0x30004: g_a + 4, as the original says
+    assert report["functions"]["?F2@@YAHH@Z"]["data_checked"] == 1
 
 
 def test_compiler_literals_are_compared_by_value():
@@ -206,6 +223,17 @@ def test_compiler_literals_are_compared_by_value():
                               0x10001010, lambda va: None, lits.get)
     assert out == {"data_checked": 2, "data": ['+0x6: yours loads "ho" (??_C@_02hi@) where the original loads "hi" '
                                                "(0x30010)"]}
+    # a global's own address where the original has another is a finding, except as what `cmp` compares with (an
+    # end pointer: one past an array, where ours may have put another global)
+    wrong = lambda va: ([("?g_b@@3HA", 0x30020)], True)  # noqa: E731
+    found = dll2coff.data_check(fn, exe, Orig(), [(1, DIR32, 0x10002000)], 0x10001000, 0x10001010, wrong, lits.get)
+    assert found["data"] == ["+0x1: yours refers to ?g_b@@3HA (0x30020) where the original refers to 0x30000"]
+    assert dll2coff.data_check(fn, exe, Orig(), [(1, DIR32, 0x10002000)], 0x10001000, 0x10001010, wrong, lits.get,
+                               loose={1}) == {"data_checked": 0, "data": []}
+    img = dll2coff.Image(_pe([(".text", 0x1000, bytes.fromhex("3dd0e83900" "a100200010" "c3"))], []))
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+    md.detail = True
+    assert dll2coff.bounds(md, img, BASE + 0x1000, BASE + 0x100B) == {1}  # cmp eax, imm: yes; mov eax, [mem]: no
 
 
 def test_the_progress_report_counts_functions_failing_the_ltcg_checks_as_not_matched(tmp_path):

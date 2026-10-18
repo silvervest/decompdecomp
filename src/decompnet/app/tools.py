@@ -202,7 +202,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
         net.request_boundary(agent, slug, function, end, reason),
     "read_data": lambda net, agent, slug, what, length=64: (net.forks.read_data(agent, slug, what, length)
                                                             if net.fork_slug(slug) else net.read_data(slug, what, length)),
-    "get_class": lambda net, agent, slug, what="": net.get_class(slug, what),
+    "get_class": lambda net, agent, slug, what="": (net.forks.get_class(slug, what) if net.fork_slug(slug)
+                                                    else net.get_class(slug, what)),
     "compiler_map": lambda net, agent, slug, survey=False, check_ranges=False:
         net.compiler_map_text(slug, bool(survey), bool(check_ranges)),
     "list_functions": lambda net, agent, slug, status="open", limit=40: net.list_functions(slug, status, limit),
@@ -225,8 +226,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "standins_for": lambda net, agent, slug, what: net.forks.standins_for(agent, _fork(net, slug, "standins_for"), what),
 }
 
-ROM_ONLY = {"get_context", "edit_context", "rename_symbol", "split_function", "report_boundary", "get_class",
-            "compiler_map"}
+ROM_ONLY = {"get_context", "edit_context", "rename_symbol", "split_function", "report_boundary", "compiler_map"}
 FORK_ONLY = {"read_file", "search_code", "edit_file", "file_status", "split_file", "standins_for"}
 
 
@@ -358,9 +358,11 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
 
     @mcp.tool(meta=ALWAYS_LOAD)
     async def get_class(ctx: Context, what: str = "") -> str:
-        """C++ classes found in the game's code (ROM projects): give a vtable address or a virtual function,
-        constructor or destructor for its class's fields (offset, type, which functions use them) and virtual
-        functions by slot; nothing lists them all. A layout to write the class from: the judge still decides."""
+        """C++ classes found in the game's code (MIPS ROM projects; PC and Xbox projects made from scratch, where it
+        also finds structs with member functions): give a vtable address or a virtual function, constructor or
+        destructor (PC/Xbox: any member function, or a global object) for its fields (offset, type, which functions
+        use them), its functions, virtual functions by slot and (PC/Xbox) a declaration to start from; nothing
+        lists them all. A layout to write the class from: the judge still decides."""
         return await run(ctx, "get_class", what=what)
 
     @mcp.tool(meta=ALWAYS_LOAD)

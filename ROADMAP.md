@@ -25,7 +25,7 @@ start). Keep this table true when a feature ships or reaches another platform.
 | Compiler ranges and suggestions | ✓ | ✓ | ✓ | ✓ | the project's build | the project's build | the project's build | the project's build | the project's build |
 | Compiler map and the judge's survey | ✓ | ✓ | ✓ | — | — | — | — | — | — |
 | Range checks: a range applies after its neighbours confirm it | ✓ | ✓ | ✓ | — | — | — | — | — | — |
-| C++ classes from the code (`get_class`) | ✓ | ✓ | ✓ | — | — | — | — | — | — |
+| C++ classes from the code (`get_class`) | ✓ | ✓ | ✓ | — | — | — | ✓ structs and classes, member functions in briefs (the Xbox reader; untested on a PC program) | ✓ structs and classes, member functions in briefs and stand-ins (XDK test programs) | — |
 | Rebuildable export | ✓ | ✓ | ✓ | ✓ | the project | the project | `ninja export` (homemade programs) | `ninja export`: the game's linker and imagebld, LTCG units from their harness links | the project |
 | LTCG games (`/GL`: register conventions, cross-file inlining) | | | | | | | | harness mode, detected at import (or chosen); convention evidence, stand-in drafts, data check | |
 | Rooms: decompile together | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
@@ -33,8 +33,12 @@ start). Keep this table true when a feature ships or reaches another platform.
 Where to start on a gap:
 - **ARM (GBA, DS)**: assembly detection is `handwritten.py` (`mips_reason` and `ppc_reason` show the shape); the
   compiler map and class recovery read MIPS in `compilermap.quirks` and `classes.scan`, and want an ARM reader.
-- **PowerPC (GameCube, Wii) and x86 (PC)**: class recovery and the compiler map work on a project's objects in fork
-  mode, not on a ROM; the readers are the part to write (CodeWarrior's vtable pointer is often not at offset 0).
+- **PowerPC (GameCube, Wii)**: class recovery and the compiler map work on a project's objects in fork mode, not on a
+  ROM; the reader is the part to write (CodeWarrior's vtable pointer is often not at offset 0). x86's is
+  `forks/methods.py` (it reads the program and functions.json, as the convention evidence does).
+- **x86 member functions**: `forks/methods.py` can't tell a free function taking a pointer from a member function
+  when LTCG moves both into a register, and it groups a base class's functions, and a member object's at +0, with
+  the object they're called on. Names from another build (below) would settle both.
 - **Windows PC**: autopilot needs drafts that compile (Ghidra's output doesn't, as it is). The export
   (`tools/export.py`) is tested on homemade programs only: a real game's import table and resources are carried as
   bytes and its headers are your copy's, and a program with base relocations (.reloc) is untested (it links /FIXED).
@@ -72,6 +76,15 @@ Where to start on a gap:
   of `this` a function uses. On GTA San Andreas: 507 classes, and the recovered entity layout (position at +4, matrix
   pointer at +0x14, model index at +0x22) is the one found by hand. Why: functions with virtual calls matched 7% of
   the time against 62% for the rest, because agents guessed the layouts.
+- **Structs and classes for PC and Xbox** (MSVC, fork mode, `forks/methods.py`). A function that uses `this` (ecx
+  under __thiscall; under LTCG the register the convention evidence finds) as the base of field accesses is a member
+  function; functions called on one global object, local or returned pointer, passing `this` on, or sitting in a
+  vtable a constructor stores are one struct or class, with the fields they touch. The brief says "Looks like a
+  member function of ..." with the declaration to write, `get_class` has the layout and a declaration, and
+  `standins_for` drafts the structs. Why: on an Xbox test program agents wrote Accum::Add as a free function taking
+  an `Accum *`. Measured against the link maps of the XDK test programs: "is a member function" precision 100% /
+  recall 100% without LTCG (fog: 35 of 35; the demo: 7 of 7), 94% / 85% (fog) and 69% / 100% (the demo) with LTCG,
+  where free functions taking a pointer in a register look the same.
 - **Linux packages**: a `.deb` and an AppImage with their own Python, built for each release.
 - **Its own window and a tray icon**, so closing the window doesn't stop helper agents.
 
@@ -91,10 +104,10 @@ class and the parameter types, so carrying them over gives agents real signature
 constants they use, spread the pairs through the call graph, and let the user approve the names in bulk (as boundary
 reports are approved now). Names only: matching is unaffected. It also names the classes `get_class` finds.
 
-### C++ classes for PowerPC and x86
+### C++ classes for PowerPC
 
-The class recovery reads MIPS today. GameCube and Wii (CodeWarrior: the vtable pointer often isn't at offset 0) and
-Windows PC (MSVC: `this` in ecx) work the same way with their own instruction readers, in fork mode.
+The class recovery reads MIPS and x86 (MSVC, PC and Xbox) today. GameCube and Wii (CodeWarrior: the vtable pointer
+often isn't at offset 0) work the same way with their own instruction reader, in fork mode.
 
 ### A modding-ready check for the export
 

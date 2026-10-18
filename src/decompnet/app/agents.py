@@ -1137,9 +1137,10 @@ def api_tool_schemas(fork: bool = False) -> list[dict]:
                            s(function=st("function", True), at=st("address like 0x80001234", True), new_name=st("name"))),
         "read_data": ("Hex dump of the original's data at an address or symbol.", s(what=st("address or symbol", True),
                                                                                     length=it("bytes, up to 512"))),
-        "get_class": ("C++ class layout found in the game's code: fields by offset and virtual functions by slot. "
-                      "Give a vtable address or one of its functions; empty lists the classes.",
-                      s(what=st("vtable address, or a virtual function / constructor"))),
+        "get_class": ("C++ class layout found in the game's code: fields by offset and virtual functions by slot "
+                      "(PC and Xbox: also structs with member functions, and a declaration to start from). Give a "
+                      "vtable address or one of its functions; empty lists the classes.",
+                      s(what=st("vtable address, or a virtual function / constructor / member function"))),
         "compiler_map": ("Which compiler built each part of the game, where it differs from today's. survey=true starts "
                          "the judge's survey of other compilers in the background; check_ranges=true looks at the "
                          "applied ranges again.", s(survey=bo("start the survey"), check_ranges=bo("check applied ranges"))),

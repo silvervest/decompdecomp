@@ -2,8 +2,11 @@
 which original function they are with `// FUNCTION: 0x<address>` annotations, its harness drivers include headers
 and other units' sources, and part of the program is middleware that isn't the game's code."""
 
-from decompnet.app.forkengine import ForkEngine
-from decompnet.forks import csource
+import json
+
+from decompnet.app.forkengine import ForkEngine, _set_aside
+from decompnet.forks import csource, objdiff
+from decompnet.forks.project import ForkProject
 
 SOURCE = """#include "ai/behaviour.h"
 
@@ -65,3 +68,28 @@ def test_the_engine_looks_a_pc_or_xbox_function_up_by_its_address_first():
     assert ForkEngine._names({"symbol": "Update"}, {"name": "Update", "vram": 0x8000A000})[0] == \
         csource.address_key(0x8000A000)
     assert ForkEngine._names({"symbol": "Update"}, {"name": "Update"}) == ["Update"]
+
+
+def test_progress_counts_the_games_own_code_with_middleware_set_aside_by_range(tmp_path):
+    conf = tmp_path / "config" / "v"
+    conf.mkdir(parents=True)
+    fns = [{"name": f"_func_{a:08X}", "addr": a, "size": 0x10} for a in (0x11000, 0x11010, 0x200000, 0x200010)]
+    (conf / "functions.json").write_text(json.dumps({"units": {"game": fns[:2], "rw": fns[2:3], "xdk": fns[3:]}}))
+    (conf / "set_aside.json").write_text(json.dumps({
+        "_func_00200010": "XDK D3D8 (d3d8.lib)",  # what an Xbox import writes: symbol -> why
+        "ranges": [{"from": "0x200000", "to": "0x200010", "why": "RenderWare 3.6"}]}))
+    (tmp_path / ".decomp.wtf.json").write_text(json.dumps({"version": "v", "platform": "xbox"}))
+    aside = _set_aside(ForkProject(tmp_path))  # found beside functions.json, even without the manifest naming it
+    assert aside == {"_func_00200010": "XDK D3D8 (d3d8.lib)", "_func_00200000": "RenderWare 3.6"}
+    rep = {"measures": {"total_functions": 4, "matched_functions": 2, "total_code": "64", "matched_code": "32",
+                        "matched_code_percent": 50.0},
+           "units": [{"name": "game", "functions": [{"name": "_func_00011000", "size": "16", "fuzzy_match_percent": 100},
+                                                    {"name": "_func_00011010", "size": "48", "fuzzy_match_percent": 50}]},
+                     {"name": "rw", "functions": [{"name": "_func_00200000", "size": "16", "fuzzy_match_percent": 100}]},
+                     {"name": "xdk", "functions": [{"name": "_func_00200010", "size": "16"}]}]}
+    m = objdiff.game_measures(rep, set(aside))
+    assert (m["total_functions"], m["matched_functions"], m["total_code"], m["matched_code"]) == (2, 1, "64", "16")
+    assert m["matched_code_percent"] == 25.0 and m["all_functions"] == 4 and m["set_aside_functions"] == 2
+    assert objdiff.game_measures(rep, set()) == rep["measures"]
+    assert objdiff.expand_set_aside({"functions": {"0x11010": "CRT"}}, {"units": {"game": fns}}) == \
+        {"_func_00011010": "CRT"}

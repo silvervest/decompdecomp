@@ -34,6 +34,7 @@ from ..forks import (
     drafts,
     dtksplits,
     ghidra,
+    objdiff,
     scratch_dsd,
     scratch_dtk,
     scratch_pe,
@@ -154,13 +155,18 @@ def _digest(code: str) -> str:
 def _set_aside(fp: ForkProject) -> dict[str, str]:
     """Symbol -> why it's set aside, for functions a project made from scratch says aren't the game's (an Xbox
     game's XDK library code, found by scratch_xbe): the manifest names the file (`set_aside`)."""
-    rel = (fp.manifest or {}).get("set_aside")
+    manifest = fp.manifest or {}
+    rel = manifest.get("set_aside") or (f"config/{manifest['version']}/set_aside.json" if manifest.get("version") and (
+        fp.root / "config" / str(manifest["version"]) / "set_aside.json").is_file() else None)
     if not rel:
         return {}
     try:
-        return json.loads((fp.root / rel).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = json.loads((fp.root / rel).read_text(encoding="utf-8"))
+        info = json.loads((fp.root / rel).with_name("functions.json").read_text(encoding="utf-8")) \
+            if isinstance(data.get("ranges"), list) else {}
+    except (OSError, ValueError, AttributeError):
         return {}
+    return objdiff.expand_set_aside(data, info)
 
 
 def _matched_in(rep: dict, broken: set[str] = frozenset()) -> set[tuple[str, str]]:
@@ -727,7 +733,7 @@ class ForkEngine:
                         for table in ("claims", "notes"):
                             db.execute(f"DELETE FROM {table} WHERE function_id=?", (fid,))
                         db.execute("DELETE FROM functions WHERE id=?", (fid,))
-            m = rep.get("measures", {})
+            m = objdiff.game_measures(rep, set(aside))  # % of the game's own code: set-aside code doesn't count
             self.net._event(db, proj["id"], None, "sync", f"{float(m.get('matched_code_percent', 0)):.2f}% of code matches")
         log(f"{m.get('matched_functions', 0)}/{m.get('total_functions', 0)} functions match, "
             f"{float(m.get('matched_code_percent', 0)):.2f}% of code")

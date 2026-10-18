@@ -316,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:
     ii.add_argument("--channel", choices=["release", "branch"], default="release")
     ii.add_argument("--branch", default="")
     ii.add_argument("--commit", default="")
-    ii.add_argument("--repo", default="n-delic/decompdecomp")
+    ii.add_argument("--repo", default="silvervest/decompdecomp")
     args = ap.parse_args(argv)
     __import__("decompnet").utf8_output()
     return {"setup": setup, "stop": stop, "shortcut": shortcut, "update": update_cmd,

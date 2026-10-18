@@ -55,6 +55,7 @@ TARGET = re.compile(r"//[ \t]*TARGET[ \t]+(0x[0-9a-fA-F]+)[ \t]+(\S+)")
 # "// GLOBAL: 0x<va> [map symbol]" then a declaration or definition of the global at that original address
 GLOBAL = re.compile(r"//[ \t]*GLOBAL:[ \t]*(0x[0-9a-fA-F]+)(?:[ \t]+(\S+))?[^\n]*\n"
                     r"((?:[ \t]*//(?![ \t]*GLOBAL:)[^\n]*\n|[ \t]*\n)*)((?![ \t]*//)[^\n;={(\[]*)?")
+UNRESOLVED = re.compile(r"unresolved external symbol (?:\"[^\"]*\" \()?([^\s()\"]+)\)?")  # tools/ltcg.py's
 LITERAL = re.compile(r"__real@([0-9a-fA-F]{8}|[0-9a-fA-F]{16})$")
 MAP_LINE = re.compile(r"^\s*([0-9a-fA-F]{4}):([0-9a-fA-F]{8})\s+(\S+)\s+([0-9a-fA-F]{8})\s")
 
@@ -353,6 +354,24 @@ def same_constants(fn: dict, exe: bytes, code: bytes, relocs: list) -> tuple[lis
     return sorted(relocs + added), sorted(o for o, *_ in added)
 
 
+def unresolved_as_original(fn: dict, relocs: list, targets: list[tuple[int, int, int]],
+                           image_base: int) -> tuple[list, set[int]]:
+    """References the harness link left unresolved (/FORCE:UNRESOLVED puts them at the DLL's image base: functions
+    of the unit nobody has written yet, or what only they call), written as the original's reference at the same
+    place. They can't be checked, so the mapping and data checks leave them out (as the LTCG harness does), and
+    the function lists them (`unresolved`). Returns (relocations, their offsets)."""
+    orig = {off: (rtype, name, addend) for off, rtype, name, addend in fn["relocs"]}
+    wild = {off for off, _, value in targets if value == image_base}
+    out = []
+    for r in relocs:
+        off, rtype = r[0], r[1]
+        if off in wild and off in orig and orig[off][0] == rtype and orig[off][1] is not None:
+            out.append((off, rtype, orig[off][1], orig[off][2]))
+        else:
+            out.append(r)
+    return out, wild
+
+
 ADDRESS_NAME = re.compile(r"^[_@]?(?:D|func)_([0-9A-Fa-f]{8})(?:@\d+)?$")  # export.py's: the address it means
 
 
@@ -569,13 +588,23 @@ def main() -> None:
         relocs, constants = same_constants(fn, exe, code, relocs)
         relocs = in_original_terms(md, code[:code_end(md, img, start, end) - start], start, fn, exe, relocs,
                                    annotated)
+        relocs, wild = unresolved_as_original(fn, relocs, targets, img.base)
         cuts.append({"name": fn["name"], "addr": addr, "offset": img.offset(start), "size": end - start,
                      "relocs": relocs})
-        check = mapping(fn, exe, targets, start, end, skip=set(constants), folded=folded)
+        known = [t for t in targets if t[0] not in wild]
+        check = mapping(fn, exe, known, start, end, skip=set(constants) | wild, folded=folded)
         check["constants"] = [f"+0x{o:X}" for o in constants]
-        check |= data_check(fn, exe, program, targets, start, end, claim, literal, bounds(md, img, start, end))
+        check["unresolved"] = [f"+0x{o:X}" for o in sorted(wild)]
+        check |= data_check(fn, exe, program, known, start, end, claim, literal, bounds(md, img, start, end))
         report["functions"][fn["name"]] = {"orig": f"0x{addr:08X}", "ours": f"0x{start:08X}", "symbol": sym,
                                            "size": end - start, "orig_size": fn["size"], "notes": notes, **check}
+    log = Path(f"{mapf}.link.txt")  # what the harness link said (tools/ltcg.py link)
+    if log.is_file():
+        found_unresolved = sorted(set(UNRESOLVED.findall(log.read_text(encoding="utf-8", errors="replace"))))
+        if found_unresolved:
+            report["unresolved"] = found_unresolved
+            print(f"{unit}: not built yet, so the harness link left them unresolved (write them in the unit, or stand "
+                  f"them in in harness/{unit}.<name>.cpp): {', '.join(found_unresolved[:12])}")
     data = delink.coff(cuts, img.data)
     path = Path(out)
     path.parent.mkdir(parents=True, exist_ok=True)

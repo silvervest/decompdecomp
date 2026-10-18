@@ -70,7 +70,10 @@ CRT_STUBS = {
     "memcpy": "void *__cdecl memcpy(void *d, const void *s, unsigned n) { char *p = (char *)d;"
               " const char *q = (const char *)s; while (n--) *p++ = *q++; return d; }\n",
 }
-LINK_FLAGS = ["/nologo", "/DLL", "/NOENTRY", "/NODEFAULTLIB", "/OPT:REF", "/LTCG"]
+# /FORCE:UNRESOLVED: a unit links while some of its functions (or what they call) aren't written yet; references to
+# them land at address 0, and dll2coff takes them as the original's (the functions using them say so)
+LINK_FLAGS = ["/nologo", "/DLL", "/NOENTRY", "/NODEFAULTLIB", "/OPT:REF", "/LTCG", "/FORCE:UNRESOLVED"]
+UNRESOLVED = re.compile(r"unresolved external symbol (?:\"[^\"]*\" \()?([^\s()\"]+)\)?")
 
 
 def harness_files(unit: str, harness: Path = Path("harness")) -> tuple[Path, list[Path]]:
@@ -118,8 +121,9 @@ def write_rules(n, *, units: list[str], source_of, build: Path, config: Path, cl
                            + (f" --wibo {wrap.strip()}" if wrap else ""))
     n.build(str(support), "ltcg_support", implicit=["tools/ltcg.py"])
     libdir = f' "/LIBPATH:{libpath}"' if libpath else ""
-    n.rule("ltcg_link", f'{sh}{wrap}"{link}" {q(LINK_FLAGS)}{libdir} /MAP:$map /OUT:$out $extra $in',
-           description="LTCG link $out")
+    # through `ltcg.py link`, which keeps what the linker said (<map>.link.txt: what's unresolved, for dll2coff)
+    n.rule("ltcg_link", f'{sh}{py} tools/ltcg.py link $out $map.link.txt -- {wrap}"{link}" {q(LINK_FLAGS)}{libdir}'
+                        f' /MAP:$map /OUT:$out $extra $in', description="LTCG link $out")
     n.rule("ltcg_coff", f"{py} tools/dll2coff.py {config} $unit $dll $map $out $sources")
 
     harness_paths = sorted(str(p) for p in Path("harness").rglob("*") if p.is_file()) if Path("harness").is_dir() else []
@@ -138,7 +142,8 @@ def write_rules(n, *, units: list[str], source_of, build: Path, config: Path, cl
             n.build(str(obj), "ltcg_cc", str(path), implicit=["tools/cldeps.py"], variables={"flags": q(flags)})
             objs.append(str(obj))
         dll, mapf = out / unit / f"{unit}.dll", out / unit / f"{unit}.map"
-        n.build(str(dll), "ltcg_link", [*objs, str(support)], implicit_outputs=[str(mapf)],
+        n.build(str(dll), "ltcg_link", [*objs, str(support)], implicit=["tools/ltcg.py"],
+                implicit_outputs=[str(mapf), f"{mapf}.link.txt"],
                 variables={"map": str(mapf), "extra": q(link_flags(sources))})
         base = build / src.with_suffix(".obj")
         n.build([str(base)], "ltcg_coff", [str(dll)], implicit=[str(mapf), str(config), "tools/dll2coff.py",
@@ -169,7 +174,35 @@ def support(out: Path, cl: str, lib: str, wibo: str) -> None:
     _run([*wrap, lib, "/nologo", f"/OUT:{os.path.relpath(out)}", *objs])
 
 
+def unresolved(log_text: str) -> list[str]:
+    """The symbols a /FORCE:UNRESOLVED link left unresolved, from what it said."""
+    return sorted(set(UNRESOLVED.findall(log_text)))
+
+
+def link(out: str, log: str, cmd: list[str]) -> int:
+    """Run the harness link, keep its output in `log`, show it. A /FORCE:UNRESOLVED link that made the DLL counts
+    as done when the only errors are unresolved symbols: the unit's unwritten functions (and what only they call)
+    aren't built yet, which shouldn't keep its written ones from being judged."""
+    if os.path.exists(out):
+        os.remove(out)
+    res = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+    text = res.stdout + res.stderr
+    Path(log).parent.mkdir(parents=True, exist_ok=True)
+    Path(log).write_text(text, encoding="utf-8")
+    print(text.rstrip())
+    if res.returncode == 0:
+        return 0
+    errors = [ln for ln in text.splitlines() if re.search(r"\berror LNK\d+", ln)]
+    only_unresolved = errors and all(re.search(r"error LNK(2001|2019|1120)\b", ln) for ln in errors)
+    if only_unresolved and os.path.exists(out):
+        print(f"(linked with {len(unresolved(text))} unresolved: those functions aren't built yet)")
+        return 0
+    return res.returncode
+
+
 def main() -> None:
+    if len(sys.argv) > 4 and sys.argv[1] == "link" and sys.argv[4] == "--":
+        sys.exit(link(sys.argv[2], sys.argv[3], sys.argv[5:]))
     p = argparse.ArgumentParser(description="LTCG harness mode helpers")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("support", help="build support.lib (C runtime stubs)")

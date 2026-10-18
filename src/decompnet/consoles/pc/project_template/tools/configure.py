@@ -47,6 +47,8 @@ CL = next((p for p in (MSVC / "Bin" / "CL.EXE", MSVC / "Bin" / "cl.exe") if p.ex
 # the headers: Visual C++'s own for a PC game; for an Xbox game the XDK's (its C runtime and xtl.h replace them)
 INCLUDE = Path(args.xdk) / "include" if args.xdk else MSVC / "Include"
 WRAP = f'"{args.wibo}" ' if args.wibo and sys.platform != "win32" else ""  # (LTCG harness mode's rules)
+# /showIncludes (header dependencies): Visual C++ .NET 2003 (7.1) has it, Visual C++ 6 doesn't
+SHOW_INCLUDES = tuple(int(x) for x in MSVC_VERSION.split(".") if x.isdigit()) >= (7, 1)
 
 
 def q(argv: list[str]) -> str:
@@ -88,14 +90,15 @@ def main() -> None:
         n = ninja_syntax.Writer(f)
         n.rule("delink", f"{PY} tools/delink.py {CONFIG} {BUILD / 'target'}", restat=True)
         compiler = [PYTHON, "tools/compile.py", "--compiler", str(CL), "--include", str(INCLUDE),
-                    "--config", str(CONFIG), "--deps"]
+                    "--config", str(CONFIG), *(["--deps"] if SHOW_INCLUDES else [])]
         if args.wibo and sys.platform != "win32":
             compiler += ["--wrapper", args.wibo]
         # The runner invokes the compiler and names.py separately: cmd /c misparsed quoted compiler paths.
         # The headers it reads are its dependencies (--deps: tools/cldeps.py): editing one rebuilds only what
-        # includes it
+        # includes it. Visual C++ 6 has no /showIncludes: there every object depends on every header
         n.rule("cl", q(compiler).replace("$", "$$") + " --output $out --source $in -- "
-               + q(CL_FLAGS).replace("$", "$$") + " $cflags", deps="gcc", depfile="$out.d")
+               + q(CL_FLAGS).replace("$", "$$") + " $cflags",
+               **({"deps": "gcc", "depfile": "$out.d"} if SHOW_INCLUDES else {}))
         n.rule("configure", f"{PY} tools/configure.py " + q(sys.argv[1:]).replace("$", "$$"), generator=True)
 
         targets = [str(BUILD / "target" / f"{u}.obj") for u in units]
@@ -120,7 +123,8 @@ def main() -> None:
                 continue
             obj = BUILD / src.with_suffix(".obj")
             n.build(str(obj), "cl", str(src), implicit=[str(CONFIG), "tools/compile.py", "tools/names.py",
-                                                        "tools/cldeps.py"])
+                                                        "tools/cldeps.py"]
+                    if SHOW_INCLUDES else [*headers, str(CONFIG), "tools/compile.py", "tools/names.py"])
             objs.append(str(obj))
         n.build("all_source", "phony", objs)
         n.build("prepare", "phony", [*targets, *objs])

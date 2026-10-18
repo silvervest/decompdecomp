@@ -11,7 +11,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ... import agents as kinds
-from ... import toolchains
+from ... import hostenv, toolchains
 from ...network import NetworkError
 from .. import agents
 from ..support import session_options, spread_sessions
@@ -28,7 +28,11 @@ def register(app: App) -> None:
             return bad
         data = await body(request)
         tid, accept = str(data.get("id", "")), bool(data.get("accept_license"))
-        return JSONResponse({"job": jobs.start("toolchain", lambda log: (toolchains.install(tid, accept_license=accept, log=log)
+        folder = str(data.get("folder") or "").strip() or None  # a local toolchain: the user's own copy (the XDK)
+        if folder:  # as the user wrote it: a Windows path becomes /mnt/c/... when decompdecomp runs in WSL
+            folder = hostenv.local_path(folder)
+        return JSONResponse({"job": jobs.start("toolchain", lambda log: (toolchains.install(tid, accept_license=accept, log=log,
+                                                                                            folder=folder)
                                                                          and {"id": tid}))})
 
     @mcp.custom_route("/api/agents/install", methods=["POST"])

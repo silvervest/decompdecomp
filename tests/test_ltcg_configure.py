@@ -3,6 +3,7 @@ harness link, a HARNESS-LINK line that can't be read stops configure with where 
 build.ninja whole, and projects made before a template fix get the fixed tools."""
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,8 @@ def _project(tmp_path: Path) -> Path:
     root = tmp_path / "p"
     shutil.copytree(TEMPLATE, root)
     ltcg.prepare(root, ["u"])
+    cfg = root / "tools" / "configure.py"
+    cfg.write_text(cfg.read_text().replace('MSVC_VERSION = "6.0"', 'MSVC_VERSION = "7.1"'))  # as an Xbox project
     (root / "config" / "v").mkdir(parents=True)
     (root / "config" / "v" / "functions.json").write_text(json.dumps({"exe": "orig/v.xbe", "sha1": "0", "units": {
         "u": [{"name": "_func_00011000", "addr": 0x11000, "offset": 0, "size": 1, "relocs": []}]}}))
@@ -33,6 +36,11 @@ def _project(tmp_path: Path) -> Path:
 def _configure(root: Path) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, "tools/configure.py", "v", "--msvc", str(root / "msvc")], cwd=root,
                           capture_output=True, text=True)
+
+
+def _ninja(root: Path) -> str:
+    """build.ninja with its continued lines joined."""
+    return re.sub(r" *\$\n\s*", " ", (root / "build.ninja").read_text())
 
 
 def _entry(root: Path, extra: str = "") -> None:
@@ -48,8 +56,8 @@ def test_a_skeleton_driver_with_harness_entry_gets_the_harness_link(tmp_path):
     _entry(root, OLD_LINE)  # an old skeleton's comment only mentions it: not a directive (it has an open quote)
     res = _configure(root)
     assert res.returncode == 0, res.stderr
-    ninja = (root / "build.ninja").read_text().replace("$\n", "")
-    assert "build build/v/ltcg/u/u.dll | build/v/ltcg/u/u.map: ltcg_link" in ninja
+    ninja = _ninja(root)
+    assert "build build/v/ltcg/u/u.dll | build/v/ltcg/u/u.map build/v/ltcg/u/u.map.link.txt: ltcg_link" in ninja
     assert "build build/v/src/auto/u.obj | build/v/src/auto/u.ltcg.json: ltcg_coff" in ninja
     assert not (root / "build.ninja.tmp").exists() and json.loads((root / "objdiff.json").read_text())["units"]
 
@@ -69,7 +77,7 @@ def test_objects_depend_on_the_project_files_the_compiler_includes_and_nothing_e
     root = _project(tmp_path)
     _entry(root)
     assert _configure(root).returncode == 0
-    ninja = (root / "build.ninja").read_text().replace("$\n", "")
+    ninja = _ninja(root)
     for rule in ("cl", "ltcg_cc"):
         block = ninja.split(f"rule {rule}\n", 1)[1].split("\nrule ", 1)[0]
         if rule == "cl":  # (through tools/compile.py, which runs cldeps.py with /showIncludes)
@@ -78,6 +86,13 @@ def test_objects_depend_on_the_project_files_the_compiler_includes_and_nothing_e
             assert "tools/cldeps.py $out --" in block and "/showIncludes" in block
         assert "deps = gcc" in block and "depfile = $out.d" in block
     assert "include/" not in ninja.split("build build/v/ltcg/u/01_u_drv.obj", 1)[1].split("\n", 1)[0]
+    # Visual C++ 6 has no /showIncludes: its objects depend on every header, as before
+    cfg = root / "tools" / "configure.py"
+    cfg.write_text(cfg.read_text().replace('MSVC_VERSION = "7.1"', 'MSVC_VERSION = "6.0"'))
+    assert _configure(root).returncode == 0
+    old = _ninja(root)
+    assert "/showIncludes" not in old.split("rule cl\n", 1)[1].split("\nrule ", 1)[0]
+    (root / "tools" / "configure.py").write_text(cfg.read_text().replace('"6.0"', '"7.1"'))
     # a stand-in compiler that reports includes as Visual C++ does: inside the project, and an SDK's outside it
     (root / "include" / "core").mkdir()
     (root / "include" / "core" / "maths.h").write_text("")

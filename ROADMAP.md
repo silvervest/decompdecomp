@@ -15,9 +15,9 @@ start). Keep this table true when a feature ships or reaches another platform.
 | :-- | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
 | Start from your own copy | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ XBE or disc, your own XDK | fork by address |
 | Judge | link · compare | link · compare | link · compare | link · compare | objdiff | objdiff | objdiff | objdiff | objdiff |
-| Machine drafts (m2c, Ghidra for x86) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ Ghidra | as PC (untested) | by architecture |
+| Machine drafts (m2c, Ghidra for x86) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ Ghidra | ✓ Ghidra | by architecture |
 | Autopilot: free matches from drafts | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | — | — |
-| Twins: free matches from identical code | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
+| Twins: free matches from identical code | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | COFF fingerprints (new; no free match seen yet) | as PC | ✓ |
 | Permuter on near misses | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
 | Hand-written assembly set aside | ✓ | ✓ | ✓ | — | ✓ | — | — | — | MIPS, PowerPC |
 | Kernel and BIOS stubs set aside | — | ✓ | ✓ | — | — | — | — | ✓ XDK library code | — |
@@ -38,6 +38,10 @@ Where to start on a gap:
 - **Windows PC**: autopilot needs drafts that compile (Ghidra's output doesn't, as it is); the export needs a linker
   story (the project is delinked COFF objects).
 - **Function-end reports** cut MIPS functions (`engine._cut`); GBA has its own splitter (`_split_gba`).
+- **Xbox (and PC)**: on a test program built with the XDK, free C++ functions an attempt matched later showed as
+  "not in your build" in the unit-wide diff (`objdiff.diff(..., symbol=None)` scores), which set them back to open
+  (`forkengine._apply_scores`); methods kept their match. Twins and the permuter only see matched functions, so they
+  wait on that. Rooms haven't been run on Xbox (the room tests use a DS game).
 
 ## Recently done
 

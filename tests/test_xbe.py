@@ -291,6 +291,11 @@ def test_a_function_that_returns_midway_keeps_the_code_after_the_ret():
     assert [a for a, _ in _starts_and_sizes(_program(called), rows)] == [0x11000, 0x11007, 0x11010]
 
 
+def test_a_purge_ghidra_could_not_work_out_is_no_purge():
+    assert scratch_pe.decorate("func_00011000", "__stdcall", 2147483647, 0) == "_func_00011000"
+    assert scratch_pe.decorate("func_00011000", "__stdcall", 8, 2) == "_func_00011000@8"
+
+
 def test_a_run_of_small_methods_ghidra_missed_becomes_one_function_each():
     # or eax, -1; ret | xor eax, eax; ret | mov al, 1; ret: each padded with int3 to 16 bytes, only the first known
     text = b"".join(bytes.fromhex(h).ljust(0x10, b"\xcc") for h in ("83c8ffc3", "33c0c3", "b001c3"))

@@ -99,19 +99,40 @@ function renderTools() {
   $("toolGrid").querySelectorAll("[data-local]").forEach((b) => { b.onclick = () => useLocalToolchain(b.dataset.local); });
 }
 /* A local toolchain (the Xbox XDK): nothing is downloaded; decompdecomp checks the user's own folder and reads it
-   where it is. */
-async function useLocalToolchain(id) {
+   where it is. The folder and the licence are asked for in the tool's card, not in a browser dialog (prompt() and
+   confirm() are cramped for a Windows path, and some browsers block them). */
+function useLocalToolchain(id) {
   const t = (S.st.toolchains || []).find((x) => x.id === id) || {};
-  const folder = prompt(`The folder of your own copy of ${t.name || id} (the one holding xbox/include and xbox/lib, or that folder itself):`, t.folder || "");
-  if (!folder || !folder.trim()) return;
-  if (t.license === "proprietary" && !confirm("This is proprietary software. decompdecomp reads your copy where it is and never copies or uploads it. Use it only if you accept that. Continue?")) return;
-  try {
-    const { job } = await api("/api/toolchain", { method: "POST", body: { id, accept_license: true, folder: folder.trim() } });
-    await followJob(job);
-    toast("Your copy is set up.", "match");
-    await loadState();
-    renderTools();
-  } catch (e) { toast(esc(e.message), "err"); }
+  const card = $("toolGrid").querySelector(`[data-local="${CSS.escape(id)}"]`)?.closest(".tool-card");
+  if (!card || card.querySelector(".local-form")) return;
+  const form = document.createElement("form");
+  form.className = "local-form";
+  form.innerHTML = `<label class="field"><span>The folder of your own copy (the one holding xbox/include and xbox/lib, or that folder itself)</span>
+      <input name="folder" type="text" spellcheck="false" placeholder="C:\\XDK" value="${esc(t.folder || "")}"></label>
+    ${t.license === "proprietary" ? `<label class="check"><input type="checkbox" name="accept"><span>This is proprietary software. decompdecomp reads your copy where it is and never copies or uploads it. I accept that.</span></label>` : ""}
+    <div class="row"><button class="small-btn" type="submit">Use this folder</button><button class="ghost small-btn" type="button" data-cancel>Cancel</button></div>`;
+  card.appendChild(form);
+  const input = form.querySelector("[name=folder]");
+  input.focus();
+  form.querySelector("[data-cancel]").onclick = () => form.remove();
+  form.onsubmit = async (ev) => {
+    ev.preventDefault();
+    const folder = input.value.trim();
+    if (!folder) { input.focus(); return; }
+    const accept = form.querySelector("[name=accept]");
+    if (accept && !accept.checked) { toast("Tick the box to accept the licence first.", "err"); return; }
+    form.querySelector("[type=submit]").disabled = true;
+    try {
+      const { job } = await api("/api/toolchain", { method: "POST", body: { id, accept_license: true, folder } });
+      await followJob(job);
+      toast("Your copy is set up.", "match");
+      await loadState();
+      renderTools();
+    } catch (e) {
+      toast(esc(e.message), "err");
+      form.querySelector("[type=submit]").disabled = false;
+    }
+  };
 }
 
 /* ------------------------------------------------------------------ settings page */

@@ -46,6 +46,18 @@ def test_docker_home_is_the_users_home(runtime):
     assert hostenv.host_os() == "macos"
 
 
+def test_native_windows_takes_paths_written_the_wsl_or_git_bash_way(runtime, monkeypatch):
+    runtime("native")
+    monkeypatch.setattr(hostenv.sys, "platform", "win32")
+    assert str(hostenv.local_path("/mnt/c/Users/sam/XDK/xbox")) == r"C:\Users\sam\XDK\xbox"
+    assert str(hostenv.local_path('"/d/Program Files/XDK"')) == r"D:\Program Files\XDK"
+    assert str(hostenv.local_path("/mnt/e")) == "E:\\"
+    assert str(hostenv.local_path(r"C:\XDK")) == r"C:\XDK"  # a Windows path stays as it is
+    assert str(hostenv.local_path("/mnt/cdrom/x")).replace("\\", "/") == "/mnt/cdrom/x"  # not a drive letter
+    monkeypatch.setattr(hostenv.sys, "platform", "linux")
+    assert str(hostenv.local_path("/mnt/c/x")) == "/mnt/c/x"  # native Linux: a Linux path
+
+
 def test_native_changes_nothing(runtime):
     runtime("native")
     assert hostenv.host_bridge() is None

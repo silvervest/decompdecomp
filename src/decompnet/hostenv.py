@@ -96,6 +96,17 @@ def _from_windows(text: str) -> Path | None:
     return None
 
 
+def _from_unix_on_windows(text: str) -> Path | None:
+    """decompdecomp run natively on Windows, given a path as WSL (/mnt/c/XDK) or Git Bash (/c/XDK) writes it, or
+    with forward slashes: the Windows path (C:\\XDK). People copy paths from whichever shell they work in."""
+    import re
+
+    m = re.fullmatch(r"/(?:mnt/)?([A-Za-z])(/.*)?", text.replace("\\", "/"))
+    if m is None:
+        return None
+    return Path(str(PureWindowsPath(f"{m.group(1).upper()}:/", *(m.group(2) or "/").split("/"))))
+
+
 # ---------------------------------------------------------------------------------- crossing over
 
 def local_path(text: str) -> Path:
@@ -105,6 +116,8 @@ def local_path(text: str) -> Path:
     the user's home there, not the container's."""
     text = text.strip().strip('"').strip("'")
     if runtime() == "wsl" and (p := _from_windows(text)) is not None:
+        return p
+    if runtime() == "native" and sys.platform == "win32" and (p := _from_unix_on_windows(text)) is not None:
         return p
     if runtime() == "docker" and (host_home := os.environ.get("DECOMP_HOST_HOME")):
         if text == "~" or text.startswith("~/"):

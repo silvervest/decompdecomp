@@ -624,7 +624,8 @@ class ForkEngine:
 
     def check_rom(self, slug: str, log=print) -> dict:
         """A game started from scratch: rebuild its program and compare it with the user's copy (its console's
-        check_rebuild); what it says is kept in the project's .decomp.wtf.json and shown on the project."""
+        check_rebuild; PC and Xbox: the project's `ninja export`); what it says is kept in the project's
+        .decomp.wtf.json and shown on the project."""
         proj, fp, cfg = self.get(slug)
         manifest = fp.manifest or {}
         console = consoles.get(manifest.get("platform"))
@@ -2602,9 +2603,14 @@ class ForkEngine:
             "matched_bytes": agg["matched_bytes"] or 0, "attempts": agg["attempts"] or 0,
             "context_version": 0, "folder": proj["root"], "room": self.net._room_info(slug),
             "measures": m, "uncovered": self.uncovered(slug) if cfg.get("ready") and fp.linkable() else None,
-            "rebuild": (fp.manifest or {}).get("rebuild") if cfg.get("origin") == "scratch" else None,
             # why it doesn't build on this computer (preflight; checked once a run when its page first opens)
             "build_problem": cfg.get("build_problem") if cfg.get("ready") else None,
+            # (an x86 game, PC or Xbox, can always be rebuilt: its export runs on the button, so it shows before the
+            # first; a dtk project's build already rebuilds the game)
+            "rebuild": ((fp.manifest or {}).get("rebuild") or ({"identical": None, "detail": "not rebuilt yet"} if
+                        consoles.REBUILD_CHECK in (con := consoles.get(cfg.get("platform"))).features
+                        and con.arch == "x86" else None))
+                       if cfg.get("origin") == "scratch" else None,
         }
 
     def function_diff(self, slug: str, name: str) -> dict:

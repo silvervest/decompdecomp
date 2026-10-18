@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .. import BETA, PROJECT, Compiler, Console
+from .. import BETA, PROJECT, REBUILD_CHECK, Compiler, Console
 
 
 class Xbox(Console):
@@ -36,6 +36,7 @@ class Xbox(Console):
     compiler_guide = "xbox"  # given up front; it starts by pointing at the x86 guide, which holds what PC shares
     ram = (0x00010000, 0x80000000)  # an XBE loads at 0x10000; the kernel lives above 0x80000000
     import_options = ("ltcg",)  # built with link-time code generation or not (None: told from the program)
+    own_features = frozenset({REBUILD_CHECK})  # `ninja export` relinks the XBE (pc/project_template/tools/export.py)
 
     def sniff(self, head: bytes, file) -> bool:
         from . import scratch, xdvdfs
@@ -74,6 +75,13 @@ class Xbox(Console):
         from ..pc import scratch
 
         return scratch.read_data(fp.root, fp.manifest or {}, name, length)
+
+    def check_rebuild(self, fp, version: str, log=print) -> dict:
+        """The project's `ninja export`: the XBE linked again with the XDK's linker and imagebld, compared byte for
+        byte (the PC path's, consoles/pc/scratch.py check_program)."""
+        from ..pc import scratch
+
+        return scratch.check_program(fp, version, log=log)
 
     def read_program(self, data: bytes):
         """The program in the shape the PC path reads a Windows one into (consoles/pc/scratch.py read_program)."""

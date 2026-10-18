@@ -46,10 +46,18 @@ Link-time code generation (LTCG)
   edi or ebx, with no standard convention, and code is inlined across files.
 - Signs: a call right after loading eax/esi/edi/ebx, in a callee that reads them without saving them, and callees
   without the usual prologue for their argument count.
+- The import tells from the program (its log and `.decomp.wtf.json`'s `ltcg_detected` say why); the user can
+  also choose (the import's LTCG setting, `decomp host --ltcg on|off`).
 - Plain compiles can't match those functions. In a project made without the LTCG mode, note it ("LTCG register
   convention") and release it.
-- In an LTCG project (its `.decomp.wtf.json` says `"ltcg": true`), a unit is linked in harness mode once its driver
-  `harness/<unit>.drv.cpp` defines `extern "C" __declspec(dllexport) void HarnessEntry(...)`:
+- In an LTCG project (its `.decomp.wtf.json` says `"ltcg": true`), the brief shows each function's convention in
+  the original: the registers it reads before writing (its register parameters), its stack arguments, `ret N`, the
+  registers it saves, and a few call sites with what they load just before the call.
+- `standins_for(unit)` writes a starting point for a unit's harness from the original's references: stand-ins for
+  the data and functions it uses from elsewhere (each with its convention), a HarnessEntry with the call sites of
+  each of the unit's functions, and the declarations its source needs. Write them with edit_file, then shape them.
+- A unit is linked in harness mode once its driver `harness/<unit>.drv.cpp` defines
+  `extern "C" __declspec(dllexport) void HarnessEntry(...)`:
   - the driver calls the unit's functions the way the original's call sites do: look at a caller's code right
     before the call (what eax/esi/edi/ebx/ecx hold, which pushes are constants) and write a call that gives the
     linker the same facts;
@@ -60,4 +68,7 @@ Link-time code generation (LTCG)
   - functions are found by func_<address> in their names, or by `// FUNCTION: 0x<address> [map symbol]` before
     the definition (needed for constructors, destructors and operators).
 - A unit's function can read 100% and still not be a match: its references must map one to one onto the
-  original's (one original global is always the same one of yours). The judge says so when they don't.
+  original's (one original global is always the same one of yours), and a reference that says which original
+  address it means (a `D_<address>` or `func_<address>` name, or a global with `// GLOBAL: 0x<address>` on the line
+  before its declaration) must mean the one the original uses there; floats and strings must have its values. The
+  judge says so when they don't, and progress doesn't count the function.

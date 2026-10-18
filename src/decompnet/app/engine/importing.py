@@ -26,15 +26,16 @@ from .common import (
 
 class ImportMixin:
     def import_rom(self, data: bytes | Path, *, toolchain: str | None = None, flags: list[str] | None = None,
-                   confirmed: bool = False, name: str = "", log=print) -> str:
+                   confirmed: bool = False, name: str = "", log=print, ltcg: bool | None = None) -> str:
         """Import a game the user owns (ROM bytes, or a file such as a disc image): split it, store every function
-        as a target. Returns the slug."""
+        as a target. Returns the slug. `ltcg`: an Xbox game built with link-time code generation, or not (None:
+        decompdecomp tells from the program)."""
         if not confirmed:
             raise NetworkError("confirm that this is your own legally obtained copy of the game")
         project_file = self._community_layout(data, name)
         if project_file is not None:  # a dtk-template or ds-decomp project, worked on like a fork
             compiler = toolchain if toolchain and toolchain.startswith(("GC/", "Wii/", "DS/", "MSVC/")) else None
-            return self.forks.create_scratch(project_file, compiler=compiler, log=log)
+            return self.forks.create_scratch(project_file, compiler=compiler, log=log, ltcg=ltcg)
         picked = detect.identify(data, name)
         rom, info = picked.data, picked.info
         for p in self.store.all("SELECT slug, config FROM projects"):

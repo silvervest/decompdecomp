@@ -218,6 +218,7 @@ function setupCompilers(info) {
   const p = info.platform, select = $("compilerPick"), note = $("compilerNote");
   const cw = S.st?.codewarrior || { installed: false, ds_installed: false, gc: [], wii: [], ds: [] };
   $("compilerRow").hidden = false; note.hidden = true; $("mwConsent").hidden = true; $("mwAccept").checked = false;
+  $("ltcgRow").hidden = p !== "xbox"; $("ltcgPick").value = "";
   if (p === "n64") fillCompilers(select, info.compiler === "IDO" ? "ido-7.1" : "gcc-2.7.2-kmc", "N64");
   else if (p === "psx") fillCompilers(select, "gcc-2.7.2-psx", "PS1");
   else if (p === "ps2") fillCompilers(select, "ee-gcc-2.96", "PS2");
@@ -340,7 +341,8 @@ $("analyse").onclick = async () => {
     try { await ensureCodeWarrior(); } catch (e) { importFailed(["win32", "xbox"].includes(picked.info.platform) ? "Visual C++" : "CodeWarrior", e, $("jobLog").textContent); return; }
   }
   const body = picked.buf instanceof Blob ? picked.buf : new Blob([picked.buf]);
-  runImport(`confirmed=1${tc ? `&toolchain=${encodeURIComponent(tc)}` : ""}`, body, title, picked.name);
+  const ltcg = $("ltcgRow").hidden ? "" : $("ltcgPick").value;
+  runImport(`confirmed=1${tc ? `&toolchain=${encodeURIComponent(tc)}` : ""}${ltcg ? `&ltcg=${ltcg}` : ""}`, body, title, picked.name);
 };
 $("pathPick").onclick = (e) => {
   e.stopPropagation();

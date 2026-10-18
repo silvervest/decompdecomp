@@ -11,9 +11,11 @@ elsewhere, all compiled with /GL and linked into a DLL with /LTCG; its functions
 object laid out like the delinked original, and their references are checked for a one-to-one address mapping.
 This module makes a project one: the template setting, the default flags and a driver skeleton per unit.
 
-shortcut: nothing detects LTCG yet, so it's an explicit choice (`ltcg=True`, or DECOMP_XBOX_LTCG=1 for Xbox games).
-Signs to detect it by: call sites that load EAX, ESI, EDI or EBX right before calling code that reads them before
-writing them (and doesn't save them), and no ECX `this` in methods that clearly have one.
+An Xbox import tells LTCG from the program (convention.detect: call sites that load EAX, EBX, ESI or EDI right
+before calling a function that reads it before writing it and doesn't save it, which no standard convention does),
+unless the user says (the import's LTCG switch, `decomp host --ltcg on|off`, `create(ltcg=...)` or
+DECOMP_XBOX_LTCG=1/0). The brief shows each function's convention evidence, and standins_for writes a starting
+point for a unit's harness (forks/standins.py).
 """
 
 from __future__ import annotations

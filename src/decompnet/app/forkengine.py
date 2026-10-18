@@ -27,6 +27,7 @@ from pathlib import Path
 from .. import similarity, toolchains
 from ..forks import (
     catalog,
+    convention,
     csource,
     datadiff,
     drafts,
@@ -36,8 +37,9 @@ from ..forks import (
     scratch_dtk,
     scratch_pe,
     scratch_xbe,
+    standins,
 )
-from ..forks.objdiff import ObjdiffError
+from ..forks.objdiff import MappingConflict, ObjdiffError
 from ..forks.project import EDITABLE, STATE, ForkError, ForkProject
 from ..network import Agent, Network, NetworkError
 from ..scoring import percent_text
@@ -470,7 +472,7 @@ class ForkEngine:
                        "VALUES(?,?,?,?,?,?,?)", (pid, 1, "", None, "projects keep their headers in the tree", time.time(), ""))
             self.net._event(db, pid, None, "fork", event)
 
-    def create_scratch(self, game: Path, *, compiler: str | None = None, log=print) -> str:
+    def create_scratch(self, game: Path, *, compiler: str | None = None, log=print, ltcg: bool | None = None) -> str:
         """A GameCube, Wii, DS or PC game, from scratch: generate the community's project layout for it (dtk-template,
         ds-decomp; for PC, decompdecomp's own from Ghidra's analysis) and open it like a fork. An Xbox program or disc
         is read, then refused until Xbox projects are finished (scratch_xbe)."""
@@ -487,7 +489,8 @@ class ForkEngine:
         slug = self._free_slug(_slug(f"{info['title']} {info['id']}" if info.get("kind") != "dol" else info["title"]))
         dest = self.net.workspace / slug
         try:
-            facts = maker.create(dest, game, compiler=compiler, log=log)
+            facts = maker.create(dest, game, compiler=compiler, log=log,
+                                 **({"ltcg": ltcg} if maker is scratch_xbe else {}))
         except BaseException:
             shutil.rmtree(dest, ignore_errors=True)
             raise
@@ -1617,12 +1620,13 @@ class ForkEngine:
         try:
             d = fp.diff(unit, meta.get("symbol") or fn["name"])
             pct = ("not in your build yet" if d.match_percent is None else
-                   "every instruction matches, but loaded constants differ" if d.literals else
+                   d.why_not() if d.literals else
                    f"{percent_text(d.match_percent)} match")
             asm = d.target_asm().splitlines()
             if len(asm) > 500:
                 asm = asm[:500] + [f"... ({len(asm) - 500} more instructions)"]
             lines += [f"current state: {pct}", "", "### Target assembly", "```asm", *asm, "```"]
+            lines += self._convention_brief(fp, meta, fn)
             if d.literals:
                 lines += ["", d.literals_note()]
             elif d.match_percent is not None and not d.matched:
@@ -1671,6 +1675,52 @@ class ForkEngine:
                       "with any #include \"...\", prototypes or #pragma lines it needs. Structs, globals and helper "
                       "functions go in with edit_file."]
         return "\n".join(lines)
+
+    def standins_for(self, agent: Agent | None, slug: str, what: str) -> str:
+        """Stand-in and driver skeletons for a unit of a PC or Xbox project (forks/standins.py): a unit, its source
+        file or one of its functions. What agents write into harness/ for a game built with link-time code
+        generation."""
+        _, fp, _ = self.get(slug)
+        manifest = fp.manifest or {}
+        if manifest.get("platform") not in ("win32", "xbox"):
+            raise NetworkError("standins_for is for PC and Xbox projects made from scratch (their harness/ files)")
+        try:
+            prog = convention.load(fp.root, manifest)
+        except (OSError, KeyError, ValueError) as e:
+            raise NetworkError(f"the project's functions.json or program can't be read: {e}") from None
+        name = what.strip()
+        units = {fn["unit"] for fn in prog.functions.values()}
+        unit = next((u for u in (name, name.rsplit("/", 1)[-1], Path(name).stem) if u in units), None)
+        if unit is None and (addr := prog.find(name)) is not None:
+            unit = prog.functions[addr]["unit"]
+        if unit is None:
+            try:
+                row = self._fn(slug, name)
+            except NetworkError:
+                raise NetworkError(f"{what!r} isn't a unit, source file or function of this project") from None
+            if (addr := prog.find(self._meta(row).get("symbol") or row["name"])) is None:
+                raise NetworkError(f"{what!r} isn't in config/{manifest['version']}/functions.json")
+            unit = prog.functions[addr]["unit"]
+        return standins.render(prog, unit)
+
+    @staticmethod
+    def _convention_brief(fp: ForkProject, meta: dict, fn) -> list[str]:
+        """For a brief, in a project built with link-time code generation: how the original passes the function its
+        arguments (forks/convention.py), which the driver and stand-ins in harness/ must reproduce."""
+        manifest = fp.manifest or {}
+        if not manifest.get("ltcg"):
+            return []
+        try:
+            prog = convention.load(fp.root, manifest)
+            addr = prog.find(meta.get("symbol") or fn["name"])
+            if addr is None:
+                return []
+            found = convention.evidence(prog, addr)
+        except (OSError, KeyError, ValueError, ForkError):
+            return []
+        return ["", "### Calling convention in the original (link-time code generation: the linker picked it for "
+                "its callers; harness/ must call it the same way, standins_for writes a starting point)",
+                *[f"- {line}" if not line.startswith("  ") else line for line in found]]
 
     def _twin_brief(self, proj, fn) -> list[str]:
         """For a brief: the matched function with the same code (relocations aside), and its code made into this
@@ -1934,7 +1984,8 @@ class ForkEngine:
             if was_matched:  # a rewrite of a matched function must keep matching
                 if not matched:
                     undo()
-                    why = "loads other constants" if d.literals else f"is {percent_text(pct)}"
+                    why = (("refers to other globals or callees" if "refers" in d.why_not() else "loads other constants")
+                           if d.literals else f"is {percent_text(pct)}")
                     return {"text": f"❌ {fn['name']} already matches; your version {why}, so the matching one was "
                                     "kept. Call claim_function for a function that still needs work.",
                             "score": score, "matched": False}
@@ -2392,7 +2443,8 @@ class ForkEngine:
             return {"kind": None, "rows": None, "error": f"objdiff: {e}"}
         if d.match_percent is None:
             return {"kind": None, "rows": None}
-        problems = [f"a loaded constant differs: {m.describe()}" for m in d.literals]
+        problems = [f"{'a reference differs' if isinstance(m, MappingConflict) else 'a loaded constant differs'}: "
+                    f"{m.describe()}" for m in d.literals]
         problems += [f"refers to `{mine}` where the original refers to `{orig}`" for orig, mine in d.renamed]
         return {"kind": "matched" if fn["status"] == "matched" else "latest", "rows": [list(r) for r in d.rows],
                 "score": None, "percent": _floor_pct(d.match_percent, d.matched), "problems": problems}

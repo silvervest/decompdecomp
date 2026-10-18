@@ -380,7 +380,9 @@ def host(args) -> int:
         print(service.install())
     ensure_app(home_dir())
     print(f"importing {game.name}")
-    slug = _wait(_api(f"/api/import?confirmed=1&path={urllib.parse.quote(str(game))}", {})["job"], "importing")["slug"]
+    ltcg = {"on": "&ltcg=1", "off": "&ltcg=0"}.get(getattr(args, "ltcg", "auto"), "")
+    slug = _wait(_api(f"/api/import?confirmed=1&path={urllib.parse.quote(str(game))}{ltcg}", {})["job"],
+                 "importing")["slug"]
     print(f"project: {slug}")
     args.project = slug
     return share(args)
@@ -485,6 +487,9 @@ def main(argv: list[str] | None = None) -> int:
     ho.add_argument("--public", action="store_true", help="anyone with the address can join (default: invite link)")
     ho.add_argument("--approve", action="store_true", help="you let each new member in")
     ho.add_argument("--service", action="store_true", help="also run decompdecomp as a service that starts with the computer")
+    ho.add_argument("--ltcg", choices=["auto", "on", "off"], default="auto",
+                    help="(Xbox) whether the game was built with link-time code generation (default: found out from "
+                         "the program)")
     jo = sub.add_parser("join", help="join a team's room with your own copy of the game")
     jo.add_argument("link", help="the invite link (or the room's address for a public room)")
     jo.add_argument("game", help="your copy of the same game")

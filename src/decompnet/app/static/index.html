@@ -91,6 +91,13 @@
           <label class="field grow"><span>Compiler</span><select id="compilerPick"></select></label>
         </div>
         <p class="muted small" id="compilerNote" hidden></p>
+        <div class="row" id="ltcgRow" hidden>
+          <label class="field grow"><span>Link-time code generation (/LTCG)</span><select id="ltcgPick">
+            <option value="" selected>Find out from the program</option>
+            <option value="1">Built with it: units link in harness mode</option>
+            <option value="0">Built without it</option>
+          </select></label>
+        </div>
         <label class="check" id="mwConsent" hidden><input type="checkbox" id="mwAccept"><span id="mwText"></span></label>
         <div class="row">
           <button class="primary" id="analyse" type="button" disabled>Start decompiling</button>

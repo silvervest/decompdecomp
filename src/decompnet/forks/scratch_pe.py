@@ -290,14 +290,21 @@ def flow_end(md, pe: PE, start: int, limit: int) -> int:
     return end
 
 
-def referenced(pe: PE) -> set[int]:
+def referenced(pe: PE) -> frozenset[int]:
     """Code addresses something points at the way only function starts are pointed at: `call rel32` targets, and
     words in data sections (vtables, callback tables) or pushed as immediates (callbacks). Jump tables are left out
-    on purpose: they sit in the code sections and point at a switch's cases, inside their function."""
-    code = [s for s in pe.sections if s.code]
+    on purpose: they sit in the code sections and point at a switch's cases, inside their function.
+
+    It scans the whole image, so it's worked out once per program object (analyse() is called per unit by tools
+    that re-analyse a few functions at a time: every call scanned the image again)."""
+    key = (id(pe.data), tuple((s.va, s.size, s.offset, s.code) for s in pe.sections))
+    cached = pe.__dict__.get("_referenced")
+    if cached is not None and cached[0] == key and cached[1] is pe.data:
+        return cached[2]
+    code = [(s.va, s.va + s.size) for s in pe.sections if s.code]
 
     def in_code(a: int) -> bool:
-        return any(s.va <= a < s.va + s.size for s in code)
+        return any(lo <= a < hi for lo, hi in code)
 
     out: set[int] = set()
     for s in pe.sections:
@@ -313,7 +320,8 @@ def referenced(pe: PE) -> set[int]:
                     i = data.find(op, i + 1)
         else:
             out.update(a for (a,) in struct.iter_unpack("<I", data[:len(data) // 4 * 4]) if in_code(a))
-    return out
+    pe.__dict__["_referenced"] = (key, pe.data, frozenset(out))  # (the data itself: an id can be reused)
+    return pe.__dict__["_referenced"][2]
 
 
 def _whole_instructions(md, pe: PE, start: int, code_end: int, limit: int) -> int:

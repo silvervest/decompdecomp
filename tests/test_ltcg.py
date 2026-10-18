@@ -160,6 +160,81 @@ def test_a_split_global_fails_the_address_mapping_check_objdiff_would_pass(tmp_p
     assert objdiff.mapping_conflicts(base, "?F2@@YAHH@Z") == []
 
 
+def test_swapped_globals_keep_the_mapping_but_fail_the_data_check(tmp_path):
+    # F2's D_ global names 0x30008 where the original reads 0x30004: one reference each, so the mapping is fine
+    src, _ = _project(tmp_path)
+    (tmp_path / "u.map").write_text(MAP.replace("_D_00030004", "_D_00030008"))
+    _, report = _run_dll2coff(tmp_path, src)
+    f2 = report["functions"]["?F2@@YAHH@Z"]
+    assert f2["conflicts"] == [] and f2["data_checked"] == 1
+    assert f2["data"] == ["+0x2: yours refers to _D_00030008 (0x30008) where the original refers to 0x30004"]
+    found = objdiff.mapping_conflicts(tmp_path / "u.obj", "?F2@@YAHH@Z")
+    assert [type(m) for m in found] == [objdiff.DataConflict]
+    d = objdiff.FunctionDiff("?F2@@YAHH@Z", 100.0, [], 0, {}, [], {}, literals=found)
+    assert not d.matched and "names another original address" in d.literals_note()
+    assert d.why_not().endswith("refers to other globals or callees than the original")
+
+
+def test_a_global_annotation_says_which_original_address_a_named_global_is(tmp_path):
+    src, _ = _project(tmp_path)
+    src.write_text("// GLOBAL: 0x30000\nextern int g_a;\n" + src.read_text())
+    _, report = _run_dll2coff(tmp_path, src)
+    f1 = report["functions"]["?F1@@YAHXZ"]
+    assert f1["data"] == [] and f1["data_checked"] == 3  # g_a twice, and F2 (one of the unit's own functions)
+    src.write_text(src.read_text().replace("0x30000", "0x30010"))
+    _, report = _run_dll2coff(tmp_path, src)
+    assert report["functions"]["?F1@@YAHXZ"]["data"] == [
+        "+0x1: yours refers to ?g_a@@3HA (0x30010) where the original refers to 0x30000",
+        "+0x7: yours refers to ?g_a@@3HA (0x30010) where the original refers to 0x30000"]
+    assert report["functions"]["?F2@@YAHH@Z"]["data"] == []
+    # a run of annotations naming their globals, and one before a declaration with a comment in between
+    p = tmp_path / "g.cpp"
+    p.write_text("// GLOBAL: 0x10 g_x\n// GLOBAL: 0x20 g_y\n\n// GLOBAL: 0x30\n// the table\nfloat g_t[4];\n")
+    assert dll2coff.global_annotations([p]) == {"g_x": 0x10, "g_y": 0x20, "g_t": 0x30}
+    assert dll2coff.global_symbol({"?g_t@@3PAMA": 1, "_g_x": 2}, "g_t") == "?g_t@@3PAMA"
+
+
+def test_compiler_literals_are_compared_by_value():
+    class Orig:
+        def read(self, va, n):
+            return {0x30000: struct.pack("<f", 0.5), 0x30010: b"hi\0"}.get(va, b"\0" * n)[:n]
+
+    fn = {"addr": 0x11000, "offset": 0, "relocs": [[1, DIR32, "_D_00030000", 0], [6, DIR32, "_D_00030010", 0]]}
+    exe = bytes.fromhex("a1 00000300" "68 10000300")
+    lits = {0x10002000: ("__real@3f000000", struct.pack("<f", 0.5)), 0x10002010: ("??_C@_02hi@", b"ho\0")}
+    out = dll2coff.data_check(fn, exe, Orig(), [(1, DIR32, 0x10002000), (6, DIR32, 0x10002010)], 0x10001000,
+                              0x10001010, lambda va: None, lits.get)
+    assert out == {"data_checked": 2, "data": ['+0x6: yours loads "ho" (??_C@_02hi@) where the original loads "hi" '
+                                               "(0x30010)"]}
+
+
+def test_the_progress_report_counts_functions_failing_the_ltcg_checks_as_not_matched(tmp_path):
+    (tmp_path / "objdiff.json").write_text(json.dumps({"units": [{"name": "u", "base_path": "build/u.obj"}]}))
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "u.ltcg.json").write_text(json.dumps({"functions": {
+        "_a": {"conflicts": [], "data": ["+0x2: yours refers to ..."]}, "_b": {"conflicts": [], "data": []}}}))
+    rep = {"measures": {"total_code": "40", "matched_code": "40", "matched_code_percent": 100.0, "total_functions": 2,
+                        "matched_functions": 2, "matched_functions_percent": 100.0},
+           "units": [{"name": "u", "measures": {"total_code": "40", "matched_code": "40", "total_functions": 2,
+                                                "matched_functions": 2},
+                      "functions": [{"name": "_a", "size": "30", "fuzzy_match_percent": 100.0},
+                                    {"name": "_b", "size": "10", "fuzzy_match_percent": 100.0}]}]}
+    out = objdiff.subtract_conflicts(tmp_path, rep)
+    assert [f["fuzzy_match_percent"] for f in out["units"][0]["functions"]] == [99.99, 100.0]
+    assert out["units"][0]["measures"]["matched_functions"] == 1 and out["units"][0]["measures"]["matched_code"] == "10"
+    assert out["measures"]["matched_code_percent"] == 25.0 and out["measures"]["matched_functions_percent"] == 50.0
+
+
+def test_the_image_scan_for_function_pointers_runs_once_per_program():
+    code = bytes.fromhex("e8 0b000000" "68 10100010" "c3") + b"\xcc" * 5 + bytes.fromhex("c3")
+    pe = scratch_pe.PE(code, BASE, 0x2000, BASE + 0x1000, 0,
+                       [scratch_pe.Section(".text", BASE + 0x1000, len(code), 0, len(code), True)])
+    first = scratch_pe.referenced(pe)
+    assert first == {BASE + 0x1010} and scratch_pe.referenced(pe) is first
+    pe.data = code[:5] + bytes(6) + code[11:]  # other bytes: scanned again
+    assert scratch_pe.referenced(pe) == {BASE + 0x1010} and scratch_pe.referenced(pe) is not first
+
+
 def test_a_function_the_map_lacks_is_reported_and_left_out(tmp_path):
     src, _ = _project(tmp_path)
     src.write_text(src.read_text().replace("int F2(int x)", "int Missing(int x)"))
@@ -318,7 +393,7 @@ def test_a_function_with_a_register_convention_matches_through_the_harness_link_
     src.write_text(src.read_text().replace("g_last = g_total;", "g_last = g_count;"))
     split = _build_and_judge(root, symbol, msvc, xdk, wibo)
     assert split.match_percent == 100.0 and not split.matched
-    assert "refers to other things" in split.literals_note()
+    assert "refers to other globals or callees" in split.literals_note()
 
 
 def test_the_originals_side_keeps_a_cut_tail_call_whole_and_takes_no_flag_mask_for_an_address():
@@ -349,3 +424,83 @@ def test_an_ltcg_project_gets_the_setting_and_a_driver_per_game_unit(tmp_path):
     assert (tmp_path / "harness" / "text_00011000.drv.cpp").read_text().startswith("// Harness driver for")
     assert not (tmp_path / "harness" / "xdk_001D0000.drv.cpp").exists()  # the XDK's own code is set aside
     assert "/GL" not in scratch_xbe.LTCG_CL_FLAGS and "/Ob1" in scratch_xbe.LTCG_CL_FLAGS
+
+
+# A program for the convention evidence: C takes `this` in ESI (LTCG's choice) and one stack argument (ret 4); A
+# loads ESI and pushes before calling it, and reads a global; S is a __thiscall method that saves ESI.
+CONV_CODE = {
+    0x1000: bytes.fromhex("8b4604" "03442404" "c20400"),  # C: mov eax, [esi+4]; add eax, [esp+4]; ret 4
+    0x1010: bytes.fromhex("be00200010" "6a05" "e8e4ffffff" "a104200010" "c3"),  # A: mov esi, D; push 5; call C
+    0x1030: bytes.fromhex("56" "8bf1" "8b06" "5e" "c3"),  # S: push esi; mov esi, ecx; mov eax, [esi]; pop esi
+    0x1040: bytes.fromhex("b900200010" "e8e6ffffff" "c3"),  # B: mov ecx, D; call S
+}
+
+
+def _conv_program(tmp_path: Path) -> tuple[Path, dict]:
+    text = bytearray(b"\xcc" * 0x50)
+    for at, code in CONV_CODE.items():
+        text[at - 0x1000:at - 0x1000 + len(code)] = code
+    (tmp_path / "orig").mkdir()
+    (tmp_path / "orig" / "game.exe").write_bytes(_pe([(".text", 0x1000, bytes(text)), (".data", 0x2000, bytes(8))], []))
+    fn = lambda name, at, relocs: {"name": name, "addr": BASE + at, "size": len(CONV_CODE[at]), "relocs": relocs}  # noqa: E731
+    info = {"units": {"u": [fn("_func_10001010", 0x1010, [[1, DIR32, "_D_10002000", 0], [8, REL32, "_C", 0],
+                                                        [13, DIR32, "_D_10002004", 0]]),
+                            fn("_func_10001040", 0x1040, [[1, DIR32, "_D_10002000", 0], [6, REL32, "_S", 0]])],
+                      "v": [fn("_C", 0x1000, []), fn("_S", 0x1030, [])]}}
+    (tmp_path / "config" / "game").mkdir(parents=True)
+    (tmp_path / "config" / "game" / "functions.json").write_text(json.dumps(info))
+    manifest = {"platform": "win32", "version": "game", "game": {"path": "orig/game.exe"}, "ltcg": True}
+    return tmp_path, manifest
+
+
+def test_the_brief_shows_a_functions_register_parameters_and_how_its_callers_set_them_up(tmp_path):
+    from types import SimpleNamespace
+
+    from decompnet.app.forkengine import ForkEngine
+    from decompnet.forks import convention
+
+    root, manifest = _conv_program(tmp_path)
+    prog = convention.load(root, manifest)
+    c = prog.convention(BASE + 0x1000)
+    assert (c.reads, c.stack, c.ret, c.register_params()) == (["esi"], [4], 4, ["esi"])
+    s = prog.convention(BASE + 0x1030)
+    assert (s.reads, s.saves, s.ret, s.register_params()) == (["ecx"], ["esi"], 0, [])
+    lines = ForkEngine._convention_brief(SimpleNamespace(root=root, manifest=manifest), {"symbol": "_C"}, {"name": "C"})
+    text = "\n".join(lines)
+    assert "- reads before writing: esi; stack arguments: [esp+4]; ret 4" in text
+    assert "register parameters of LTCG's choosing: esi" in text
+    assert "  _func_10001010+0x7 (u): mov esi, 0x10002000; push 5 -> call" in text
+    # only LTCG projects get it
+    assert ForkEngine._convention_brief(SimpleNamespace(root=root, manifest={**manifest, "ltcg": False}),
+                                        {"symbol": "_C"}, {"name": "C"}) == []
+
+
+def test_ltcg_is_detected_from_call_sites_that_load_registers_no_standard_convention_uses(tmp_path, monkeypatch):
+    from decompnet.forks import convention
+
+    root, manifest = _conv_program(tmp_path)
+    prog = convention.load(root, manifest)
+    monkeypatch.setattr(convention, "MIN_CONFIRMED", 1)
+    found = convention.detect(prog)
+    # C (ESI, loaded by its caller) counts; S's ECX is __thiscall's own
+    assert (found["ltcg"], found["confirmed"], found["sampled"]) == (True, 1, 2)
+    assert "_C reads esi before writing it, and _func_10001010+0x7 sets it up: mov esi, 0x10002000" in found["examples"][0]
+    assert convention.detect(prog, skip={BASE + 0x1000})["ltcg"] is False  # S alone: a plain program
+
+
+def test_standins_are_written_from_the_units_references_with_their_conventions(tmp_path):
+    from decompnet.forks import convention, standins
+
+    root, manifest = _conv_program(tmp_path)
+    prog = convention.load(root, manifest)
+    s = standins.skeleton(prog, "u")
+    assert "u8 D_10002000[4];  // only its address is used; used by _func_10001010, _func_10001040" in s["standins"]
+    assert "int D_10002004;  // 4 bytes; used by _func_10001010" in s["standins"]
+    assert "// C (v): reads before writing: esi; stack arguments: [esp+4]; ret 4" in s["standins"]
+    assert "int C(int esi, int arg1) { return 0; }" in s["standins"]
+    assert "int S(int arg0" not in s["standins"] and "int S(void)" in s["standins"]
+    assert "extern int D_10002004;" in s["externs"]
+    drv = standins.skeleton(prog, "v")["driver"]
+    assert drv.startswith('extern "C" __declspec(dllexport) void HarnessEntry(void)')
+    assert "//   _func_10001010+0x7 (u): mov esi, 0x10002000; push 5 -> call" in drv
+    assert "harness/v.standins.cpp" in standins.render(prog, "v")

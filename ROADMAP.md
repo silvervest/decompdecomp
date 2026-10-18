@@ -27,7 +27,7 @@ start). Keep this table true when a feature ships or reaches another platform.
 | Range checks: a range applies after its neighbours confirm it | ✓ | ✓ | ✓ | — | — | — | — | — | — |
 | C++ classes from the code (`get_class`) | ✓ | ✓ | ✓ | — | — | — | — | — | — |
 | Rebuildable export | ✓ | ✓ | ✓ | ✓ | the project | the project | — | — | the project |
-| LTCG games (`/GL`: register conventions, cross-file inlining) | | | | | | | | harness mode, chosen at import (no detection yet) | |
+| LTCG games (`/GL`: register conventions, cross-file inlining) | | | | | | | | harness mode, detected at import (or chosen); convention evidence, stand-in drafts, data check | |
 | Rooms: decompile together | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
 
 Where to start on a gap:

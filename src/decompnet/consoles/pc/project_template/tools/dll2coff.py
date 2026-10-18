@@ -189,6 +189,17 @@ def global_symbol(syms: dict[str, int], name: str) -> str | None:
     return cand[0] if len(cand) == 1 else None
 
 
+SCALARS = {"C": 1, "D": 1, "E": 1, "F": 2, "G": 2, "H": 4, "I": 4, "J": 4, "K": 4, "M": 4, "N": 8, "_J": 8, "_K": 8,
+           "_N": 1, "_W": 2}
+
+
+def scalar_size(symbol: str) -> int | None:
+    """The size of a C++ global of a plain type, from its decorated name (`?g_x@@3MB`: a const float, 4); None for
+    structs, arrays, pointers and C names, whose size the name doesn't say."""
+    m = re.fullmatch(r"\?[^?@][^@]*@@3(_?[A-Z])[AB]", symbol)
+    return SCALARS.get(m.group(1)) if m else None
+
+
 def _show(data: bytes, name: str) -> str:
     if name.startswith("__real@") and len(data) == 4:
         return f"{struct.unpack('<f', data)[0]!r}f"
@@ -199,14 +210,28 @@ def _show(data: bytes, name: str) -> str:
     return json.dumps(data.rstrip(b"\0").decode("latin-1"))
 
 
+def bounds(md, img: Image, start: int, end: int) -> set[int]:
+    """Offsets of the addresses `cmp` compares with: a loop's end pointer is one past an array, where in our link
+    another global (or one the map doesn't name) may start."""
+    out = set()
+    for ins in md.disasm(img.read(start, code_end(md, img, start, end) - start), start):
+        if ins.id == x86.X86_INS_CMP:
+            out.update(ins.address - start + f for f, n in ((ins.imm_offset, ins.imm_size), (ins.disp_offset,
+                                                                                           ins.disp_size)) if n == 4)
+    return out
+
+
 def data_check(fn: dict, exe: bytes, program: Program, ours: list[tuple[int, int, int]], lo: int, hi: int,
-               claim, literal) -> dict:
+               claim, literal, loose: set[int] = frozenset()) -> dict:
     """What each reference stands for, against what the original's reference at the same place is. objdiff
     passes a function that reads one global where the original reads another (each used once, so the address
     mapping stays one to one), but our references often say which original address they mean: a D_<address> or
     func_<address> name, a `// GLOBAL:` annotation, one of the unit's own functions. Compiler literals (floats,
-    strings) are compared by value. `claim(our address)` -> (name, the original address it stands for) or None;
-    `literal(our address)` -> (name, its bytes) or None. References that say neither aren't checked."""
+    strings) are compared by value. `claim(our address)` -> ([(name, the original address it may stand for)], sure):
+    one must be the original's (an address where one global starts can also end the one before it), and only a
+    `sure` claim (our address is the symbol's own) that doesn't is a finding, unless `cmp` compares with it (offsets
+    in `loose`: an end pointer); `literal(our address)` -> (name, its
+    bytes) or None. References that say neither aren't checked."""
     orig = original_targets(fn, exe)
     checked, wrong = 0, []
     for off, _, value in ours:
@@ -214,10 +239,14 @@ def data_check(fn: dict, exe: bytes, program: Program, ours: list[tuple[int, int
         if theirs is None or theirs[1] is None or lo <= value < hi:
             continue
         a = theirs[1]
-        if (c := claim(value)) is not None:
+        c, sure = claim(value) or ([], False)
+        if c and any(addr == a for _, addr in c):
             checked += 1
-            if c[1] != a:
-                wrong.append(f"+0x{off:X}: yours refers to {c[0]} (0x{c[1]:X}) where the original refers to 0x{a:X}")
+        elif c and sure and off not in loose:
+            checked += 1
+            wrong.append(f"+0x{off:X}: yours refers to {c[0][0]} (0x{c[0][1]:X}) where the original refers to 0x{a:X}")
+        elif c:
+            continue  # past a symbol's start, into something the map may not name: no verdict
         elif (lit := literal(value)) is not None:
             checked += 1
             got = program.read(a, len(lit[1]))
@@ -402,21 +431,31 @@ def main() -> None:
         if (sym := global_symbol(syms, name)) is not None:
             annotated[sym] = va
 
-    def claim(va: int) -> tuple[str, int] | None:
-        if va in orig_of:
-            return functions[orig_of[va]]["name"], orig_of[va]
-        i = bisect.bisect_right(addrs, va) - 1
-        if i < 0:
-            return None
+    def stands_for(i: int, va: int) -> tuple[str, int] | None:
+        """The original address our address `va` means, read as an offset into map symbol `i`."""
         a, s = by_addr[i]
         delta = va - a
-        if delta >= 0x1000 or img.section(a) is not img.section(va):
-            return None
+        size = scalar_size(s)
+        if delta >= (size + 1 if size else 0x1000) or img.section(a) is not img.section(va):
+            return None  # past a scalar (and its one-past-the-end): something the map doesn't name
         shown = s if not delta else f"{s}+0x{delta:X}"
         if s in annotated:
             return shown, annotated[s] + delta
         m = names.REF.search(s.encode())
         return (shown, int(m.group(2), 16) + delta) if m else None
+
+    def claim(va: int) -> tuple[list[tuple[str, int]], bool]:
+        if va in orig_of:
+            return [(functions[orig_of[va]]["name"], orig_of[va])], True
+        i = bisect.bisect_right(addrs, va) - 1
+        if i < 0 or (first := stands_for(i, va)) is None:
+            return [], False
+        out = [first]
+        if i > 0 and by_addr[i][0] == va and (c := stands_for(i - 1, va)) is not None:
+            out.append(c)  # where one global starts, the one before it may end: a loop's end pointer
+        # Only a reference to a symbol itself is sure: past its start may be data the map doesn't name (C++ const
+        # globals and statics have internal linkage, and the map lists public symbols)
+        return out, by_addr[i][0] == va
 
     def literal(va: int) -> tuple[str, bytes] | None:
         i = bisect.bisect_right(addrs, va) - 1
@@ -441,7 +480,7 @@ def main() -> None:
         cuts.append({"name": fn["name"], "addr": addr, "offset": img.offset(start), "size": end - start,
                      "relocs": relocs})
         check = mapping(fn, exe, targets, start, end)
-        check |= data_check(fn, exe, program, targets, start, end, claim, literal)
+        check |= data_check(fn, exe, program, targets, start, end, claim, literal, bounds(md, img, start, end))
         report["functions"][fn["name"]] = {"orig": f"0x{addr:08X}", "ours": f"0x{start:08X}", "symbol": sym,
                                            "size": end - start, "orig_size": fn["size"], "notes": notes, **check}
     data = delink.coff(cuts, img.data)

@@ -112,6 +112,34 @@ const CW_PACK = {
     note: "Not sure? Keep the default. Games mix versions: a file the game built with another one gets it later, when a helper finds the version its functions match with." },
 };
 const packOf = (p) => CW_PACK[consoleOf(p)?.packs[0]] ? consoleOf(p).packs[0] : "mwcc";
+/* An original Xbox program (XBE): its certificate holds the title; the entry point is stored XORed with the retail
+   or the debug key (the one that lands it in the image is right). */
+function identifyXbe(head, file, base) {
+  const dv = new DataView(head.buffer);
+  if (head.length < 0x178 || String.fromCharCode(...head.slice(0, 4)) !== "XBEH") return null;
+  const at = dv.getUint32(0x104, true), cert = dv.getUint32(0x118, true) - at, size = dv.getUint32(0x10c, true);
+  let title = "";
+  if (cert > 0 && cert + 0x5c <= head.length) title = new TextDecoder("utf-16le").decode(head.slice(cert + 0x0c, cert + 0x5c)).split("\0")[0].trim();
+  const enc = dv.getUint32(0x128, true);
+  const entry = [0xa8fc57ab, 0x94859d4b].map((k) => (enc ^ k) >>> 0).find((e) => e >= at && e < at + size);
+  return { ...base, platform: "xbox", order: "Xbox program (XBE)", title: title || base.title, entry };
+}
+/* An Xbox disc image (XDVDFS): its descriptor is at 64 KiB in an XISO, past the video partition in a full dump. */
+async function identifyXboxDisc(file) {
+  for (const at of [0x10000, 0x18310000]) {
+    if (file.size < at + 0x14) continue;
+    const magic = new TextDecoder().decode(await file.slice(at, at + 20).arrayBuffer());
+    if (magic === "MICROSOFT*XBOX*MEDIA") return { title: file.name.replace(/\.[^.]*$/, ""), size: file.size, platform: "xbox", order: at ? "Xbox disc image" : "disc image" };
+  }
+  return null;
+}
+/* What an Xbox game is compiled with: the msvc pack's Visual C++ 7.1, against the user's own XDK (never downloaded). */
+function xboxNote() {
+  const xdk = (S.st?.toolchains || []).find((t) => t.id === "xdk");
+  return "Xbox games are compiled with Visual C++ 7.1 against the headers of your own XDK"
+    + (xdk?.installed ? ` (at ${xdk.folder}).` : ", which decompdecomp never downloads: set its folder in Compilers & tools first.")
+    + " Ghidra finds the functions (installed once, 540 MB, needs Java 21+); the XDK's own library code is set aside.";
+}
 const MB = (n) => (n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KiB` : `${(n / 1048576).toFixed(n < 10485760 ? 1 : 0)} MiB`);
 
 /* A DS ROM (consoles/nds/scratch.is_nds): the header's own CRC-16 is right and the ARM9 program sits in main RAM. */
@@ -136,6 +164,8 @@ function identifyHead(head, file) {
   if (isNds(head, dv)) return { ...base, platform: "nds", order: "DS ROM", code: ascii(12, 16), title: ascii(0, 12) || stem, entry: dv.getUint32(0x24, true) };
   if (pe && pe + 0x1a <= head.length && text(pe, pe + 4) === "PE\0\0" && dv.getUint16(pe + 4, true) === 0x14c && dv.getUint16(pe + 24, true) === 0x10b)
     return { ...base, platform: "win32", order: "Windows program (.exe)", entry: dv.getUint32(pe + 52, true) + dv.getUint32(pe + 40, true) };
+  const xbe = identifyXbe(head, file, base);
+  if (xbe) return xbe;
   if (text(0, 8) === "PS-X EXE") return { ...base, platform: "ps", order: "PS-X EXE program", entry: dv.getUint32(0x10, true) };
   // which PlayStation a disc is for, its SYSTEM.CNF says (the server reads it)
   if (text(0x8001, 0x8006) === "CD001" || text(0x9319, 0x931e) === "CD001" || text(0x9311, 0x9316) === "CD001") return { ...base, platform: "playstation", order: "disc image" };
@@ -182,7 +212,8 @@ const NOT_A_GAME = "That isn't a game file decompdecomp can start from scratch (
 
 async function pickFile(file) {
   const head = new Uint8Array(await file.slice(0, 0x9400).arrayBuffer());
-  let info = identifyHead(head, file), buf = file;
+  // an Xbox disc first: a full dump starts with a DVD video partition, which reads as another console's disc
+  let info = await identifyXboxDisc(file).catch(() => null) || identifyHead(head, file), buf = file;
   if (!info) {
     const why = notSupported(head, file);
     if (why || file.size > 64 * 1024 * 1024) return toast(esc(why || NOT_A_GAME), "err");
@@ -234,7 +265,7 @@ function setupCompilers(info) {
     + (con.default_compiler ? "" : `<option value="" selected>Let decompdecomp pick (from the program itself)</option>`);
   const pack = packOf(p);
   note.hidden = false;
-  note.textContent = CW_PACK[pack].note;
+  note.textContent = p === "xbox" ? xboxNote() : CW_PACK[pack].note;
   $("mwText").textContent = CW_PACK[pack].text;
   $("mwConsent").hidden = !!(S.st?.toolchains || []).find((t) => t.id === pack && t.installed);
 }

@@ -42,7 +42,8 @@ from pathlib import Path
 
 # The driver's entry point, defined (not commented out): a unit is built in harness mode once its driver has one.
 ENTRY = re.compile(r'^[ \t]*extern[ \t]+"C"[^\n;]*\bHarnessEntry[ \t]*\(', re.M)
-LINK_LINE = re.compile(r"//[ \t]*HARNESS-LINK:[ \t]*([^\r\n]+)")
+# a line of its own (a comment that only mentions the directive, as older driver skeletons did, isn't one)
+LINK_LINE = re.compile(r"^[ \t]*//[ \t]*HARNESS-LINK:[ \t]*([^\r\n]*)", re.M)
 
 # What the compiler calls without the source asking for it (floating point, 64-bit arithmetic, stack probes,
 # pure virtual calls, structure copies). Builds link with /NODEFAULTLIB, so these stubs stand in for the C runtime:
@@ -90,8 +91,14 @@ def link_flags(paths: list[Path]) -> list[str]:
     """The extra linker flags of `// HARNESS-LINK:` lines. link.exe takes a single /d2:, so the last one wins."""
     out: list[str] = []
     for p in paths:
-        for m in LINK_LINE.finditer(p.read_text(encoding="utf-8", errors="replace")):
-            out += shlex.split(m.group(1).strip())
+        text = p.read_text(encoding="utf-8", errors="replace")
+        for m in LINK_LINE.finditer(text):
+            try:
+                out += shlex.split(m.group(1).strip())
+            except ValueError as e:  # an unclosed quote: say where, configure stops with it
+                line = text.count("\n", 0, m.start()) + 1
+                raise SystemExit(f"{p}:{line}: can't read the HARNESS-LINK flags ({e}): "
+                                 f"{m.group(0).strip()}") from None
     d2 = [f for f in out if f.lower().startswith("/d2:")]
     return [f for f in out if not f.lower().startswith("/d2:")] + d2[-1:]
 

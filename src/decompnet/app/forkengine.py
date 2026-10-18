@@ -18,6 +18,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import threading
 import time
 from collections import defaultdict
@@ -408,6 +409,7 @@ class ForkEngine:
         self._trees: dict[int, _TreeLock] = defaultdict(_TreeLock)  # project id -> its source tree's lock
         self._unit_locks: dict[tuple[int, str], threading.RLock] = defaultdict(threading.RLock)
         self._build_locks: dict[int, threading.Lock] = defaultdict(threading.Lock)  # one build at a time per tree
+        self._refreshed: set[int] = set()  # projects whose tools/ were checked against the template (_fresh_tools)
         self._git_locks: dict[int, threading.Lock] = defaultdict(threading.Lock)
         self._mlock = threading.Lock()
         # (project id, unit) -> (sha1 of its source, base object mtime, {function: match %}): what objdiff said
@@ -482,11 +484,33 @@ class ForkEngine:
     def _build_unit(self, proj, fp: ForkProject, unit) -> tuple[bool, str]:
         """Build one unit's object. Builds share the tree's build files (ninja's log), so they take turns."""
         with self._build_locks[proj["id"]]:
-            return fp.build_unit(unit)
+            self._fresh_tools(proj, fp)
+            ok, log = fp.build_unit(unit)
+            if not ok and "unknown target" in log and (fp.manifest or {}).get("created") == "from scratch":
+                # the build has no rule for it: configure stopped (a driver it can't read, say). Say why
+                for cmd in (fp.manifest or {}).get("setup", [])[:1]:
+                    done, out = fp.run([sys.executable if cmd[0] == "python" else cmd[0], *cmd[1:]],
+                                       log=lambda *_: None)
+                    if not done:
+                        log += "\nconfigure (tools/configure.py) failed, so the build has no rule for this unit:\n" + \
+                            out[-2000:]
+            return ok, log
 
     def _build_all(self, proj, fp: ForkProject, failed: list[str] | None = None) -> tuple[bool, str]:
         with self._build_locks[proj["id"]]:
+            self._fresh_tools(proj, fp)
             return fp.build_all(failed=failed)
+
+    def _fresh_tools(self, proj, fp: ForkProject) -> None:
+        """A project's tools/ brought up to its console's template once per run of the app (Console.refresh_project;
+        PC and Xbox: scratch.refresh_tools): fixes in the build and the judge reach projects made before them."""
+        if proj["id"] in self._refreshed:
+            return
+        self._refreshed.add(proj["id"])
+        try:
+            consoles.get((fp.manifest or {}).get("platform")).refresh_project(fp, log=lambda *_: None)
+        except OSError:
+            pass
 
     def _keep_scores(self, proj, unit, text: str, scores: dict) -> None:
         mtime = unit.base.stat().st_mtime_ns if unit.base is not None and unit.base.exists() else None

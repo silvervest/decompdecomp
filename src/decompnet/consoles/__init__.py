@@ -221,9 +221,11 @@ def _registry() -> list[Console]:
     from .pc import PC
     from .ps2 import PS2
     from .public import PUBLIC_ONLY
+    from .xbox import XBOX
 
-    # the order sniff is asked in: a file is the first console's that says it's its own
-    return [N64, PS2, GAMECUBE, WII, PC, *PUBLIC_ONLY]
+    # the order sniff is asked in: a file is the first console's that says it's its own (an Xbox disc before the
+    # PS2's: a full Xbox dump starts with a DVD video partition)
+    return [N64, XBOX, PS2, GAMECUBE, WII, PC, *PUBLIC_ONLY]
 
 
 CONSOLES: list[Console] = _registry()

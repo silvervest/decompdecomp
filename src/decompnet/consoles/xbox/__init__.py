@@ -1,0 +1,67 @@
+"""The original Xbox: x86 programs (XBE) built with Visual C++ from Microsoft's Xbox Development Kit (the XDK),
+PROJECT mode. An Xbox game is a Windows-style program in Microsoft's own executable format, so it goes the PC
+console's way (consoles/pc/): Ghidra finds the functions, each one is cut out of the program into a COFF object, and
+objdiff judges what src/ compiles to.
+
+- scratch.py: reads an XBE (or the default.xbe on a disc image) into the shape consoles/pc/scratch.py reads a
+  Windows program into, so the PC path's analysis, source units and delinker take it unchanged.
+- xboxkrnl.py: the kernel's exports by ordinal, so a `call [kernel thunk slot]` becomes an import as on Windows.
+- xdvdfs.py: default.xbe out of a disc image (XISO, or a full Redump dump).
+
+Its fixture is projects/demo-xbe, an XBE written byte by byte (no compiler, no Microsoft code) for tests/test_xbe.py.
+It isn't a conformance demo (tests/test_consoles.py): a real Xbox program links the XDK's libraries, which are
+proprietary.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from .. import BETA, PROJECT, Compiler, Console
+
+
+class Xbox(Console):
+    id = "xbox"
+    name = "Xbox"
+    short = "Xbox"
+    status = BETA
+    arch = "x86"
+    mode = PROJECT
+    layout = "Ghidra + objdiff"
+    compilers = (Compiler("MSVC/7.1", "Visual C++ 7.1", "games made with the XDK 5849"),)
+    guides = ("x86", "cpp")
+    compiler_guide = "x86"
+    ram = (0x00010000, 0x80000000)  # an XBE loads at 0x10000; the kernel lives above 0x80000000
+
+    def sniff(self, head: bytes, file) -> bool:
+        from . import scratch, xdvdfs
+
+        if scratch.is_xbe(head):
+            return True
+        return xdvdfs.is_xbox_disc(file if isinstance(file, Path) else bytes(file))
+
+    def upload_name(self, data: bytes) -> str:
+        from . import scratch
+
+        return "default.xbe" if scratch.is_xbe(bytes(data[:0x1000])) else "game.iso"
+
+    def default_compiler(self, info: dict, splat_guess: str) -> str:
+        return ""  # the program's library version table says which XDK, so which Visual C++, built it
+
+    def create_project(self, root: Path, game: Path, *, compiler: str | None = None, log=print) -> dict:
+        from . import scratch
+
+        return scratch.create(root, game, compiler=compiler, log=log)
+
+    def game_info(self, game: Path) -> dict:
+        from . import scratch
+
+        return scratch.game_info(game)
+
+    def tool_args(self) -> list[str]:
+        from . import scratch
+
+        return scratch.tool_args()
+
+
+XBOX = Xbox()

@@ -94,8 +94,24 @@ function renderTools() {
   $("toolGrid").innerHTML = rows.map((t) => `<div class="tool-card ${t.installed ? "ok" : ""}">
       <div class="tc-top"><b>${esc(t.name)}</b>${t.license === "proprietary" ? `<span class="chip-s warn">proprietary</span>` : ""}${t.platform ? `<span class="chip-s">${esc(t.platform)}</span>` : ""}${t.wsl ? `<span class="chip-s" title="A Linux program: on Windows it runs inside WSL 2">WSL 2</span>` : ""}</div>
       <p class="muted small">${esc(t.use)}</p>
-      <div class="row">${!t.supported ? `<span class="muted small">not available for this computer</span>` : t.installed ? `<span class="ok-mark">✓ installed</span>` : `<button class="ghost small-btn" data-tc="${esc(t.id)}" data-prop="${t.license === "proprietary" ? 1 : ""}" type="button">Install</button>`}</div></div>`).join("");
+      <div class="row">${!t.supported ? `<span class="muted small">not available for this computer</span>` : t.local ? `${t.installed ? `<span class="ok-mark grow" title="${esc(t.folder || "")}">✓ your copy</span>` : ""}<button class="ghost small-btn" data-local="${esc(t.id)}" type="button">${t.installed ? "Change folder" : "Choose your folder"}</button>` : t.installed ? `<span class="ok-mark">✓ installed</span>` : `<button class="ghost small-btn" data-tc="${esc(t.id)}" data-prop="${t.license === "proprietary" ? 1 : ""}" type="button">Install</button>`}</div></div>`).join("");
   $("toolGrid").querySelectorAll("[data-tc]").forEach((b) => { b.onclick = () => { b.disabled = true; installToolchain(b.dataset.tc, !!b.dataset.prop).finally(() => { b.disabled = false; }); }; });
+  $("toolGrid").querySelectorAll("[data-local]").forEach((b) => { b.onclick = () => useLocalToolchain(b.dataset.local); });
+}
+/* A local toolchain (the Xbox XDK): nothing is downloaded; decompdecomp checks the user's own folder and reads it
+   where it is. */
+async function useLocalToolchain(id) {
+  const t = (S.st.toolchains || []).find((x) => x.id === id) || {};
+  const folder = prompt(`The folder of your own copy of ${t.name || id} (the one holding xbox/include and xbox/lib, or that folder itself):`, t.folder || "");
+  if (!folder || !folder.trim()) return;
+  if (t.license === "proprietary" && !confirm("This is proprietary software. decompdecomp reads your copy where it is and never copies or uploads it. Use it only if you accept that. Continue?")) return;
+  try {
+    const { job } = await api("/api/toolchain", { method: "POST", body: { id, accept_license: true, folder: folder.trim() } });
+    await followJob(job);
+    toast("Your copy is set up.", "match");
+    await loadState();
+    renderTools();
+  } catch (e) { toast(esc(e.message), "err"); }
 }
 
 /* ------------------------------------------------------------------ settings page */

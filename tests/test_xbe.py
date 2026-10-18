@@ -7,10 +7,12 @@ and then refuses with a message saying so.
 """
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
 
+from decompnet import toolchains
 from decompnet.app.engine import PLATFORM_STATUS, RomNetwork
 from decompnet.forks import scratch_pe, scratch_xbe, xboxkrnl, xdvdfs
 from decompnet.forks.project import ForkError
@@ -152,3 +154,56 @@ def test_importing_an_xbox_game_says_xbox_projects_arent_finished(tmp_path):
             net.import_rom(data, name=name, confirmed=True, log=lambda *_: None)
     assert not any(p.name != ".decomp" for p in (tmp_path / "ws").iterdir())
     assert PLATFORM_STATUS["xbox"] == "beta"
+
+
+def _fake_xdk(top: Path) -> Path:
+    """A folder shaped like an unpacked XDK (empty files with its names: no Microsoft code)."""
+    xbox = top / "XDK" / "xbox"
+    (xbox / "include").mkdir(parents=True)
+    (xbox / "lib").mkdir()
+    (xbox / "include" / "XTL.h").write_bytes(b"")
+    (xbox / "lib" / "xapilib.lib").write_bytes(b"")
+    return xbox
+
+
+def test_the_xdk_is_the_users_own_folder_checked_and_never_copied(tmp_path, monkeypatch):
+    monkeypatch.setenv("DECOMPNET_TOOLCHAINS", str(tmp_path / "tc"))
+    xbox = _fake_xdk(tmp_path / "mine")
+    tc = toolchains.get("xdk")
+    assert tc.local and tc.proprietary and tc.supported and not tc.parts
+    with pytest.raises(toolchains.ToolchainError, match="give the folder"):
+        toolchains.install("xdk", accept_license=True)
+    with pytest.raises(toolchains.ToolchainError, match="proprietary"):
+        toolchains.install("xdk", folder=tmp_path / "mine")
+    with pytest.raises(toolchains.ToolchainError, match="include/xtl.h"):
+        toolchains.install("xdk", accept_license=True, folder=tmp_path)
+    with pytest.raises(toolchains.ToolchainError, match="isn't set up"):
+        toolchains.local_folder("xdk")
+    # the folder above it is fine: the xbox folder inside is found, names compared as Windows compares them
+    assert toolchains.install("xdk", accept_license=True, folder=tmp_path / "mine", log=lambda *_: None) == xbox.resolve()
+    assert toolchains.local_folder("xdk") == xbox.resolve()
+    assert [p.name for p in (tmp_path / "tc" / "xdk").iterdir()] == [toolchains.MANIFEST]  # nothing copied
+    row = next(r for r in toolchains.status() if r["id"] == "xdk")
+    assert row["installed"] and row["local"] and row["folder"] == str(xbox.resolve())
+    (xbox / "lib" / "xapilib.lib").unlink()
+    with pytest.raises(toolchains.ToolchainError, match="isn't at"):
+        toolchains.local_folder("xdk")
+
+
+def test_xbox_builds_ask_for_the_xdk_and_take_a_local_wibo_xbox(tmp_path, monkeypatch):
+    monkeypatch.setenv("DECOMPNET_TOOLCHAINS", str(tmp_path / "tc"))
+    real = toolchains.installed
+    monkeypatch.setattr(toolchains, "installed", lambda tid, linux=None: {} if tid == "msvc" else real(tid, linux))
+    with pytest.raises(ForkError, match="XDK's headers and libraries.*Setup"):
+        scratch_xbe.tool_args()
+    toolchains.install("xdk", accept_license=True, folder=_fake_xdk(tmp_path / "mine"), log=lambda *_: None)
+    built = tmp_path / "wibo"
+    built.write_bytes(b"")
+    monkeypatch.setenv("DECOMP_WIBO_XBOX", str(built))
+    args = scratch_xbe.tool_args()
+    assert args[2:4] == ["--xdk", str((tmp_path / "mine" / "XDK" / "xbox").resolve())]
+    if sys.platform != "win32":
+        assert args[4:] == ["--wibo", str(built)]
+        monkeypatch.setenv("DECOMP_WIBO_XBOX", str(tmp_path / "missing"))
+        with pytest.raises(ForkError, match="DECOMP_WIBO_XBOX"):
+            scratch_xbe.tool_args()

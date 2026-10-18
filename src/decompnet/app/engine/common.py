@@ -61,7 +61,8 @@ TOOLS = {
     "mwcc": "CodeWarrior, the compilers of GameCube and Wii games (proprietary)",
     "mwccarm": "CodeWarrior for DS, the compilers of DS games (proprietary)",
     "msvc": "Visual C++ 6.0, 7.0 and 7.1, the compilers of PC games (proprietary)",
-    "dsd": "ds-decomp: analyses DS ROMs and rebuilds them",
+    "xdk": "your own Xbox XDK: the headers and libraries of Xbox games (proprietary, never downloaded)",
+    "dsd":"ds-decomp: analyses DS ROMs and rebuilds them",
 }
 # Functions this small are handed out in batches (claim_function count): agents match most on the first try.
 BATCH_INSNS = 48

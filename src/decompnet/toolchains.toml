@@ -628,3 +628,15 @@ description = "Game Boy Advance disassembler: finds the functions in a ROM and w
 git = "https://github.com/aarant/luvdis"
 commit = "ec3a4e3ee3afe3e9b4a9c7ae8fffc65e1ea2096c"
 pip_extra = ["setuptools<70"]
+
+# The Xbox XDK is the user's own copy: never downloaded, never copied. Its compiler is the [msvc] pack's 7.1 (XDK
+# 5849's vc71 tools are the same files, build 3077); the XDK gives the headers (xbox/include) and libraries
+# (xbox/lib) Xbox games are built against.
+[xdk]
+name = "Microsoft Xbox Development Kit (your own copy)"
+kind = "local"
+platform = "Xbox"
+license = "proprietary"
+source = "your own XDK folder: nothing is downloaded"
+description = "The headers and libraries of original Xbox games. Give the folder of your own copy (the one holding xbox/include and xbox/lib); the compiler is Visual C++ 7.1 from the msvc pack."
+local_files = ["include/xtl.h", "lib/xapilib.lib"]

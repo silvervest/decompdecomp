@@ -332,6 +332,24 @@ sha256 = "2b3000ef6a7a490c24ccd71967735ae0005e218922e51806cca1b8d77fd3cf7c"
 binary = "wibo"
 platforms = ["macos-x86_64", "macos-arm64"]
 
+["wibo-xbox"]
+name = "wibo for the Xbox XDK"
+kind = "tool"
+license = "MIT"
+source = "silvervest/wibo 1.2.0-xbox.2 (decompals/wibo 1.2.0 plus the Xbox XDK patches; packaging/wibo/)"
+description = "wibo with what the Xbox XDK 5849 linker and librarian need (Link.Exe, /LTCG, Lib.Exe). A superset of wibo: Xbox projects run every XDK tool through it."
+binary_name = "wibo"
+[["wibo-xbox".parts]]
+url = "https://github.com/silvervest/wibo/releases/download/1.2.0-xbox.2/wibo-x86_64"
+sha256 = "e1f81d29925f31d02421a6790e2e9dfc4ba86c964820301e7a0a2e7ceddba278"
+binary = "wibo"
+platforms = ["linux-x86_64"]
+[["wibo-xbox".parts]]
+url = "https://github.com/silvervest/wibo/releases/download/1.2.0-xbox.2/wibo-macos"
+sha256 = "67fc354978f0cc975990d24984e98df223372ed7d27f23cec1b75e27408d3c6f"
+binary = "wibo"
+platforms = ["macos-x86_64", "macos-arm64"]
+
 [gc-wii-binutils]
 name = "GNU binutils for GameCube and Wii"
 kind = "tool"

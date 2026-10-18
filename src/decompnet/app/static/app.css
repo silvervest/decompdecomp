@@ -532,6 +532,8 @@ a.ghost, a.primary { text-decoration: none; }
 .tool-card { display: grid; gap: 9px; align-content: start; text-align: left; padding: 16px; border-radius: var(--r); border: 1px solid var(--line); background: var(--panel); min-width: 0; }
 .cc-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 22px; }
 .tool-card.ok { color: inherit; border-color: var(--line); }  /* "ok" is the installed state; the ✓ line says so */
+.local-form { display: grid; gap: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+.local-form input[type=text] { width: 100%; box-sizing: border-box; }
 .tc-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .tc-top b { font-size: 14.5px; margin-right: auto; }
 .repo-row input { height: 36px; min-width: min(360px, 60vw); border-radius: var(--r); border: 1px solid var(--line); background: var(--raise); padding: 0 10px; font-size: 13px; }

@@ -242,7 +242,11 @@ class Function:
 
 def decorate(name: str, convention: str, purge: int, params: int) -> str:
     """The symbol MSVC makes for a C function: _f (__cdecl), _f@8 (__stdcall), @f@8 (__fastcall). __thiscall
-    functions (C++ methods, `this` in ecx) are written in C as __fastcall with an unused second argument (edx)."""
+    functions (C++ methods, `this` in ecx) are written in C as __fastcall with an unused second argument (edx).
+    A purge Ghidra couldn't work out comes as 2147483647 (it made `_func_0001190E@2147483647` on an Xbox program):
+    no function pops that many bytes, so it counts as none."""
+    if not 0 <= purge <= 0xFFFF:
+        purge = 0
     if convention == "__thiscall":
         return f"@{name}@{purge + 8}"
     if convention == "__fastcall":

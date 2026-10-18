@@ -17,11 +17,11 @@ folder, `src/decompnet/consoles/<id>/`; a new console adds a column (CONTRIBUTIN
 | Status | recommended | beta | beta | beta | beta | beta | beta | the project's own |
 | Start from your own copy | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ XBE or disc, your own XDK | fork by address |
 | Judge | link · compare | link · compare | link · compare | objdiff | objdiff | objdiff | objdiff | objdiff |
-| Machine drafts (m2c, Ghidra for x86) | ✓ | ✓ | ✓ | ✓ | ✓ Ghidra | — | as PC (untested) | by architecture |
+| Machine drafts (m2c, Ghidra for x86) | ✓ | ✓ | ✓ | ✓ | ✓ Ghidra | — | ✓ Ghidra | by architecture |
 | Autopilot: free matches from drafts | ✓ | ✓ | ✓ | ✓ | — | — | — | — |
 | Drafts follow the header, made in the background; `redraft` | ✓ | ✓ | ✓ | — | — | — | — | — |
 | C++ methods drafted as `Class::method` | ✓ | ✓ | ✓ | — | — | — | — | — |
-| Twins: free matches from identical code | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
+| Twins: free matches from identical code | ✓ | ✓ | ✓ | ✓ | COFF fingerprints (new; no free match seen yet) | ✓ | as PC | ✓ |
 | Permuter on near misses | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
 | Hand-written assembly set aside | ✓ | ✓ | ✓ | ✓ | — | BIOS call stubs | — | MIPS, PowerPC, ARM's BIOS stubs |
 | Kernel stubs set aside and named | — | set aside (BIOS calls) | ✓ | — | — | — | ✓ XDK library code | — |
@@ -47,6 +47,10 @@ Where to start on a gap:
 - **Windows PC**: autopilot needs drafts that compile (Ghidra's output doesn't, as it is); the export needs a linker
   story (the project is delinked COFF objects).
 - **Function-end reports** cut MIPS functions (`engine._cut`).
+- **Xbox (and PC)**: on a test program built with the XDK, free C++ functions an attempt matched later showed as
+  "not in your build" in the unit-wide diff (`objdiff.diff(..., symbol=None)` scores), which set them back to open
+  (`forkengine._apply_scores`); methods kept their match. Twins and the permuter only see matched functions, so they
+  wait on that. Rooms haven't been run on Xbox.
 - **Struct layouts** read MIPS loads and stores (`arch/mips_fields.py`); another processor adds its reader as its
   `Arch.field_accesses`, and structs.py does the rest. Still open on MIPS: the PS2's fifth to eighth arguments
   (t0-t3), and a pointer into the middle of a struct handed to a callee (`&this->pos`).

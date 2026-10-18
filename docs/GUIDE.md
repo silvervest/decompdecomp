@@ -185,7 +185,8 @@ the game.
 | **PlayStation 2** | Beta | ✓ disc or ELF | EE-GCC 2.9 · 2.95.2/2.95.3 (SN) · 2.96 · 3.2 · CodeWarrior 2.3.3 / 3.0.1 | ✓ export | ✓ |
 | **GameCube · Wii** | Beta | ✓ disc (ISO, RVZ, WBFS…) or DOL | CodeWarrior GC 1.0 – Wii 1.7 | ✓ dtk-template | ✓ |
 | **Windows PC** | Beta | ✓ program (32-bit x86 .exe) | Visual C++ 6.0 · 7.0 · 7.1 | — | ✓ |
-| **PlayStation · GBA · DS · 3DS · PSP · Switch · Xbox · Xbox 360** | Public decomps only | | | | ✓ |
+| **Xbox** | Beta | ✓ program (default.xbe) or disc image (XISO, full dump) | Visual C++ 7.1 with your own XDK | — | ✓ |
+| **PlayStation · GBA · DS · 3DS · PSP · Switch · Xbox 360** | Public decomps only | | | | ✓ |
 
 [ROADMAP.md](../ROADMAP.md) has a table of which feature works on which platform.
 
@@ -205,6 +206,8 @@ different build, which is planned.
   again and compares it byte for byte. The homemade demo game passes every step, but no real game is tested from
   start to end yet.
 - **Windows PC** passes every step on the homemade demo game. It is tested on few real games.
+- **Xbox** goes the Windows PC way, with your own XDK. It is tested on a homemade XBE and on small programs built
+  with the XDK.
 
 Please [report problems](https://github.com/n-delic/decompdecomp/issues). The status of a public decomp is the status
 of its own project.
@@ -216,6 +219,7 @@ of its own project.
 | N64, PS2 | splat and spimdisasm. They also find code that the game loads later, and overlays. |
 | GameCube, Wii | decomp-toolkit, in a [dtk-template](https://github.com/encounter/dtk-template) project (`consoles/gc_wii/scratch.py`) |
 | Windows PC | [Ghidra](https://github.com/NationalSecurityAgency/ghidra). decompdecomp cuts each function out of the .exe into a project for Visual C++ and objdiff (`consoles/pc/scratch.py`). |
+| Xbox | Ghidra, as for Windows PC, on the XBE's memory image (`consoles/xbox/scratch.py`). The XDK's own library code is set aside: its sections, and functions in .text that your XDK's libraries match. You set your own XDK folder in Setup; decompdecomp never downloads it. Games built with `/GL` (LTCG) don't match with plain compiles yet. |
 
 **C and C++.** GameCube, Wii, PS2 and Windows PC games are often C++. On these platforms, agents can write
 classes and methods, and decompdecomp changes the C++ names back to the names of the game. N64 games use C. Public decomps use the language of their project.

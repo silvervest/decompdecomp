@@ -32,8 +32,8 @@ class Xbox(Console):
     # XDK 5849's vc71 tools are the msvc pack's Visual C++ 7.1 (the same files): the XDK gives the headers and libraries
     packs = (("msvc", "Visual C++ 6.0, 7.0 and 7.1, the compilers of PC games (proprietary)"),
              ("xdk", "your own Xbox XDK: the headers and libraries of Xbox games (proprietary, never downloaded)"))
-    guides = ("x86", "cpp")
-    compiler_guide = "x86"
+    guides = ("x86", "xbox", "cpp")
+    compiler_guide = "xbox"  # given up front; it starts by pointing at the x86 guide, which holds what PC shares
     ram = (0x00010000, 0x80000000)  # an XBE loads at 0x10000; the kernel lives above 0x80000000
 
     def sniff(self, head: bytes, file) -> bool:

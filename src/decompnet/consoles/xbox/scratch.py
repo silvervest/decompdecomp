@@ -13,8 +13,9 @@ packed in Microsoft's own executable format instead of a PE:
 - there's no Rich header either. The library version table names each XDK library the program linked (XAPILIB,
   D3D8, DSOUND...) and the XDK build it came from, which is what picks the compiler.
 
-What's here so far reads an XBE and its disc. Making the project (the XDK as a toolchain in Setup, Ghidra loading
-an XBE, setting the XDK's own library code aside) is the next step, so create() refuses with a clear message.
+The project is the PC path's (scratch_pe.write_project, pc_template): Ghidra finds the functions in the XBE's memory
+image (stock Ghidra has no XBE loader), the XDK's own library code is set aside (xdklib), and src/ compiles with
+the [msvc] pack's Visual C++ 7.1 (the XDK's own compiler) against the headers of the user's own XDK, set up in Setup.
 """
 
 from __future__ import annotations
@@ -30,8 +31,9 @@ from pathlib import Path
 
 from ... import toolchains
 from ...forks.project import ForkError
+from ..pc import scratch as scratch_pe
 from ..pc.scratch import PE, Section
-from . import xboxkrnl, xdvdfs
+from . import xboxkrnl, xdklib, xdvdfs
 
 MAGIC = b"XBEH"
 # (entry point key, kernel thunk key) by kind of image
@@ -44,7 +46,16 @@ EXECUTABLE, WRITABLE = 0x4, 0x1  # XBE section flags
 # shortcut: only XDK 5849 (December 2003) is verified (its vc71 tools are the same files as Visual C++ 7.1 build
 # 3077); add other XDK releases as someone checks their compilers.
 XDK_COMPILERS = {5849: "7.1"}
-REGIONS = {1: "North America", 2: "Japan", 4: "rest of the world", 0x80000000: "manufacturing"}
+DEFAULT_COMPILER = "7.1"  # for an XDK whose compiler isn't known yet: most Xbox games are from the 7.1 years
+# The template's compiler flags for Xbox games: what the XDK's project templates set for a release build (/G6 for the
+# Pentium III, /arch:SSE, /Gy for a section per function) plus _XBOX, which the XDK's headers expect.
+# shortcut: games built with /GL (link-time code generation: custom register conventions, cross-file inlining) need
+# an LTCG mode, still to come; nothing detects them yet, so /GL is never the default.
+CL_FLAGS = ["/nologo", "/c", "/O2", "/G6", "/GF", "/Gy", "/arch:SSE", "/W3", "/D_XBOX"]
+# Data sections by name. The Xbox linker marks .rdata and .data executable too (and code sections writable), so the
+# flags don't tell code from data: Burnout 3's .rdata, .data and .data1 all carry the executable flag.
+_DATA_NAME = re.compile(r"(?i)^(\.r?data\w*|\.bss|\.tls|\.xtlid|\$\$x\w*|\w+_RD)$")
+REGIONS = {1:"North America", 2: "Japan", 4: "rest of the world", 0x80000000: "manufacturing"}
 
 
 @dataclass
@@ -162,7 +173,7 @@ def read_xbe(data: bytes) -> XBE:
         flags, va, vsize, offset, raw_size, name_at = struct.unpack_from("<6I", data, at + SECTION_HEADER * i)
         name = _string(data, base, name_at, f"section {i}'s name")
         sections.append(Section(name, va, vsize, offset, min(raw_size, max(0, len(data) - offset)),
-                                bool(flags & EXECUTABLE)))
+                                bool(flags & EXECUTABLE) and not _DATA_NAME.match(name)))
     kind, entry, thunk = _keys(entry_enc, thunk_enc, sections)
 
     c = _header(data, base, cert, 0xB0, "certificate")
@@ -223,9 +234,63 @@ def game_info(path: Path) -> dict:
             "compiler_why": why}
 
 
-NOT_YET = ("Xbox projects aren't finished yet: decompdecomp reads this game's program, but making its project needs "
-           "the XDK as a toolchain and Ghidra's XBE loading, which are still being built. Use a PC, GameCube, Wii or "
-           "DS game for now")
+# ---------------------------------------------------------------------------------------------------- Ghidra
+
+
+def memory_image(xbe: XBE) -> bytes:
+    """The program as the Xbox loads it, from the base address: the headers, then each section's bytes at its
+    address (zeros where a section is longer in memory than in the file). Stock Ghidra has no XBE loader, so this
+    is what it imports, as raw code at the base address."""
+    size = max([xbe.image_size, *(s.va + max(s.vsize, s.size) - xbe.image_base for s in xbe.sections)])
+    image = bytearray(size)
+    headers = min(_u32(xbe.data, 0x108), len(xbe.data), size)
+    image[:headers] = xbe.data[:headers]
+    for s in xbe.sections:
+        at = s.va - xbe.image_base
+        image[at:at + s.size] = xbe.data[s.offset:s.offset + s.size]
+    return bytes(image)
+
+
+def function_starts(xbe: XBE, skip: frozenset[str] = frozenset()) -> list[int]:
+    """Where functions start, as the code itself shows it: the entry point, and every `call rel32` target in a code
+    section that sits where a function can start (at the section's start, or after padding or a ret). Ghidra
+    follows calls from what it disassembles anyway; these seed the code it wouldn't reach from the entry point
+    (functions only reached through vtables or callbacks still call others)."""
+    code = [s for s in xbe.sections if s.code and s.name not in skip]
+    found = {xbe.entry}
+    for s in code:
+        data = xbe.data[s.offset:s.offset + s.size]
+        i = data.find(b"\xe8")
+        while 0 <= i <= len(data) - 5:
+            target = s.va + i + 5 + struct.unpack_from("<i", data, i + 1)[0]
+            t = next((c for c in code if c.va <= target < c.va + c.size), None)
+            if t is not None and target not in found:
+                at = target - t.va + t.offset
+                before = xbe.data[at - 1] if target > t.va else None
+                if (before is None or before in (0xCC, 0x90, 0xC3)) and xbe.data[at] not in (0x00, 0xCC):
+                    found.add(target)
+            i = data.find(b"\xe8", i + 1)
+    return sorted(found)
+
+
+def ghidra_layout(xbe: XBE, skip: frozenset[str] = frozenset()) -> str:
+    """The DecompWtfLayout pre-script's lines: the headers and every section as blocks (sections in `skip`, the
+    XDK's own libraries, are left as data so the analysis doesn't spend its time there), and the entry points."""
+    lines = [f"block XBE_HEADERS {xbe.image_base:X} {xbe.image_base + _u32(xbe.data, 0x108):X} rw"]
+    for s in xbe.sections:
+        name = re.sub(r"[^A-Za-z0-9_.$]", "_", s.name) or "section"
+        lines.append(f"block {name} {s.va:X} {s.va + max(s.vsize, s.size):X} "
+                     f"{'x' if s.code and s.name not in skip else 'rw'}")
+    lines += [f"entry {a:X}" for a in function_starts(xbe, skip)]
+    return "\n".join(lines) + "\n"
+
+
+def find_functions(xbe: XBE, name: str, skip: frozenset[str] = frozenset(), timeout: float = 3600) -> list[dict]:
+    """Every function Ghidra finds in the XBE (rows as ghidra.functions() gives them), without an XBE loader: the
+    memory image imported as raw x86, cut into sections and seeded by ghidra_layout()."""
+    from ...forks import ghidra
+
+    return ghidra.functions_in_image(name, memory_image(xbe), xbe.image_base, ghidra_layout(xbe, skip), timeout)
 
 
 def wibo(log=lambda *_: None) -> Path | None:
@@ -268,8 +333,67 @@ def tool_args(log=lambda *_: None) -> list[str]:
     return args
 
 
+def set_aside(xbe: XBE, functions: list[scratch_pe.Function], xdk: Path | None) -> dict[int, str]:
+    """Address -> why, for the analysed functions that are the XDK's library code rather than the game's: the ones
+    the user's own XDK libraries match byte for byte (xdklib). Nothing without an XDK folder."""
+    if xdk is None:
+        return {}
+    skip = xdklib.library_sections([s.name for s in xbe.sections], [lib.name for lib in xbe.libraries])
+    regions = [(s.va, xbe.data[s.offset:s.offset + s.size]) for s in xbe.sections if s.code and s.name not in skip]
+    hits = xdklib.match(regions, xdklib.libraries(xdk / "lib", [lib.name for lib in xbe.libraries]))
+    return {f.addr: hits[f.addr].reason for f in functions if f.addr in hits}
+
+
 def create(root: Path, game: Path, *, compiler: str | None = None, log=print) -> dict:
-    """Make the project in `root`. Not yet: the game is read (so a bad file still gets its own message), then this
-    refuses, until the XDK toolchain and Ghidra's XBE loading are in."""
-    read_xbe(program_bytes(game))
-    raise ForkError(NOT_YET)
+    """Make the project in `root` (which must not exist yet) and build it once, as scratch_pe does for a PC game:
+    Ghidra finds the functions (from the XBE's memory image, ghidra_layout), the XDK's own code is set aside (its
+    sections outright, its functions in .text by matching the user's XDK libraries), and the rest is grouped into
+    source files compiled with Visual C++ 7.1 against the XDK's headers. Returns facts about the game."""
+    from ...forks import ghidra
+
+    info = game_info(game)
+    compiler = (compiler or f"MSVC/{info['compiler'] or DEFAULT_COMPILER}").removeprefix("MSVC/")
+    if info["compiler"] is None:
+        log(f"{info['compiler_why']}: trying Visual C++ {compiler}")
+    args = tool_args(log)
+    if not (toolchains.path("msvc") / compiler).is_dir():
+        raise ForkError(f"Visual C++ {compiler} isn't in the installed compiler pack")
+    if not ghidra.available():
+        if toolchains.java_version() < 21:
+            raise ForkError("Xbox games are analysed with Ghidra, which needs Java 21 or newer: install it from "
+                            "https://adoptium.net, then try again")
+        log("installing Ghidra (540 MB, once): it finds the functions in Xbox programs")
+        toolchains.ensure("ghidra", log=log)
+    data = program_bytes(game)
+    xbe = read_xbe(data)
+    skip = frozenset(xdklib.library_sections([s.name for s in xbe.sections], [lib.name for lib in xbe.libraries]))
+    if skip:
+        log(f"the XDK's library sections are set aside: {', '.join(sorted(skip))}")
+
+    log(f"analysing {xbe.title or game.name} with Ghidra (finds every function; a big game takes a few minutes)")
+    found = find_functions(xbe, f"{info['id']}.xbe", skip)
+    if not found:
+        raise ForkError("Ghidra found no functions in this program (did its analysis fail or time out?)")
+    found = [r for r in found if (s := xbe.section_at(r["entry"])) is not None and s.name not in skip]
+    functions = scratch_pe.analyse(xbe, found, linker_padding=True)
+    xdk = Path(args[args.index("--xdk") + 1])
+    aside = set_aside(xbe, functions, xdk)
+    game_fns = [f for f in functions if f.addr not in aside]
+    library = [f for f in functions if f.addr in aside]
+    groups = scratch_pe.units(game_fns)
+    groups |= {f"xdk_{u.removeprefix('text_')}": fns for u, fns in scratch_pe.units(library).items()}
+    log(f"{len(functions)} functions, {len(library)} of them the XDK's library code (set aside); "
+        f"{info['compiler_why']}: Visual C++ {compiler}")
+    return scratch_pe.write_project(
+        root, game if is_xbe_file(game) else data, info=info, compiler=compiler, args=args,
+        pe=xbe, groups=groups, platform="xbox", suffix=".xbe", what="your copy of the game's program (default.xbe)",
+        cl_flags=CL_FLAGS, set_aside={f.name: aside[f.addr] for f in library}, log=log)
+
+
+def is_xbe_file(path: Path) -> bool:
+    """The file is the XBE itself (not a disc image holding it), so the project can link to it instead of a copy."""
+    try:
+        with open(path, "rb") as f:
+            return is_xbe(f.read(0x1000))
+    except OSError:
+        return False

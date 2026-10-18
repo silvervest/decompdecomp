@@ -446,7 +446,7 @@ def _program(root: Path, manifest: dict):
     key = (str(path), path.stat().st_mtime_ns)
     if key not in _PROGRAMS:
         _PROGRAMS.clear()
-        _PROGRAMS[key] = read_pe(path.read_bytes())
+        _PROGRAMS[key] = read_program(path.read_bytes(), manifest.get("platform", "pc"))
     return _PROGRAMS[key]
 
 
@@ -462,14 +462,23 @@ def data_bytes(root: Path, manifest: dict, addr: int, length: int) -> bytes | No
     return data if data and len(data) == length else None
 
 
+def read_program(data: bytes, platform: str) -> PE:
+    """The program of a project made here, read by its console's reader: a console whose programs aren't PE files
+    reads them into the same shape (`read_program` on the console: the Xbox's XBE)."""
+    from .. import get
+
+    reader = getattr(get(platform), "read_program", None)
+    return reader(data) if reader is not None else read_pe(data)
+
+
 def read_data(root: Path, manifest: dict, name: str, length: int = READ_DEFAULT_BYTES) -> str:
-    """What read_data shows on a PC project: the bytes at a D_<address> (or any address) in the user's copy, the
+    """What read_data shows on a PC or Xbox project: the bytes at a D_<address> (or any address) in the user's copy, the
     addresses its words point to, and a string or floats when it reads as one."""
     m = re.fullmatch(r"_?D_([0-9A-Fa-f]{8})|(?:0x)?([0-9A-Fa-f]{6,8})", name)
     if m is None:
         raise ForkError(f"`{name}` isn't data by address: PC data is named D_<address> (D_00402034)")
     addr = int(m.group(1) or m.group(2), 16)
-    pe = read_pe((root / manifest["game"]["path"]).read_bytes())
+    pe = read_program((root / manifest["game"]["path"]).read_bytes(), manifest.get("platform", "pc"))
     sec = pe.section_at(addr)
     if sec is None:
         raise ForkError(f"0x{addr:08X} isn't in the game's program (it spans 0x{pe.image_base:08X}-"
@@ -507,7 +516,6 @@ def create(root: Path, game: Path, *, compiler: str | None = None, log=print) ->
     from ...forks import ghidra
 
     info = game_info(game)
-    version = info["id"]
     compiler = (compiler or f"MSVC/{info['compiler']}").removeprefix("MSVC/")
     args = tool_args()
     if not (toolchains.path("msvc") / compiler).is_dir():
@@ -534,23 +542,42 @@ def create(root: Path, game: Path, *, compiler: str | None = None, log=print) ->
     functions = analyse(pe, found, linker_padding=compiler != "6.0")
     groups = units(functions)
     log(f"{len(functions)} functions; {info['compiler_why']}: Visual C++ {compiler}")
+    return write_project(root, game, info=info, compiler=compiler, args=args, pe=pe, groups=groups, log=log)
 
+
+def write_project(root: Path, game: Path | bytes, *, info: dict, compiler: str, args: list[str], pe: PE,
+                  groups: dict[str, list[Function]], platform: str = "pc", suffix: str = ".exe",
+                  what: str = "your copy of the game's program (.exe)", cl_flags: list[str] | None = None,
+                  set_aside: dict[str, str] | None = None, log=print) -> dict:
+    """Write the project for analysed functions (the template, the user's program in orig/, functions.json, a source
+    file per unit, the manifest) and build it once. Shared by PC and Xbox (scratch_xbe), which differ in the
+    program's format, not in the project. `game`: the program's file, or its bytes (an XBE read off a disc image);
+    `cl_flags` replace the template's compiler flags; `set_aside`: symbol -> why agents don't get it (library
+    code), kept in config/<version>/set_aside.json and read when the project is measured."""
+    version = info["id"]
     shutil.copytree(TEMPLATE, root)
     (root / "orig").mkdir()
-    exe = root / "orig" / f"{version}.exe"
-    try:
-        exe.hardlink_to(game)
-    except OSError:
-        shutil.copyfile(game, exe)
+    exe = root / "orig" / f"{version}{suffix}"
+    if isinstance(game, (bytes, bytearray)):
+        exe.write_bytes(game)
+    else:
+        try:
+            exe.hardlink_to(game)
+        except OSError:
+            shutil.copyfile(game, exe)
     (root / "include").mkdir()
     (root / "include" / "common.h").write_text(TYPES_H, encoding="utf-8")
     cfg = root / "tools" / "configure.py"
-    cfg.write_text(cfg.read_text(encoding="utf-8").replace(f'MSVC_VERSION = "{MSVC_DEFAULT}"',
-                                                           f'MSVC_VERSION = "{compiler}"'), encoding="utf-8")
+    text = cfg.read_text(encoding="utf-8").replace(f'MSVC_VERSION = "{MSVC_DEFAULT}"', f'MSVC_VERSION = "{compiler}"')
+    if cl_flags is not None:
+        text = re.sub(r"^CL_FLAGS = .*$", lambda _: f"CL_FLAGS = {json.dumps(cl_flags)}", text, count=1, flags=re.M)
+    cfg.write_text(text, encoding="utf-8")
     conf = root / "config" / version
     conf.mkdir(parents=True)
+    if set_aside:
+        (conf / "set_aside.json").write_text(json.dumps(set_aside, indent=1), encoding="utf-8")
     (conf / "functions.json").write_text(json.dumps({
-        "exe": f"orig/{version}.exe", "sha1": info["sha1"], "image_base": pe.image_base,
+        "exe": f"orig/{version}{suffix}", "sha1": info["sha1"], "image_base": pe.image_base,
         "units": {u: [{"name": f.name, "addr": f.addr, "offset": pe.offset(f.addr), "size": f.size,
                        "relocs": [list(r) for r in f.relocs]} for f in fns] for u, fns in groups.items()},
     }, indent=1), encoding="utf-8")
@@ -569,9 +596,10 @@ def create(root: Path, game: Path, *, compiler: str | None = None, log=print) ->
         raise ForkError("the first build finished without writing objdiff.json")
 
     (root / ".decomp.wtf.json").write_text(json.dumps({
-        "created": "from scratch", "platform": "pc", "version": version, "compiler": f"MSVC/{compiler}",
-        "game": {"what": "your copy of the game's program (.exe)", "path": f"orig/{version}.exe", "sha1": info["sha1"]},
+        "created": "from scratch", "platform": platform, "version": version, "compiler": f"MSVC/{compiler}",
+        "game": {"what": what, "path": f"orig/{version}{suffix}", "sha1": info["sha1"]},
         "setup": [["python", "tools/configure.py", version, *args], ["ninja", "prepare"]],
+        **({"set_aside": f"config/{version}/set_aside.json"} if set_aside else {}),
     }, indent=2), encoding="utf-8")
     (root / ".gitignore").write_text("# made from your copy of the game, or by the build\norig/\nbuild/\nbuild.ninja\n"
                                      ".ninja_*\nobjdiff.json\n__pycache__/\n.decomp-wtf/\n", encoding="utf-8")
@@ -580,8 +608,8 @@ def create(root: Path, game: Path, *, compiler: str | None = None, log=print) ->
 Started from scratch with [decompdecomp](https://github.com/n-delic/decompdecomp): the game's functions, found by Ghidra, are cut out of your
 copy of its program and compared with what `src/` compiles to, function by function, with objdiff.
 
-1. Put your own copy of the game's program here as `orig/{version}.exe` (never commit it).
-2. `python tools/configure.py {version} --msvc <Visual C++ folder> [--wibo <wibo>]`, then `ninja`.
+1. Put your own copy of the game's program here as `orig/{version}{suffix}` (never commit it).
+2. `python tools/configure.py {version} --msvc <Visual C++ folder> [--wibo <wibo>]{" --xdk <your XDK's xbox folder>" if platform == "xbox" else ""}`, then `ninja`.
 3. Decompiled code goes in `src/`; `objdiff.json` shows each function's progress in [objdiff](https://github.com/encounter/objdiff).
 
 Compiler: Visual C++ {compiler} (change `MSVC_VERSION` and `CL_FLAGS` in tools/configure.py if the game was built
@@ -593,5 +621,5 @@ function's address, size, symbol and relocations.
                     ["git", "-c", "user.name=decompdecomp", "-c", "user.email=noreply@decompdecomp.invalid", "commit", "-q", "-m",
                      f"Start the {info['title']} decompilation (decompdecomp, Ghidra)"]):
             subprocess.run(cmd, cwd=root, capture_output=True)
-    return {"platform": "pc", "id": version, "title": info["title"], "compiler": f"MSVC/{compiler}",
+    return {"platform": platform, "id": version, "title": info["title"], "compiler": f"MSVC/{compiler}",
             "sources": len(groups), "sha1": info["sha1"]}

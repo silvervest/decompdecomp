@@ -17,7 +17,8 @@ from decompnet.app.engine import RomNetwork
 from decompnet.consoles.pc import scratch as scratch_pe
 from decompnet.consoles.pc.scratch import DIR32, REL32
 from decompnet.consoles.xbox import scratch as scratch_xbe
-from decompnet.consoles.xbox import xboxkrnl, xdvdfs
+from decompnet.consoles.xbox import xboxkrnl, xdklib, xdvdfs
+from decompnet.forks import ghidra
 from decompnet.forks.project import ForkError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -147,15 +148,125 @@ def test_default_xbe_comes_out_of_a_redump_image(tmp_path):
     assert info["region"] == "North America, Japan, rest of the world"
 
 
-def test_importing_an_xbox_game_says_xbox_projects_arent_finished(tmp_path):
+def test_importing_an_xbox_game_without_its_tools_says_what_to_install(tmp_path, monkeypatch):
+    monkeypatch.setenv("DECOMPNET_TOOLCHAINS", str(tmp_path / "none"))
     net = RomNetwork(tmp_path / "decomp.db", tmp_path / "ws")
     (tmp_path / "ws").mkdir()
     for data, name in ((demo.xbe(), "default.xbe"), (demo.xiso(demo.xbe()), "demo.iso")):
         assert consoles.identify(data) is consoles.get("xbox")
-        with pytest.raises(ForkError, match="Xbox projects aren't finished yet"):
+        with pytest.raises(ForkError, match="Visual C\\+\\+ 7.1.*Setup"):
             net.import_rom(data, name=name, confirmed=True, log=lambda *_: None)
     assert not any(p.name != ".decomp" for p in (tmp_path / "ws").iterdir())
     assert consoles.get("xbox").status == consoles.BETA
+
+
+needs_xbox_tools = pytest.mark.skipif(
+    any(toolchains.installed(t) is None for t in ("msvc", "objdiff-cli", "xdk")) or not ghidra.available()
+    or (sys.platform != "win32" and not toolchains.installed("wibo") and not toolchains.installed("wibo-xbox")),
+    reason="needs Visual C++ (msvc, proprietary), your own XDK set up in Setup, Ghidra, objdiff and wibo")
+
+
+@needs_xbox_tools
+def test_an_xbox_game_becomes_a_project_agents_can_match_in(tmp_path):
+    import json
+    import subprocess
+
+    net = RomNetwork(tmp_path / "decomp.db", tmp_path / "ws")
+    (tmp_path / "ws").mkdir()
+    slug = net.import_rom(demo.xiso(demo.xbe()), name="demo.iso", confirmed=True, log=lambda *_: None)
+    ov = net.overview(slug)
+    assert ov["kind"] == "fork" and ov["origin"] == "scratch" and ov["platform"] == "xbox" and ov["ready"]
+    root = Path(net.project_row(slug)["root"])
+    manifest = json.loads((root / ".decomp.wtf.json").read_text())
+    assert manifest["platform"] == "xbox" and manifest["game"]["path"] == "orig/demoxbox.xbe"
+    assert "--xdk" in manifest["setup"][0]
+    config = json.loads((root / "config" / "demoxbox" / "functions.json").read_text())
+    # the int3 padding doesn't split them: one source file, functions at their XBE file offsets
+    assert list(config["units"]) == [f"text_{ENTRY:08X}"]
+    assert [(f["addr"], f["offset"]) for f in config["units"][f"text_{ENTRY:08X}"]] == [
+        (a, a - demo.BASE) for a in (ENTRY, HELPER, PUSHES)]
+    assert '"/arch:SSE"' in (root / "tools" / "configure.py").read_text()
+    files = subprocess.run(["git", "ls-files"], cwd=root, capture_output=True, text=True).stdout.split()
+    assert files and not [f for f in files if f.startswith(("orig/", "build/"))]
+    # data reads from the XBE
+    assert "78 56 34 12" in net.forks.read_data(None, slug, f"D_{demo.GLOBAL:08X}")
+    # helper, written in C against the XDK's own kernel declaration, is judged by objdiff
+    agent, _ = net.local_agent("xbox-agent")
+    helper = f"func_{HELPER:08X}"
+    decl = (f'extern "C" __declspec(dllimport) int KeQueryPerformanceCounter(void);\n'
+            f'extern "C" int D_{demo.GLOBAL:08X};\n')
+    assert net.forks.edit_file(agent, slug, "include/common.h", "", decl, "kernel").startswith("✅")
+    res = net.attempt(agent, f"_{helper}", f'extern "C" int {helper}(void) {{\n'
+                      f"    return KeQueryPerformanceCounter() + D_{demo.GLOBAL:08X};\n}}\n", slug)
+    assert res["matched"], res["text"]
+
+
+def test_ghidra_gets_the_xbe_as_its_memory_image_with_sections_and_seeds():
+    xbe = scratch_xbe.read_xbe(demo.xbe())
+    image = scratch_xbe.memory_image(xbe)
+    assert len(image) == xbe.image_size and image[:4] == b"XBEH"
+    assert image[demo.TEXT - demo.BASE:][:0x40] == demo.text() and image[demo.DATA - demo.BASE:][:4] == bytes.fromhex("78563412")
+    # the entry point, and helper (called after int3 padding); pushes_global is called by nobody
+    assert scratch_xbe.function_starts(xbe) == [ENTRY, HELPER]
+    assert scratch_xbe.ghidra_layout(xbe).splitlines() == [
+        "block XBE_HEADERS 10000 11000 rw", "block .text 11000 11040 x", "block .rdata 12000 1200C rw",
+        "block .data 13000 13004 rw", f"entry {ENTRY:X}", f"entry {HELPER:X}"]
+    # a section set aside (the XDK's own code) stays data: Ghidra doesn't analyse it
+    assert "block .text 11000 11040 rw" in scratch_xbe.ghidra_layout(xbe, frozenset({".text"}))
+
+
+@pytest.mark.skipif(not ghidra.available(), reason="Ghidra (and Java 21) not installed")
+def test_ghidra_finds_xbe_functions_without_an_xbe_loader():
+    xbe = scratch_xbe.read_xbe(demo.xbe())
+    rows = scratch_xbe.find_functions(xbe, "demo.xbe", timeout=900)
+    assert {(r["entry"], r["end"]) for r in rows} >= {(ENTRY, ENTRY + 0x16), (HELPER, HELPER + 0x0D)}
+    # what Ghidra didn't reach, analyse() still makes a function of its own
+    assert [f.addr for f in scratch_pe.analyse(xbe, rows, linker_padding=True)] == [ENTRY, HELPER, PUSHES]
+
+
+def _coff(name: str, code: bytes, relocs: list[int], machine: int = 0x14C) -> bytes:
+    """A COFF object with one code section holding `name` (DIR32 relocations at `relocs`), as /Gy writes them."""
+    import struct
+
+    body = code + b"".join(struct.pack("<IIH", at, 1, 6) for at in relocs)
+    head = struct.pack("<HHIIIHH", machine, 1, 0, 20 + 40 + len(body), 2, 0, 0)
+    section = struct.pack("<8sIIIIIIHHI", b".text", 0, 0, len(code), 60, 60 + len(code), 0, len(relocs), 0, 0x60500020)
+    symbols = struct.pack("<8sIhHBB", name.encode().ljust(8, b"\0"), 0, 1, 0x20, 2, 0)
+    symbols += struct.pack("<8sIhHBB", b"_D", 0, 0, 0, 2, 0)
+    return head + section + body + symbols + struct.pack("<I", 4)
+
+
+def _archive(members: list[tuple[str, bytes]]) -> bytes:
+    out = b"!<arch>\n"
+    for name, data in members:
+        out += f"{name + '/':<16}{0:<12}{0:<6}{0:<6}{'644':<8}{len(data):<10}`\n".encode() + data + b"\n" * (len(data) & 1)
+    return out
+
+
+def test_xdk_library_code_is_found_by_its_bytes_with_relocations_as_wildcards(tmp_path):
+    # a homemade "library": a 20-byte function that loads a global (relocated) and loops, and the same bytes as an
+    # LTCG member (compiler intermediate code, machine 0), which is skipped
+    fn = bytes.fromhex("8b0d00000000") + bytes.fromhex("33c0400fafc1413bc87cf8c3cc")[:13] + b"\xc3"
+    lib = tmp_path / "XMYLIB.LIB"
+    lib.write_bytes(_archive([("myfn.obj", _coff("_myfn", fn, [2])), ("ltcg.obj", _coff("_ltcg", fn[::-1], [], 0))]))
+    code = b"\xcc" * 16 + bytes.fromhex("8b0d78563412") + fn[6:] + b"\xcc" * 12 + fn[::-1]
+    found = xdklib.match([(0x20000, code)], [lib])
+    assert list(found) == [0x20010]
+    hit = found[0x20010]
+    assert (hit.size, hit.symbol, hit.library, hit.member) == (len(fn), "_myfn", "XMYLIB.LIB", "myfn.obj")
+    assert hit.reason == "XDK library code: _myfn from XMYLIB.LIB (myfn.obj)"
+    # the libraries matched: the ones the version table names and the C runtimes, never LTCG ones
+    libs = tmp_path / "lib"
+    libs.mkdir()
+    for n in ("XMYLIB.lib", "libcmt.lib", "d3d8ltcg.lib", "other.lib"):
+        (libs / n).write_bytes(b"")
+    assert [p.name for p in xdklib.libraries(libs, ["XMYLIB", "D3D8LTCG"])] == ["XMYLIB.lib", "libcmt.lib"]
+
+
+def test_xdk_sections_are_set_aside_by_name():
+    names = [".text", "XMV", "D3D", "XGRPH", "DSOUND", ".data", "XACTENG", "MYLIB"]
+    assert xdklib.library_sections(names, ["XAPILIB", "XACTENG", "D3D8"]) == {"XMV", "D3D", "XGRPH", "DSOUND",
+                                                                              "XACTENG"}
 
 
 def _fake_xdk(top: Path) -> Path:

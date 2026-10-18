@@ -22,9 +22,10 @@ CODE = 0x60500020  # code, readable, executable, 16-byte aligned
 
 def coff(functions: list[dict], exe: bytes) -> bytes:
     symbols: list[tuple[str, int, int, int, int]] = []  # (name, value, section, type, storage class)
-    externs: dict[str, int] = {}
+    externs: dict[str, int] = {}  # name -> its symbol: a call to a function of this file refers to its definition
     sections = []
     for i, fn in enumerate(functions):
+        externs[fn["name"]] = len(symbols)
         symbols.append((fn["name"], 0, i + 1, 0x20, 2))
     for i, fn in enumerate(functions):
         code = bytearray(exe[fn["offset"]:fn["offset"] + fn["size"]])

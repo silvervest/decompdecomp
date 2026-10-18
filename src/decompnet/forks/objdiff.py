@@ -211,6 +211,20 @@ PC_BIAS = {"R_ARM_PC24": -8, "R_ARM_CALL": -8, "R_ARM_JUMP24": -8, "R_ARM_THM_CA
            "R_ARM_THM_JUMP24": -4}
 
 
+def _defined_functions(side: dict | None) -> list[dict]:
+    """The functions an object defines, once each. objdiff lists an object's undefined symbols too, with the same
+    kind and no size or code: a COFF object can carry a function both ways (the PC template's delink.py gave every
+    call inside a unit an undefined copy of the callee's name), and the undefined copy, scored None, came after the
+    defined one and hid its score from the unit-wide report (free functions that matched went back to open after
+    the next attempt in their unit; methods, called through vtables, kept theirs). Undefined callees from other
+    units, scored None too, kept a finished file from ever counting as done."""
+    out: dict[str, dict] = {}
+    for s in (side or {}).get("symbols", []):
+        if s.get("kind") == "SYMBOL_FUNCTION" and (int(s.get("size") or 0) > 0 or s.get("instructions")):
+            out.setdefault(s["name"], s)
+    return list(out.values())
+
+
 def _fmt(row: dict) -> str:
     ins = row.get("instruction")
     if not ins:
@@ -286,7 +300,7 @@ def diff(target: Path | None, base: Path | None, symbol: str | None, cwd: Path, 
         pct = 100.0 if lrows and len(lrows) == len(rrows) and all(m == " " for m, _, _ in rows) else 0.0
     built = {s.get("name") for s in (data.get("right") or {}).get("symbols", [])
              if s.get("kind") == "SYMBOL_FUNCTION" and s.get("instructions")}
-    funcs = [s for s in (data.get("left") or {}).get("symbols", []) if s.get("kind") == "SYMBOL_FUNCTION"]
+    funcs = _defined_functions(data.get("left"))
     scores = {s["name"]: (float(s["match_percent"]) if s.get("match_percent") is not None and s["name"] in built else None)
               for s in funcs}
     order = [s["name"] for s in sorted(funcs, key=lambda s: int(s.get("address") or 0))]

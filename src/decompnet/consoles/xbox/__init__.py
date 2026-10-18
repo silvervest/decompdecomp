@@ -29,6 +29,9 @@ class Xbox(Console):
     mode = PROJECT
     layout = "Ghidra + objdiff"
     compilers = (Compiler("MSVC/7.1", "Visual C++ 7.1", "games made with the XDK 5849"),)
+    # XDK 5849's vc71 tools are the msvc pack's Visual C++ 7.1 (the same files): the XDK gives the headers and libraries
+    packs = (("msvc", "Visual C++ 6.0, 7.0 and 7.1, the compilers of PC games (proprietary)"),
+             ("xdk", "your own Xbox XDK: the headers and libraries of Xbox games (proprietary, never downloaded)"))
     guides = ("x86", "cpp")
     compiler_guide = "x86"
     ram = (0x00010000, 0x80000000)  # an XBE loads at 0x10000; the kernel lives above 0x80000000

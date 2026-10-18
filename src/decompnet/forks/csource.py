@@ -27,8 +27,73 @@ def is_stub(code: str) -> bool:
     return bool(re.match(r"\s*(?:#\s*pragma\s+)?(?:INCLUDE_ASM|GLOBAL_ASM|INCLUDE_RODATA_FN)\s*\(", code))
 
 
+ADDRESS_KEY = "// FUNCTION: 0x"  # find(text, address_key(va)): the definition annotated with the original's address
+_ANNOTATION = re.compile(r"^[ \t]*//[ \t]*FUNCTION:[ \t]*0x([0-9a-fA-F]+)\b[^\n]*(?:\n|$)", re.M)
+
+
+def address_key(addr: int) -> str:
+    """A name for find() meaning the definition after a `// FUNCTION: 0x<address>` annotation (reccmp's form, which
+    decompilations of PC and Xbox games put before each function: its own name can be anything)."""
+    return f"{ADDRESS_KEY}{addr:X}"
+
+
+def _block_end(clean: str, brace: int) -> int:
+    depth, k = 0, brace
+    while k < len(clean):
+        depth += (clean[k] == "{") - (clean[k] == "}")
+        k += 1
+        if depth == 0:
+            break
+    return k
+
+
+def _annotated(text: str, addr: int) -> tuple[int, int] | None:
+    """The first function definition after the annotation, before the next one: types and declarations the code
+    needs may come in between (`struct CRigOwner { ... };`)."""
+    found = list(_ANNOTATION.finditer(text))
+    clean = None
+    for n, m in enumerate(found):
+        if int(m.group(1), 16) != addr:
+            continue
+        clean = clean if clean is not None else _blank(text)
+        bound = found[n + 1].start() if n + 1 < len(found) else len(text)
+        pos = m.end()
+        while True:
+            brace = clean.find("{", pos, bound)
+            if brace < 0:
+                break  # only declarations up to the next annotation
+            head_at = max(clean.rfind(";", pos, brace), clean.rfind("}", pos, brace), pos - 1) + 1
+            head = clean[head_at:brace]
+            if "(" not in head or re.match(r"\s*(?:typedef\s+)?(?:struct|class|union|enum|namespace)\b", head):
+                pos = _block_end(clean, brace)  # a type (or a brace initialiser): past it
+                continue
+            i = head_at
+            while i < brace:  # comments, blank and #pragma lines before the definition's first line
+                end = text.find("\n", i)
+                end = len(text) if end < 0 else end
+                line = text[i:end].strip()
+                if line and not line.startswith(("//", "#")):
+                    break
+                i = end + 1
+            k = _block_end(clean, brace)
+            if k < len(text) and text[k] == "\n":
+                k += 1
+            return min(i, brace), k
+    return None
+
+
+def defined_name(text: str, span: tuple[int, int]) -> str | None:
+    """The name a definition gives its function (`CAIBehaviour::Update` for `void CAIBehaviour::Update(int)`)."""
+    head = _blank(text[span[0]:span[1]]).split("(", 1)[0]
+    m = re.search(r"((?:[\w~<>]+::)*~?\w+|(?:[\w<>]+::)*operator\s*\S+)\s*$", head)
+    return m.group(1) if m else None
+
+
 def find(text: str, name: str) -> tuple[int, int] | None:
-    """(start, end) of the definition of `name`, or of its asm stub; None when absent."""
+    """(start, end) of the definition of `name`, or of its asm stub; None when absent. `name` may be an
+    address_key(): the definition annotated with that address."""
+    if name.startswith(ADDRESS_KEY):
+        return _annotated(text, int(name[len(ADDRESS_KEY):], 16))
     clean = _blank(text)
     simple = name.split("::")[-1]
     if "::" in name:  # Class::method: match it exactly

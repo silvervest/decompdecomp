@@ -46,5 +46,18 @@ Link-time code generation (LTCG)
   edi or ebx, with no standard convention, and code is inlined across files.
 - Signs: a call right after loading eax/esi/edi/ebx, in a callee that reads them without saving them, and callees
   without the usual prologue for their argument count.
-- Plain compiles can't match those functions. decompdecomp has no LTCG mode yet. If a function shows these signs,
-  note it ("LTCG register convention") and release it.
+- Plain compiles can't match those functions. In a project made without the LTCG mode, note it ("LTCG register
+  convention") and release it.
+- In an LTCG project (its `.decomp.wtf.json` says `"ltcg": true`), a unit is linked in harness mode once its driver
+  `harness/<unit>.drv.cpp` defines `extern "C" __declspec(dllexport) void HarnessEntry(...)`:
+  - the driver calls the unit's functions the way the original's call sites do: look at a caller's code right
+    before the call (what eax/esi/edi/ebx/ecx hold, which pushes are constants) and write a call that gives the
+    linker the same facts;
+  - `harness/<unit>.<name>.cpp` hold stand-ins for what the unit calls or reads elsewhere, shaped like the real
+    ones (which registers they read, preserve and return). `<name>.nogl.cpp` compiles without `/GL`, for code the
+    game's link couldn't see into (middleware, XDK libraries);
+  - `// HARNESS-LINK: <flags>` adds linker flags for the unit (`d3d8ltcg.lib` when it inlines Direct3D calls);
+  - functions are found by func_<address> in their names, or by `// FUNCTION: 0x<address> [map symbol]` before
+    the definition (needed for constructors, destructors and operators).
+- A unit's function can read 100% and still not be a match: its references must map one to one onto the
+  original's (one original global is always the same one of yours). The judge says so when they don't.

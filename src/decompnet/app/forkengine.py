@@ -212,6 +212,32 @@ def _address(meta: dict, fn) -> int | None:
     return int(vram) if vram else None
 
 
+_DECORATED = re.compile(r"([_@])func_([0-9A-Fa-f]{8})(?:@(\d+))?")
+
+
+def _naming_hint(meta: dict, fn) -> str:
+    """How to write a PC or Xbox function (`_func_000115D0@8`) so the build pairs it with the original, or ''."""
+    m = _DECORATED.fullmatch(meta.get("symbol") or fn["name"])
+    if m is None:
+        return ""
+    name, pops = f"func_{m.group(2).upper()}", m.group(3)
+    how = ("__cdecl (the caller pops the arguments)" if m.group(1) == "_" and pops is None else
+           f"__stdcall, popping {pops} bytes of arguments (`ret {pops}`), or a class's method (__thiscall: `this` in "
+           f"ecx, then {pops} bytes of arguments)" if m.group(1) == "_" else
+           f"__fastcall (first two arguments in ecx and edx, {pops} bytes in all), or a method")
+    return (f"Naming: the original's symbol is {m.group(0)}: {how}. Name it {name}, as a free function with that "
+            f"convention or as a method (`int Shape::{name}(...)`): the build gives either the original's symbol. A "
+            f"real name works too with `// FUNCTION: 0x{m.group(2).upper()}` on the line before the definition.")
+
+
+def _unresolved(base: Path) -> list[str]:
+    """What a unit's last harness link left unresolved (dll2coff's .ltcg.json): functions not written yet."""
+    try:
+        return list(json.loads(base.with_suffix(".ltcg.json").read_text(encoding="utf-8")).get("unresolved") or [])
+    except (OSError, ValueError):
+        return []
+
+
 # a source file that includes another source file: Mario Party 6's REL runtime.c files are one line,
 # #include "src/Runtime.PPCEABI.H/runtime.c" (its asm helpers, which every module links a copy of)
 _SOURCE_INCLUDE = re.compile(r'^\s*#\s*include\s*"([^"]+\.(?:c|cc|cp|cpp))"', re.M)
@@ -461,6 +487,18 @@ class ForkEngine:
         with self._build_locks[proj["id"]]:
             self._fresh_tools(proj, fp)
             return fp.build_all(failed=failed)
+
+    def _release_stuck(self, proj, fn, agent: Agent, unit: str, log: str) -> str:
+        """The unit doesn't build whatever this agent sends (its file, or its harness link, is broken): the agent's
+        claim on the function goes, with a note saying why, so the scheduler doesn't count a function nobody can
+        progress as taken. Returns what to tell the agent."""
+        first = next((ln.strip() for ln in log.splitlines() if re.search(r"\berror\b|FAILED", ln)), "")[:300]
+        with self.net.store.tx() as db:
+            db.execute("DELETE FROM claims WHERE function_id=? AND agent_id=?", (fn["id"], agent.id))
+            db.execute("INSERT INTO notes(project_id,function_id,agent_id,text,created_at) VALUES(?,?,?,?,?)",
+                       (proj["id"], fn["id"], agent.id, f"{unit} didn't build before this change either, so it was "
+                        f"left for now: {first or 'see the build log'}", time.time()))
+        return f"\n(Your claim on {fn['name']} was released with a note: the unit has to build again first.)"
 
     def _fresh_tools(self, proj, fp: ForkProject) -> None:
         """A project's tools/ brought up to its console's template once per run of the app (Console.refresh_project;
@@ -1802,6 +1840,13 @@ class ForkEngine:
         if done:
             lines += ["", "Already matched in this file (read them for the codebase's style): "
                       + ", ".join(r["name"] for r in done)]
+        if (hint := _naming_hint(meta, fn)):
+            lines += ["", hint]
+        if unit.base is not None and (missing := _unresolved(unit.base)):
+            lines += ["", f"### Not built yet in {unit.name}'s harness link",
+                      "Its link left these unresolved (/FORCE:UNRESOLVED): references to them aren't checked until "
+                      f"they're written in the unit or stood in in harness/{unit.name}.<name>.cpp: "
+                      + ", ".join(missing[:16])]
         why = (cfg.get("link_failed") or {}).get(unit.source or "")
         if why and not unit.complete:
             lines += ["", f"### {unit.source} didn't link yet (file_status shows its data)", why]
@@ -2036,7 +2081,9 @@ class ForkEngine:
                 _, span = self._find(source, names)
         if span is None:
             shown = next((n for n in names if not n.startswith(csource.ADDRESS_KEY)), names[0])
-            raise NetworkError(f"send the complete definition of {shown} (with its body)")
+            hint = _naming_hint(meta, fn)
+            raise NetworkError(f"send the complete definition of {shown} (with its body)"
+                               + (f": no definition in what you sent has its name or annotation. {hint}" if hint else ""))
         code = source[span[0]:span[1]]
         unit = fp.unit(fn["unit"])
         if not unit.source:
@@ -2123,6 +2170,8 @@ class ForkEngine:
                     self.net._record(fn, agent, None, code, 0)
                 why = "" if builds else ("\n(The file didn't build before your change either, so the error may be in "
                                          "other code of the file: fix that with edit_file.)")
+                if not builds and quiet is None:
+                    why += self._release_stuck(proj, fn, agent, unit.name, log)
                 return {"text": f"❌ BUILD ERROR (your change was undone){why}\n{log[-3000:]}", "score": None,
                         "matched": False}
             try:

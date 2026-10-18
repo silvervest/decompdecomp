@@ -48,6 +48,8 @@ PY = f'"{sys.executable}"'
 SH = "cmd /c " if sys.platform == "win32" else ""  # ninja starts commands without a shell: && needs one on Windows
 # the headers: Visual C++'s own for a PC game; for an Xbox game the XDK's (its C runtime and xtl.h replace them)
 INCLUDE = Path(args.xdk) / "include" if args.xdk else MSVC / "Include"
+# /showIncludes (header dependencies): Visual C++ .NET 2003 (7.1) has it, Visual C++ 6 doesn't
+SHOW_INCLUDES = tuple(int(x) for x in MSVC_VERSION.split(".") if x.isdigit()) >= (7, 1)
 
 
 def q(argv: list[str]) -> str:
@@ -81,9 +83,15 @@ def main() -> None:
         n = ninja_syntax.Writer(f)
         n.rule("delink", f"{PY} tools/delink.py {CONFIG} {BUILD / 'target'}", restat=True)
         # then the original's names on what it compiled to (C++ mangles them: tools/names.py)
-        # the headers it reads are its dependencies (tools/cldeps.py): editing one rebuilds only what includes it
-        n.rule("cl", f'{SH}{PY} tools/cldeps.py $out -- {WRAP}"{CL}" {q(CL_FLAGS)} /Iinclude "/I{INCLUDE}" $cflags'
-               f' /showIncludes /Fo$out $in && {PY} tools/names.py {CONFIG} $out', deps="gcc", depfile="$out.d")
+        # the headers it reads are its dependencies (tools/cldeps.py): editing one rebuilds only what includes it.
+        # Visual C++ 6 has no /showIncludes: there every object depends on every header
+        if SHOW_INCLUDES:
+            n.rule("cl", f'{SH}{PY} tools/cldeps.py $out -- {WRAP}"{CL}" {q(CL_FLAGS)} /Iinclude "/I{INCLUDE}"'
+                   f' $cflags /showIncludes /Fo$out $in && {PY} tools/names.py {CONFIG} $out', deps="gcc",
+                   depfile="$out.d")
+        else:
+            n.rule("cl", f'{SH}{WRAP}"{CL}" {q(CL_FLAGS)} /Iinclude "/I{INCLUDE}" $cflags /Fo$out $in'
+                   f' && {PY} tools/names.py {CONFIG} $out')
         n.rule("configure", f"{PY} tools/configure.py {q(sys.argv[1:])}", generator=True)
 
         targets = [str(BUILD / "target" / f"{u}.obj") for u in units]
@@ -107,7 +115,8 @@ def main() -> None:
             if src.parent == Path("src") / "auto" and src.stem in harness_units:
                 continue
             obj = BUILD / src.with_suffix(".obj")
-            n.build(str(obj), "cl", str(src), implicit=[str(CONFIG), "tools/names.py", "tools/cldeps.py"])
+            n.build(str(obj), "cl", str(src), implicit=[str(CONFIG), "tools/names.py", "tools/cldeps.py"]
+                    if SHOW_INCLUDES else [*headers, str(CONFIG), "tools/names.py"])
             objs.append(str(obj))
         n.build("all_source", "phony", objs)
         n.build("prepare", "phony", [*targets, *objs])

@@ -14,6 +14,5 @@ PUBLIC_ONLY = [
     Console(id="gba", name="Game Boy Advance", short="GBA", arch="arm", m2c="gba", guides=("arm",)),
     Console(id="3ds", name="Nintendo 3DS", short="3DS", arch="arm", m2c="arm", guides=("arm", "cpp")),
     Console(id="switch", name="Switch", arch="aarch64", guides=("aarch64", "cpp")),
-    Console(id="xbox", name="Xbox", arch="x86", guides=("x86", "cpp")),
     Console(id="xbox360", name="Xbox 360", arch="ppc", guides=("ppc", "cpp")),
 ]

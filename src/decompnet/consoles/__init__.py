@@ -263,10 +263,12 @@ def _registry() -> list[Console]:
     from .ps1 import PS1
     from .ps2 import PS2
     from .public import PUBLIC_ONLY
+    from .xbox import XBOX
 
-    # the order sniff is asked in: a file is the first console's that says it's its own (the PS1 before the PS2,
-    # whose sniff takes any ISO 9660 disc)
-    return [N64, PS1, PS2, GAMECUBE, WII, PC, NDS, *PUBLIC_ONLY]
+    # the order sniff is asked in: a file is the first console's that says it's its own (an Xbox disc before the
+    # PlayStations': a full Xbox dump starts with a DVD video partition; the PS1 before the PS2, whose sniff takes
+    # any ISO 9660 disc)
+    return [N64, XBOX, PS1, PS2, GAMECUBE, WII, PC, NDS, *PUBLIC_ONLY]
 
 
 CONSOLES: list[Console] = _registry()

@@ -12,7 +12,8 @@
 # Your projects live in it: \\wsl.localhost\decomp-wtf\home\decomp\Decomp. Nothing is sent anywhere.
 # Uninstall: decomp uninstall
 #
-# Testing a branch:  $env:DECOMP_BRANCH = "<name>"; irm https://raw.githubusercontent.com/n-delic/decompdecomp/<name>/site/public/install.ps1 | iex
+# Testing a branch:  $env:DECOMP_BRANCH = "<name>"; irm https://raw.githubusercontent.com/silvervest/decompdecomp/<name>/site/public/install.ps1 | iex
+# This fork (Xbox support):  $env:DECOMP_BRANCH = "xbox"; irm https://raw.githubusercontent.com/silvervest/decompdecomp/xbox/site/public/install.ps1 | iex
 # From a checkout:   powershell -ExecutionPolicy Bypass -File site\public\install.ps1   (installs that checkout)
 
 # Everything runs in its own block: `irm | iex` runs a script in your PowerShell session, and its settings shouldn't
@@ -22,7 +23,7 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"  # Windows PowerShell downloads many times slower while drawing a progress bar
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $Version = "1.0.2-alpha"
-$Repo = "n-delic/decompdecomp"
+$Repo = "silvervest/decompdecomp"  # our fork (Xbox support); upstream is n-delic/decompdecomp
 $Distro = "decomp-wtf"
 $Wsl = Join-Path $env:SystemRoot "System32\wsl.exe"
 # Say who's downloading. salsa.debian.org (Debian's WSL image) answers browser-like agents, as Windows PowerShell's

@@ -22,7 +22,7 @@
 set -euo pipefail
 
 VERSION="1.0.2-alpha"
-REPO="n-delic/decompdecomp"
+REPO="silvervest/decompdecomp"  # our fork (Xbox support); upstream is n-delic/decompdecomp
 START=1
 SOURCE="${DECOMP_SOURCE:-}"
 [ -z "$SOURCE" ] && [ -n "${DECOMP_BRANCH:-}" ] && SOURCE="branch:${DECOMP_BRANCH}"

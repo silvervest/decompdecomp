@@ -1,5 +1,5 @@
 # The wibo build that Xbox projects run the XDK tools with: the `xbox` branch of our wibo fork (decompals/wibo 1.2.0
-# plus the patches the XDK 5849 linker needs). build.sh and .github/workflows/wibo-xbox.yml both read this file, so the
-# release binary and a local build always come from the same commit.
+# plus the patches the XDK 5849 linker needs), at the commit tagged 1.2.0-xbox.1, whose release toolchains.toml's
+# [wibo-xbox] entry pins. build.sh builds this commit locally.
 repo=https://github.com/silvervest/wibo
-commit=ddf463420529b2d6a0c414b1d862cea6dbe2bf8f
+commit=3eb0a13dbf7d45b27db180e4b5b5be6d75e0318f

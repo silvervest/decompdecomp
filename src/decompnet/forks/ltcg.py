@@ -37,7 +37,8 @@ DRIVER = """// Harness driver for src/auto/{unit}.cpp. This game was built with 
 // - harness/{unit}.<name>.cpp hold stand-ins for what the unit calls or reads from the rest of the game, shaped
 //   like the real ones (what they read and which registers they preserve); <name>.nogl.cpp compiles without /GL,
 //   for middleware or XDK library code the game's link couldn't see into;
-// - `// HARNESS-LINK: <flags>` on a line here adds linker flags (d3d8ltcg.lib, /d2:"-inlT56"...).
+// - linker flags for the unit (d3d8ltcg.lib, /d2:-inlT56 ...) go on a line of their own in any of these files:
+//   the comment marker, HARNESS-LINK and a colon, then the flags.
 // The unit is built this way once HarnessEntry is defined (uncomment it); until then it compiles without /GL.
 // Functions are found in the link's map by func_<address> in their names, or by an annotation before the
 // definition: `// FUNCTION: 0x<address> [map symbol substring]`.

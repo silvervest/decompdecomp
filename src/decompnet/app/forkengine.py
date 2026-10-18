@@ -2812,7 +2812,7 @@ class ForkEngine:
         proj, fp, _ = self.get(slug)
         name = what.strip().strip("`'\"")
         if (text := consoles.get((fp.manifest or {}).get("platform")).read_data(fp, name, length)) is not None:
-            return text  # the console reads it (PC: the program's data isn't in the target objects)
+            return text  # the console reads it (PC, Xbox: the program's data isn't in the target objects)
         held = agent and self.net.store.one("SELECT f.unit FROM claims c JOIN functions f ON f.id=c.function_id "
                                             "WHERE c.agent_id=?", agent.id)
         units = [held["unit"]] if held else []

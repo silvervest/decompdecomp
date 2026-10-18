@@ -283,10 +283,78 @@ def _tables(md, pe: PE, start: int, code_end: int, limit: int) -> tuple[int, int
             entries.append(at - start)
             at += 4
         data_end = max(data_end, at)
-    for b in sorted(set(bytes_at)):  # a byte table runs to the next function, less its padding
+    for b in sorted(set(bytes_at)):
         tail = pe.read(b, limit - b).rstrip(b"\x90\xcc")
+        if entries:
+            # a byte table indexes the jump table, so every byte is below its entry count: the first one that isn't
+            # is past the table (Burnout 3: code that only a vtable reaches followed a byte table and was swallowed)
+            n = len(entries)
+            stop = next((k for k, v in enumerate(tail) if v >= n), len(tail))
+            tail = tail[:stop]
         data_end = max(data_end, b + len(tail))
     return code_end, data_end, entries
+
+
+def flow_end(md, pe: PE, start: int, limit: int) -> int:
+    """Where a function's code ends, by following it: linear disassembly up to a ret, or an unconditional jump, that
+    no earlier branch jumps past. A jump out of [start, limit) is a tail call and doesn't extend it, a switch's jump
+    table extends it to its furthest case and ends the code (MSVC puts the tables after the code), and an int3 or
+    bytes that don't decode end it too. Ghidra's own extent stops short when a function returns in the middle and
+    goes on after it (code reached by an earlier jump): taken as the end, the rest became a false start."""
+    code = pe.read(start, limit - start)
+    reach, table_at, end = start, None, start
+    for ins in _disasm(md, code, start):
+        if (table_at is not None and ins.address >= table_at) or ins.id == x86.X86_INS_INT3:
+            break
+        end = ins.address + ins.size
+        ops = ins.operands
+        imm = bool(ops) and ops[0].type == x86.X86_OP_IMM
+        if ins.id == x86.X86_INS_JMP and ops and ops[0].type == x86.X86_OP_MEM and ops[0].mem.scale == 4 \
+                and ops[0].mem.base == 0 and start < (ops[0].mem.disp & 0xFFFFFFFF) < limit:
+            table = ops[0].mem.disp & 0xFFFFFFFF
+            table_at = table if table_at is None else min(table_at, table)
+            at = table
+            while at + 4 <= limit:
+                value = struct.unpack("<I", pe.read(at, 4).ljust(4, b"\0"))[0]
+                if not start <= value < table:
+                    break
+                reach, at = max(reach, value), at + 4
+        if imm and x86.X86_GRP_JUMP in ins.groups:
+            target = ops[0].imm & 0xFFFFFFFF
+            if start < target < limit:
+                reach = max(reach, target)
+            elif ins.id == x86.X86_INS_JMP and ins.address >= reach:
+                break  # a tail call
+        if ins.address >= reach and (ins.id in (x86.X86_INS_RET, x86.X86_INS_RETF) or (
+                ins.id == x86.X86_INS_JMP and (not imm or ops[0].imm & 0xFFFFFFFF <= ins.address))):
+            break  # nothing falls through: a ret, an indirect jump, or a jump back (a loop's or a shared tail)
+    return end
+
+
+def referenced(pe: PE) -> set[int]:
+    """Code addresses something points at the way only function starts are pointed at: `call rel32` targets, and
+    words in data sections (vtables, callback tables) or pushed as immediates (callbacks). Jump tables are left out
+    on purpose: they sit in the code sections and point at a switch's cases, inside their function."""
+    code = [s for s in pe.sections if s.code]
+
+    def in_code(a: int) -> bool:
+        return any(s.va <= a < s.va + s.size for s in code)
+
+    out: set[int] = set()
+    for s in pe.sections:
+        data = pe.data[s.offset:s.offset + s.size]
+        if s.code:
+            for op in (b"\xe8", b"\x68"):
+                i = data.find(op)
+                while 0 <= i <= len(data) - 5:
+                    value = struct.unpack_from("<I", data, i + 1)[0]
+                    a = (s.va + i + 5 + value) & 0xFFFFFFFF if op == b"\xe8" else value
+                    if in_code(a):
+                        out.add(a)
+                    i = data.find(op, i + 1)
+        else:
+            out.update(a for (a,) in struct.iter_unpack("<I", data[:len(data) // 4 * 4]) if in_code(a))
+    return out
 
 
 def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False) -> list[Function]:
@@ -307,20 +375,37 @@ def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False) -> list[
             continue
         rows[r["entry"]] = r
     starts = sorted(rows)
+    refs = referenced(pe)
+
+    def doubtful(addr: int) -> bool:
+        """A start nothing vouches for: not the entry point, not named, no call or pointer to it, and not after
+        padding (padding only ever comes between functions)."""
+        r, sec = rows[addr], pe.section_at(addr)
+        return addr != pe.entry and r.get("source") not in ("IMPORTED", "USER_DEFINED") and addr not in refs and \
+            addr > sec.va and pe.read(addr - 1, 1) not in (b"\xcc", b"\x90")
+
     i = 0
     extents: dict[int, tuple[int, int, list[int], int]] = {}  # start -> (code end, end, jump table entries, pad)
     while i < len(starts):
         start = starts[i]
         sec = pe.section_at(start)
+        # Ghidra makes functions of switch cases it couldn't tie to their switch (Burnout 3: dozens): a doubtful
+        # start that this function's own flow runs past is part of it
+        while i + 1 < len(starts) and doubtful(starts[i + 1]):
+            far = next((s for s in starts[i + 2:] if not doubtful(s)), sec.va + sec.size)
+            if flow_end(md, pe, start, min(far, sec.va + sec.size)) <= starts[i + 1]:
+                break
+            del rows[starts.pop(i + 1)]
         limit = min(starts[i + 1] if i + 1 < len(starts) else sec.va + sec.size, sec.va + sec.size)
-        code_end = max(start + 1, min(rows[start].get("end", limit), limit))
+        code_end = max(start + 1, min(rows[start].get("end", limit), limit), flow_end(md, pe, start, limit))
         code_end, end, entries = _tables(md, pe, start, code_end, limit)
         gap = pe.read(end, limit - end)
         rest = gap.lstrip(b"\x90").lstrip(b"\xcc\x00")
         if rest and not rest.strip(b"\x90\xcc\x00") == b"":
-            # code nobody calls directly (callbacks, vtables) that Ghidra didn't make a function: one of its own
+            # code nobody calls directly (callbacks, vtables) that Ghidra didn't make a function: one of its own,
+            # as far as its own flow goes; what follows it (a run of small vtable methods) is looked at in turn
             missed = limit - len(rest)
-            rows[missed] = {"entry": missed, "end": missed + len(rest.rstrip(b"\x90\xcc\x00")), "name": "",
+            rows[missed] = {"entry": missed, "end": max(missed + 1, flow_end(md, pe, missed, limit)), "name": "",
                             "source": "DEFAULT", "purge": 0, "convention": "__cdecl"}
             starts.insert(i + 1, missed)
             limit = missed

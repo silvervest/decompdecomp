@@ -254,22 +254,53 @@ def function_starts(xbe: XBE, skip: frozenset[str] = frozenset()) -> list[int]:
     """Where functions start, as the code itself shows it: the entry point, and every `call rel32` target in a code
     section that sits where a function can start (at the section's start, or after padding or a ret). Ghidra
     follows calls from what it disassembles anyway; these seed the code it wouldn't reach from the entry point
-    (functions only reached through vtables or callbacks still call others)."""
+    (functions only reached through vtables or callbacks still call others).
+
+    Virtual methods nobody calls directly are seeded from the vtables: runs of two or more words in a data section
+    that each point at such a start (on Burnout 3, hundreds of small methods were reached only that way, and Ghidra
+    merged runs of them into one function)."""
     code = [s for s in xbe.sections if s.code and s.name not in skip]
+
+    def plausible(target: int) -> bool:
+        t = next((c for c in code if c.va <= target < c.va + c.size), None)
+        if t is None:
+            return False
+        at = target - t.va + t.offset
+        before = xbe.data[at - 1] if target > t.va else None
+        return (before is None or before in (0xCC, 0x90, 0xC3)) and xbe.data[at] not in (0x00, 0xCC)
+
     found = {xbe.entry}
     for s in code:
         data = xbe.data[s.offset:s.offset + s.size]
-        i = data.find(b"\xe8")
-        while 0 <= i <= len(data) - 5:
-            target = s.va + i + 5 + struct.unpack_from("<i", data, i + 1)[0]
-            t = next((c for c in code if c.va <= target < c.va + c.size), None)
-            if t is not None and target not in found:
-                at = target - t.va + t.offset
-                before = xbe.data[at - 1] if target > t.va else None
-                if (before is None or before in (0xCC, 0x90, 0xC3)) and xbe.data[at] not in (0x00, 0xCC):
+        for op in (b"\xe8", b"\xe9"):  # calls, and jumps: a tail call can be the only way to a function
+            i = data.find(op)
+            while 0 <= i <= len(data) - 5:
+                target = s.va + i + 5 + struct.unpack_from("<i", data, i + 1)[0]
+                if target not in found and plausible(target):
                     found.add(target)
-            i = data.find(b"\xe8", i + 1)
-    return sorted(found)
+                i = data.find(op, i + 1)
+    return sorted(found | vtable_targets(xbe, plausible, skip))
+
+
+def vtable_targets(xbe: XBE, plausible, skip: frozenset[str] = frozenset()) -> set[int]:
+    """Code addresses in vtables: runs of at least two aligned words in a data section that all point at plausible
+    function starts. A lone pointer can be any number that happens to look like an address; two in a row rarely are."""
+    out: set[int] = set()
+    for s in xbe.sections:
+        if s.code or s.name in skip:
+            continue
+        data = xbe.data[s.offset:s.offset + s.size]
+        run: list[int] = []
+        for (word,) in struct.iter_unpack("<I", data[:len(data) // 4 * 4]):
+            if plausible(word):
+                run.append(word)
+                continue
+            if len(run) >= 2:
+                out.update(run)
+            run = []
+        if len(run) >= 2:
+            out.update(run)
+    return out
 
 
 def ghidra_layout(xbe: XBE, skip: frozenset[str] = frozenset()) -> str:

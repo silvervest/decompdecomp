@@ -6,6 +6,8 @@ must find every function with its exact extent, and agents' C must be judged by 
 Visual C++ is proprietary, so the end-to-end part runs only where `msvc` was installed with its license accepted.
 """
 
+import importlib.util
+import json
 import re
 import struct
 import subprocess
@@ -16,6 +18,7 @@ import pytest
 
 from decompnet import toolchains
 from decompnet.consoles.pc import scratch as scratch_pe
+from decompnet.consoles.pc.scratch import REL32
 from decompnet.forks import csource, ghidra
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -47,6 +50,49 @@ def test_only_32_bit_x86_programs():
     assert scratch_pe.is_pe(bytes(head))
     struct.pack_into("<H", head, 0x84, 0x8664)  # x64
     assert not scratch_pe.is_pe(bytes(head))
+
+
+def test_a_call_inside_a_file_refers_to_the_callees_definition():
+    spec = importlib.util.spec_from_file_location("pc_delink", Path(scratch_pe.TEMPLATE) / "tools" / "delink.py")
+    delink = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(delink)
+    # _func_00401010 calls _func_00401000 (e8 rel32) and an outside function: one symbol per name, the callee's
+    # definition among them, as MSVC writes it
+    exe = bytes.fromhex("c3" + "cc" * 15 + "e800000000e800000000c3")
+    obj = delink.coff([{"name": "_func_00401000", "addr": 0x401000, "offset": 0, "size": 1, "relocs": []},
+                       {"name": "_func_00401010", "addr": 0x401010, "offset": 16, "size": 11,
+                        "relocs": [[1, REL32, "_func_00401000", 0], [6, REL32, "_func_00402000", 0]]}], exe)
+    sym_at, count = struct.unpack_from("<II", obj, 8)
+    strings = obj[sym_at + 18 * count:]
+    names, sections = [], []
+    for i in range(count):
+        raw, _, section = struct.unpack_from("<8sIh", obj, sym_at + 18 * i)
+        names.append(strings[struct.unpack_from("<I", raw, 4)[0]:].split(b"\0")[0].decode() if raw[:4] == b"\0" * 4
+                     else raw.rstrip(b"\0").decode())
+        sections.append(section)
+    assert names == ["_func_00401000", "_func_00401010", "_func_00402000"] and sections == [1, 2, 0]
+    reloc_at = struct.unpack_from("<I", obj, 20 + 40 + 24)[0]  # the second section's relocations
+    assert [struct.unpack_from("<IIH", obj, reloc_at + 10 * k)[1] for k in range(2)] == [0, 2]
+
+
+def test_the_unit_wide_scores_count_each_defined_function_once(monkeypatch):
+    from decompnet.forks import objdiff
+
+    # what objdiff says about a delinked unit whose first function another one calls: the callee is listed again,
+    # undefined (no size, no score), after its definition; methods called through a vtable aren't
+    ins = [{"instruction": {"formatted": "ret", "size": 1}}]
+    left = {"symbols": [
+        {"name": "_func_00401000", "kind": "SYMBOL_FUNCTION", "size": "1", "match_percent": 100.0, "instructions": ins},
+        {"name": "_func_00401010", "kind": "SYMBOL_FUNCTION", "address": "16", "size": "11", "match_percent": 100.0,
+         "instructions": ins},
+        {"name": "_func_00401000", "kind": "SYMBOL_FUNCTION", "flags": {"global": True}},
+        {"name": "_func_00402000", "kind": "SYMBOL_FUNCTION", "flags": {"global": True}}]}
+    right = {"symbols": [{"name": "_func_00401010", "kind": "SYMBOL_FUNCTION", "size": "11", "match_percent": 100.0},
+                         {"name": "_func_00401000", "kind": "SYMBOL_FUNCTION", "size": "1", "match_percent": 100.0}]}
+    monkeypatch.setattr(objdiff, "_run", lambda *a, **k: json.dumps({"left": left, "right": right}))
+    d = objdiff.diff(None, None, None, cwd=Path("."))
+    assert d.unit_scores == {"_func_00401000": 100.0, "_func_00401010": 100.0}
+    assert d.order == ["_func_00401000", "_func_00401010"]
 
 
 def test_a_function_your_object_only_calls_is_not_in_your_build_not_a_match(monkeypatch):
@@ -122,9 +168,11 @@ def test_agents_match_functions(pc):
     header += "extern s32 g_settings[6];\n"
     assert net.forks.edit_file(agent, slug, "include/common.h", "", sub(header), "the game's types").startswith("✅")
     source = GAME.read_text() + (DEMO / "pcmain.c").read_text()
+    matched = []
     for name in ("clamp_s32", "player_take_damage", "entity_default_hp", "settings_get", "mix_score"):
         decorated = next(s for s in syms if re.sub(r"^[_@]|@\d+$", "", s) == name)
-        res = net.attempt(agent, decorated.replace(name, rename[name]), sub(csource.get(source, name)), slug)
+        matched.append(decorated.replace(name, rename[name]))
+        res = net.attempt(agent, matched[-1], sub(csource.get(source, name)), slug)
         assert res["matched"], res["text"]
     # C++: a class's method, whatever MSVC mangles its name to, pairs with the original's function
     abs_name = rename["abs_s32"]
@@ -137,6 +185,10 @@ def test_agents_match_functions(pc):
                         slug)
     assert not wrong["matched"]
     net.release(agent, other, "", slug)
+    # later attempts rescore their file: what matched stays matched (a called free function did go back to open)
+    status = {r["name"]: r["status"] for r in net.store.all("SELECT name, status FROM functions WHERE project_id=?",
+                                                             net.project_row(slug)["id"])}
+    assert {n: status[n] for n in matched} == {n: "matched" for n in matched}
     root = Path(net.project_row(slug)["root"])
     assert "Match " in subprocess.run(["git", "log", "--oneline"], cwd=root, capture_output=True, text=True).stdout
 

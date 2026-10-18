@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import re
 import struct
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -233,11 +234,18 @@ class Program:
         return self.pe.read(addr, fn["size"])
 
     def convention(self, addr: int) -> Convention:
-        memo = self.__dict__.setdefault("_conventions", {})
-        if addr not in memo:
-            memo[addr] = None  # a guard while it's worked out (recursion): a callee in a cycle passes nothing on
-            memo[addr] = analyse(self.code(addr), addr, self._reads)
-        return memo[addr]
+        # One analysis at a time: the program is shared by every agent's claim (load caches it), and another thread
+        # must never see the recursion guard below as a result. The lock is re-entrant for the callees' analyses.
+        with _ANALYSE_LOCK:
+            memo = self.__dict__.setdefault("_conventions", {})
+            if addr not in memo:
+                memo[addr] = None  # a guard while it's worked out (recursion): a callee in a cycle passes nothing on
+                try:
+                    memo[addr] = analyse(self.code(addr), addr, self._reads)
+                except BaseException:
+                    del memo[addr]  # not a cycle: leave nothing behind that reads as one
+                    raise
+            return memo[addr]
 
     def _reads(self, addr: int) -> tuple[set[str], set[str]] | None:
         if addr not in self.functions:
@@ -264,6 +272,7 @@ class Program:
 
 
 _CACHE: dict[tuple, Program] = {}
+_ANALYSE_LOCK = threading.RLock()  # agents claim in parallel threads, and they share the cached program
 
 
 def load(root: Path, manifest: dict) -> Program:
@@ -271,13 +280,14 @@ def load(root: Path, manifest: dict) -> Program:
     fj = root / "config" / manifest["version"] / "functions.json"
     exe = root / manifest["game"]["path"]
     key = (str(fj), fj.stat().st_mtime_ns, str(exe), exe.stat().st_mtime_ns)
-    if key in _CACHE:
+    with _ANALYSE_LOCK:
+        if key in _CACHE:
+            return _CACHE[key]
+        info = json.loads(fj.read_text(encoding="utf-8"))
+        pe = read_program(exe.read_bytes(), manifest.get("platform", "win32"))
+        _CACHE.clear()
+        _CACHE[key] = index(pe, info)
         return _CACHE[key]
-    info = json.loads(fj.read_text(encoding="utf-8"))
-    pe = read_program(exe.read_bytes(), manifest.get("platform", "win32"))
-    _CACHE.clear()
-    _CACHE[key] = index(pe, info)
-    return _CACHE[key]
 
 
 def index(pe, info: dict) -> Program:

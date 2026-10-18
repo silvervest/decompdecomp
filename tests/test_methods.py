@@ -99,6 +99,51 @@ def test_under_ltcg_this_is_found_in_the_register_the_linker_chose(tmp_path):
     assert "### Two objects alike" in "\n".join(methods.brief(prog, objs, BASE + 0x1120, True))
 
 
+def test_agents_claiming_at_once_never_see_a_convention_still_being_worked_out(tmp_path, monkeypatch):
+    # The app claims in worker threads that share load()'s cached program; a claim once read another's recursion
+    # guard (None) and failed with "'NoneType' object has no attribute 'describe'".
+    import threading
+
+    root, manifest = _program(tmp_path, ltcg=True)
+    prog = convention.load(root, manifest)
+    slow, real = threading.Event(), convention.analyse
+
+    def analyse(*a):
+        slow.wait(0.2)  # long enough for the other threads to arrive mid-analysis
+        return real(*a)
+
+    monkeypatch.setattr(convention, "analyse", analyse)
+    errors, add2 = [], BASE + 0x10E0
+
+    def claim():
+        try:
+            convention.evidence(prog, add2)
+            methods.recover(prog, True)
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=claim) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert errors == []
+
+    def broken(*a):
+        raise RuntimeError("bad code")
+
+    monkeypatch.setattr(convention, "analyse", broken)
+    fresh = convention.index(prog.pe, json.loads((root / "config" / "game" / "functions.json").read_text()))
+    for _ in range(2):  # a failed analysis is not remembered as a cycle: the second call fails the same way
+        try:
+            fresh.convention(add2)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("analyse should have failed")
+    assert add2 not in fresh.__dict__.get("_conventions", {})
+
+
 def test_briefs_and_standins_say_which_struct_a_function_belongs_to(tmp_path):
     from decompnet.app.forkengine import ForkEngine
 

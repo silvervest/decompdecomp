@@ -76,8 +76,8 @@ Then tell your agent: `decompile my game at ~/roms/game.z64`.
 | Platform | Status |
 | :-- | :-- |
 | GameCube, Wii, Nintendo 64 | Recommended |
-| PlayStation, PlayStation 2, Game Boy Advance, DS, Windows PC | Beta |
-| 3DS, PSP, Switch, Xbox, Xbox 360 | Community decomps only |
+| PlayStation, PlayStation 2, Game Boy Advance, DS, Windows PC, Xbox | Beta |
+| 3DS, PSP, Switch, Xbox 360 | Community decomps only |
 
 ## More information
 

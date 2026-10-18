@@ -82,12 +82,34 @@ function parseRom(buf) {
 
 /* What the user dropped, from its first bytes (nothing is uploaded until they confirm). */
 const PLATFORM_NAME = { n64: "Nintendo 64", psx: "PlayStation", ps2: "PlayStation 2", playstation: "PlayStation 1 or 2",
-  gc: "GameCube", wii: "Wii", gcwii: "GameCube or Wii", gba: "Game Boy Advance", nds: "Nintendo DS", win32: "Windows PC" };
+  gc: "GameCube", wii: "Wii", gcwii: "GameCube or Wii", gba: "Game Boy Advance", nds: "Nintendo DS", win32: "Windows PC", xbox: "Original Xbox" };
 const CW_PACK = {
   gcwii: { id: "mwcc", text: "Install CodeWarrior, the compilers GameCube and Wii games were built with (about 80 MB). It's proprietary software, kept by the decomp community: only if you accept that." },
   nds: { id: "mwccarm", text: "Install CodeWarrior for DS, the compilers DS games were built with (about 50 MB). It's proprietary software, kept by the decomp community: only if you accept that." },
   win32: { id: "msvc", text: "Install Visual C++ 6.0, 7.0 and 7.1, the compilers most PC games of 1998-2005 were built with (about 50 MB). It's proprietary software, kept by the decomp community: only if you accept that." },
+  xbox: { id: "msvc", text: "Install Visual C++ 7.1, the compiler of Xbox games (the same files as the XDK's; about 50 MB, in a pack with 6.0 and 7.0). It's proprietary software, kept by the decomp community: only if you accept that." },
 };
+/* An original Xbox program (XBE): its certificate holds the title; the entry point is stored XORed with the retail
+   or the debug key (the one that lands it in the image is right). */
+function identifyXbe(head, file, base) {
+  const dv = new DataView(head.buffer);
+  if (head.length < 0x178 || String.fromCharCode(...head.slice(0, 4)) !== "XBEH") return null;
+  const at = dv.getUint32(0x104, true), cert = dv.getUint32(0x118, true) - at, size = dv.getUint32(0x10c, true);
+  let title = "";
+  if (cert > 0 && cert + 0x5c <= head.length) title = new TextDecoder("utf-16le").decode(head.slice(cert + 0x0c, cert + 0x5c)).split("\0")[0].trim();
+  const enc = dv.getUint32(0x128, true);
+  const entry = [0xa8fc57ab, 0x94859d4b].map((k) => (enc ^ k) >>> 0).find((e) => e >= at && e < at + size);
+  return { ...base, platform: "xbox", order: "Xbox program (XBE)", title: title || base.title, entry };
+}
+/* An Xbox disc image (XDVDFS): its descriptor is at 64 KiB in an XISO, past the video partition in a full dump. */
+async function identifyXboxDisc(file) {
+  for (const at of [0x10000, 0x18310000]) {
+    if (file.size < at + 0x14) continue;
+    const magic = new TextDecoder().decode(await file.slice(at, at + 20).arrayBuffer());
+    if (magic === "MICROSOFT*XBOX*MEDIA") return { title: file.name.replace(/\.[^.]*$/, ""), size: file.size, platform: "xbox", order: at ? "Xbox disc image" : "disc image" };
+  }
+  return null;
+}
 function crc16(bytes, from, to) {
   let crc = 0xffff;
   for (let i = from; i < to; i++) {
@@ -107,6 +129,8 @@ function identifyHead(head, file) {
   const pe = text(0, 2) === "MZ" && head.length >= 0x40 ? dv.getUint32(0x3c, true) : 0;
   if (pe && pe + 0x1a <= head.length && text(pe, pe + 4) === "PE\0\0" && dv.getUint16(pe + 4, true) === 0x14c && dv.getUint16(pe + 24, true) === 0x10b)
     return { ...base, platform: "win32", order: "Windows program (.exe)", entry: dv.getUint32(pe + 52, true) + dv.getUint32(pe + 40, true) };
+  const xbe = identifyXbe(head, file, base);
+  if (xbe) return xbe;
   if (text(0, 8) === "PS-X EXE") return { ...base, platform: "psx", order: "PS-X EXE", entry: dv.getUint32(0x10, true) };
   if (head.length > 0xc0 && head[0xb2] === 0x96 && head[3] === 0xea) {  // GBA: fixed byte, header checksum, ARM branch
     let sum = 0;
@@ -157,7 +181,7 @@ const NOT_A_GAME = "That isn't a game file decompdecomp can start from scratch (
 
 async function pickFile(file) {
   const head = new Uint8Array(await file.slice(0, 0x9400).arrayBuffer());
-  let info = identifyHead(head, file), buf = file;
+  let info = identifyHead(head, file) || await identifyXboxDisc(file).catch(() => null), buf = file;
   if (!info) {
     const why = notSupported(head, file);
     if (why || file.size > 64 * 1024 * 1024) return toast(esc(why || NOT_A_GAME), "err");
@@ -176,7 +200,7 @@ async function pickFile(file) {
        ["Entry", hex8(info.entry)], ["Looks like", info.compiler === "IDO" ? "IDO" : "GCC (KMC)"]]
     : [["Platform", PLATFORM_NAME[p]], ["Format", info.order], ["Size", MB(info.size)],
        info.code ? ["Game ID", info.code] : ["Entry", info.entry != null ? hex8(info.entry) : "from the disc"],
-       ["Project", ["gc", "wii", "gcwii"].includes(p) ? "dtk-template" : p === "nds" ? "ds-decomp" : p === "gba" ? "luvdis" : p === "win32" ? "Ghidra + objdiff" : "splat"]];
+       ["Project", ["gc", "wii", "gcwii"].includes(p) ? "dtk-template" : p === "nds" ? "ds-decomp" : p === "gba" ? "luvdis" : p === "win32" || p === "xbox" ? "Ghidra + objdiff" : "splat"]];
   $("romFacts").innerHTML = facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`).join("");
   const level = platformStatus(p);
   $("romStatus").hidden = !level;
@@ -207,6 +231,14 @@ function setupCompilers(info) {
     note.hidden = false;
     note.textContent = "decompdecomp reads which Visual C++ built the game from the program itself when it can; you can change it later in tools/configure.py. The functions are found by Ghidra (installed once, 540 MB, needs Java 21+).";
     $("mwText").textContent = CW_PACK.win32.text;
+    $("mwConsent").hidden = cw.msvc_installed;
+  } else if (p === "xbox") {
+    $("compilerRow").hidden = true; note.hidden = false;
+    const xdk = (S.st?.toolchains || []).find((t) => t.id === "xdk");
+    note.textContent = "Xbox games are compiled with Visual C++ 7.1 against the headers of your own XDK"
+      + (xdk?.installed ? ` (at ${xdk.folder}).` : ", which decompdecomp never downloads: set its folder in Compilers & tools first.")
+      + " Ghidra finds the functions (installed once, 540 MB, needs Java 21+); the XDK's own library code is set aside.";
+    $("mwText").textContent = CW_PACK.xbox.text;
     $("mwConsent").hidden = cw.msvc_installed;
   } else if (p === "nds") {
     select.innerHTML = `<optgroup label="Nintendo DS">${cw.ds.map((v) => `<option value="${esc(v)}" ${v === "DS/2.0/sp1p5" ? "selected" : ""}>CodeWarrior for DS ${esc(v.slice(3))}</option>`).join("")}</optgroup>`;
@@ -292,7 +324,7 @@ $("errBack").onclick = (e) => { e.stopPropagation(); resetDrop(); };
 
 async function ensureCodeWarrior() {
   if ($("mwConsent").hidden) return;
-  $("busyTitle").textContent = picked?.info.platform === "win32" ? "Installing Visual C++…" : "Installing CodeWarrior…";
+  $("busyTitle").textContent = ["win32", "xbox"].includes(picked?.info.platform) ? "Installing Visual C++…" : "Installing CodeWarrior…";
   const pack = CW_PACK[picked?.info.platform] || CW_PACK.gcwii;
   const { job } = await api("/api/toolchain", { method: "POST", body: { id: pack.id, accept_license: true } });
   await followJob(job, $("jobLog"));
@@ -305,7 +337,7 @@ $("analyse").onclick = async () => {
   const title = `Analysing ${picked.info.title}…`;
   if (!$("mwConsent").hidden) {
     $("dropPicked").hidden = true; $("dropBusy").hidden = false; $("impUp").hidden = true;
-    try { await ensureCodeWarrior(); } catch (e) { importFailed(picked.info.platform === "win32" ? "Visual C++" : "CodeWarrior", e, $("jobLog").textContent); return; }
+    try { await ensureCodeWarrior(); } catch (e) { importFailed(["win32", "xbox"].includes(picked.info.platform) ? "Visual C++" : "CodeWarrior", e, $("jobLog").textContent); return; }
   }
   const body = picked.buf instanceof Blob ? picked.buf : new Blob([picked.buf]);
   runImport(`confirmed=1${tc ? `&toolchain=${encodeURIComponent(tc)}` : ""}`, body, title, picked.name);

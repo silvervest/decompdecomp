@@ -35,6 +35,7 @@ GUIDES = {
     "arm": "ARM and Thumb (GBA, DS, 3DS): registers, conditional code, literal pools",
     "agbcc": "matching Game Boy Advance code built with agbcc",
     "x86": "x86 and MSVC (PC, Xbox): calling conventions, SEH, matching MSVC output",
+    "xbox": "original Xbox: the XDK, kernel calls, Visual C++ 7.1 with /arch:SSE, library code set aside, LTCG",
     "aarch64": "AArch64 and Clang (Switch): registers, matching Clang output",
     "similarity": "finding similar functions and reusing matched code",
 }
@@ -43,7 +44,7 @@ GUIDES = {
 PLATFORM_GUIDES = {
     "n64": ["mips"], "ps": ["mips", "psx"], "ps2": ["mips", "ps2"], "psp": ["mips"],
     "gc": ["ppc", "mwcc", "cpp"], "wii": ["ppc", "mwcc", "cpp"], "nds": ["arm", "mwcc"], "3ds": ["arm", "cpp"],
-    "gba": ["arm", "agbcc"], "switch": ["aarch64", "cpp"], "win32": ["x86", "cpp"], "xbox": ["x86", "cpp"],
+    "gba": ["arm", "agbcc"], "switch": ["aarch64", "cpp"], "win32": ["x86", "cpp"], "xbox": ["x86", "xbox", "cpp"],
     "xbox360": ["ppc", "cpp"],
 }
 

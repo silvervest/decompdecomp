@@ -11,23 +11,24 @@ Want to work on one? Open an issue first, so two people don't build the same thi
 Each feature and the platforms it covers today. A — is a gap: pick one up (the notes under the table say where to
 start). Keep this table true when a feature ships or reaches another platform.
 
-| Feature | N64 | PS1 | PS2 | GBA | GameCube · Wii | DS | Windows PC | Public decomps |
-| :-- | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
-| Start from your own copy | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | fork by address |
-| Judge | link · compare | link · compare | link · compare | link · compare | objdiff | objdiff | objdiff | objdiff |
-| Machine drafts (m2c, Ghidra for x86) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ Ghidra | by architecture |
-| Autopilot: free matches from drafts | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | — |
-| Twins: free matches from identical code | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Permuter on near misses | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Hand-written assembly set aside | ✓ | ✓ | ✓ | — | ✓ | — | — | MIPS, PowerPC |
-| Kernel and BIOS stubs set aside | — | ✓ | ✓ | — | — | — | — | — |
-| Function-end reports (`report_boundary`) | ✓ | ✓ | ✓ | — | — | — | — | — |
-| Compiler ranges and suggestions | ✓ | ✓ | ✓ | ✓ | the project's build | the project's build | the project's build | the project's build |
-| Compiler map and the judge's survey | ✓ | ✓ | ✓ | — | — | — | — | — |
-| Range checks: a range applies after its neighbours confirm it | ✓ | ✓ | ✓ | — | — | — | — | — |
-| C++ classes from the code (`get_class`) | ✓ | ✓ | ✓ | — | — | — | — | — |
-| Rebuildable export | ✓ | ✓ | ✓ | ✓ | the project | the project | — | the project |
-| Rooms: decompile together | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Feature | N64 | PS1 | PS2 | GBA | GameCube · Wii | DS | Windows PC | Xbox | Public decomps |
+| :-- | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
+| Start from your own copy | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ XBE or disc, your own XDK | fork by address |
+| Judge | link · compare | link · compare | link · compare | link · compare | objdiff | objdiff | objdiff | objdiff | objdiff |
+| Machine drafts (m2c, Ghidra for x86) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ Ghidra | as PC (untested) | by architecture |
+| Autopilot: free matches from drafts | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | — | — |
+| Twins: free matches from identical code | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
+| Permuter on near misses | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
+| Hand-written assembly set aside | ✓ | ✓ | ✓ | — | ✓ | — | — | — | MIPS, PowerPC |
+| Kernel and BIOS stubs set aside | — | ✓ | ✓ | — | — | — | — | ✓ XDK library code | — |
+| Function-end reports (`report_boundary`) | ✓ | ✓ | ✓ | — | — | — | — | — | — |
+| Compiler ranges and suggestions | ✓ | ✓ | ✓ | ✓ | the project's build | the project's build | the project's build | the project's build | the project's build |
+| Compiler map and the judge's survey | ✓ | ✓ | ✓ | — | — | — | — | — | — |
+| Range checks: a range applies after its neighbours confirm it | ✓ | ✓ | ✓ | — | — | — | — | — | — |
+| C++ classes from the code (`get_class`) | ✓ | ✓ | ✓ | — | — | — | — | — | — |
+| Rebuildable export | ✓ | ✓ | ✓ | ✓ | the project | the project | — | — | the project |
+| LTCG games (`/GL`: register conventions, cross-file inlining) | | | | | | | | — | |
+| Rooms: decompile together | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
 
 Where to start on a gap:
 - **ARM (GBA, DS)**: assembly detection is `handwritten.py` (`mips_reason` and `ppc_reason` show the shape); the

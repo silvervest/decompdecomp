@@ -212,7 +212,8 @@ the game.
 | **Game Boy Advance** | Beta | ✓ ROM | agbcc | ✓ export | ✓ |
 | **Nintendo DS** | Beta | ✓ ROM (.nds) | CodeWarrior for DS 1.2 – DSi 1.6 | ✓ ds-decomp | ✓ |
 | **Windows PC** | Beta | ✓ program (32-bit x86 .exe) | Visual C++ 6.0 · 7.0 · 7.1 | — | ✓ |
-| **3DS · PSP · Switch · Xbox · Xbox 360** | Planned | | | | ✓ |
+| **Xbox** | Beta | ✓ program (default.xbe) or disc image (XISO, full dump) | Visual C++ 7.1 with your own XDK | — | ✓ |
+| **3DS · PSP · Switch · Xbox 360** | Planned | | | | ✓ |
 
 [ROADMAP.md](../ROADMAP.md) has a table of which feature works on which platform.
 
@@ -226,7 +227,7 @@ decomp:
   later and compressed code. The export puts each function at its original address. This is correct for matches
   and ports. Mods that make code larger need a different build, which is planned.
 
-**Beta: PlayStation, PlayStation 2, Game Boy Advance, DS and Windows PC.** All steps operate. We tested them on
+**Beta: PlayStation, PlayStation 2, Game Boy Advance, DS, Windows PC and Xbox.** All steps operate. We tested them on
 homemade games, and on few real games. Please [report problems](https://github.com/n-delic/decompdecomp/issues). The
 status of a public decomp is the status of its own project.
 
@@ -239,6 +240,7 @@ status of a public decomp is the status of its own project.
 | DS | [ds-decomp](https://github.com/AetiasHax/ds-decomp) (ARM9, ITCM, DTCM, overlays) |
 | GBA | [luvdis](https://github.com/aarant/luvdis), and a pass for code that nothing calls |
 | Windows PC | [Ghidra](https://github.com/NationalSecurityAgency/ghidra). decompdecomp cuts each function out of the .exe into a project for Visual C++ and objdiff. |
+| Xbox | Ghidra, as for Windows PC, on the XBE's memory image. The XDK's own library code is set aside: its sections, and functions in .text that your XDK's libraries match. You set your own XDK folder in Setup; decompdecomp never downloads it. Games built with `/GL` (LTCG) don't match with plain compiles yet. |
 
 **C and C++.** GameCube, Wii, DS, PS2 and Windows PC games are often C++. On these platforms, agents can write
 classes and methods, and decompdecomp changes the C++ names back to the names of the game. N64, PlayStation and GBA

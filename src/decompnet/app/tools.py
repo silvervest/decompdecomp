@@ -302,12 +302,13 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "file_status": lambda net, agent, slug, path: net.forks.file_status(_fork(net, slug, "file_status"), path),
     "split_file": lambda net, agent, slug, path, at, new_name="", data="":
         net.forks.split_file(agent, _fork(net, slug, "split_file"), path, at, new_name, data),
+    "standins_for": lambda net, agent, slug, what: net.forks.standins_for(agent, _fork(net, slug, "standins_for"), what),
 }
 
 ROM_ONLY = {"get_context", "edit_context", "rename_symbol", "split_function", "report_boundary", "get_class",
             "guess_struct", "redraft",
             "compiler_map", "claim_readable", "make_readable", "search_flags"}
-FORK_ONLY = {"read_file", "search_code", "edit_file", "file_status", "split_file"}
+FORK_ONLY = {"read_file", "search_code", "edit_file", "file_status", "split_file", "standins_for"}
 
 
 def tool_names(fork: bool) -> list[str]:
@@ -604,6 +605,15 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
         the game still builds byte for byte and every match still matches. A file links only when its code and
         data are exactly one original file's."""
         return await run(ctx, "split_file", path=path, at=at, new_name=new_name, data=data)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def standins_for(ctx: Context, what: str) -> str:
+        """Forks only (PC, Xbox; for games built with link-time code generation): starting points for a unit's
+        harness, from the original's references: stand-ins for the data and functions it uses from elsewhere
+        (each callee with the registers it reads and how it's called), a HarnessEntry calling the unit's functions
+        the way the original's callers do, and the declarations its source needs. `what`: a unit, its source file
+        or one of its functions. Write them into harness/ with edit_file, then shape them like the real ones."""
+        return await run(ctx, "standins_for", what=what)
 
     @mcp.prompt(title="Decompile", description="Work loop: claim functions and match them byte for byte.")
     def work(count: str = "5") -> str:

@@ -130,6 +130,7 @@ def register(app: App) -> None:
             return bad
         q = request.query_params
         toolchain = q.get("toolchain") or None
+        ltcg = {"1": True, "0": False}.get(q.get("ltcg") or "")  # (Xbox) link-time code generation; else detected
         if q.get("demo") == "1":
             game: bytes | Path | None = static_file("demo/demo-quest-64.z64")
             if game is None:
@@ -164,7 +165,7 @@ def register(app: App) -> None:
 
         def work(log):
             try:
-                slug = net.import_rom(game, toolchain=toolchain, confirmed=True, name=name, log=log)
+                slug = net.import_rom(game, toolchain=toolchain, confirmed=True, name=name, log=log, ltcg=ltcg)
             finally:
                 if uploaded:
                     shutil.rmtree(game.parent, ignore_errors=True)

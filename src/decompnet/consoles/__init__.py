@@ -71,6 +71,7 @@ class Console:
     demo = ""  # its homemade demo game: a folder in projects/ whose build.py makes it (tests/test_consoles.py)
     demo_tools: tuple[str, ...] = ()  # what building and importing the demo needs: toolchains, or programs on PATH
     own_features: frozenset[str] = frozenset()  # EXPORT, REBUILD_CHECK
+    import_options: tuple[str, ...] = ()  # PROJECT mode: choices at import its create_project takes ("ltcg": Xbox)
     # ROM mode's export: the assembler's flags for its processor, the rebuilt image's extension, and what every
     # assembly file of the export starts with
     as_flags: tuple[str, ...] = ()
@@ -102,14 +103,17 @@ class Console:
         return False
 
     def import_game(self, net, file: bytes | Path, *, toolchain: str | None = None, flags: list[str] | None = None,
-                    name: str = "", log=print) -> str:
-        """Start a project from the user's own copy of the game; returns its slug. The mode's way by default."""
+                    name: str = "", log=print, **options) -> str:
+        """Start a project from the user's own copy of the game; returns its slug. The mode's way by default.
+        `options`: the user's choices at import; PROJECT mode hands create_project those the console takes
+        (`import_options`) and drops the rest."""
         if self.mode == ROM:
             return net.import_split(self, self.read_game(file, name), toolchain=toolchain, flags=flags, log=log)
         if self.mode == PROJECT:
             path = Path(file) if isinstance(file, (str, Path)) else net.saved_file(file, name or self.upload_name(file))
             known = toolchain if toolchain in {c.id for c in self.compilers} else None  # (a ROM console's id: not ours)
-            return net.forks.create_scratch(path, self, compiler=known, log=log)
+            chosen = {k: v for k, v in options.items() if k in self.import_options}
+            return net.forks.create_scratch(path, self, compiler=known, log=log, **chosen)
         raise RomError(f"{self.name or 'these'} games can't be started from scratch in this version: continue a public "
                        "decomp of the game instead")
 
@@ -212,7 +216,8 @@ class Console:
                 "status": self.status, "arch": self.arch, "mode": self.mode, "judge": self.judge, "layout": self.layout,
                 "features": sorted(self.features), "packs": [tool for tool, _ in self.packs],
                 "compilers": [{"id": c.id, "name": c.name, "built": c.built} for c in self.compilers],
-                "default_compiler": self.default_compiler({}, "") if self.mode else ""}
+                "default_compiler": self.default_compiler({}, "") if self.mode else "",
+                "import_options": list(self.import_options)}
 
 
 def _registry() -> list[Console]:

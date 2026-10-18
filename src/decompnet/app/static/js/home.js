@@ -232,6 +232,8 @@ function setupCompilers(info) {
   const p = info.platform, select = $("compilerPick"), note = $("compilerNote");
   const con = consoleOf(p) || { mode: "", compilers: [], packs: [], default_compiler: "" };
   $("compilerRow").hidden = false; note.hidden = true; $("mwConsent").hidden = true; $("mwAccept").checked = false;
+  // a console's own choice at import (Xbox: whether the game was built with link-time code generation)
+  $("ltcgRow").hidden = !(con.import_options || []).includes("ltcg"); $("ltcgPick").value = "";
   if (con.mode === "rom") {
     if (info.order.endsWith("disc image")) {
       $("compilerRow").hidden = true; note.hidden = false;
@@ -341,7 +343,8 @@ $("analyse").onclick = async () => {
     try { await ensureCodeWarrior(); } catch (e) { importFailed(CW_PACK[packOf(picked.info.platform)].title, e, $("jobLog").textContent); return; }
   }
   const body = picked.buf instanceof Blob ? picked.buf : new Blob([picked.buf]);
-  runImport(`confirmed=1${tc ? `&toolchain=${encodeURIComponent(tc)}` : ""}`, body, title, picked.name);
+  const ltcg = $("ltcgRow").hidden ? "" : $("ltcgPick").value;
+  runImport(`confirmed=1${tc ? `&toolchain=${encodeURIComponent(tc)}` : ""}${ltcg ? `&ltcg=${ltcg}` : ""}`, body, title, picked.name);
 };
 $("pathPick").onclick = (e) => {
   e.stopPropagation();

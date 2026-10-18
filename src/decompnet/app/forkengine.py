@@ -197,6 +197,21 @@ _INCLUDE_LINE = re.compile(r'^#\s*include\s*"[^"]+"\s*$')
 _ASM_KEYS = ("asm_twin", "asm_code")  # meta saying a function is hand-written assembly (kept by sync)
 _ASM_DEF = re.compile(r"\s*(?:(?:static|inline|extern)\s+)*asm\b")
 _MSVC_C = re.compile(r"[_@]([A-Za-z_]\w*?)(?:@\d+)?")  # how MSVC decorates a C function's name (PC, Xbox)
+_FUNC_ADDRESS = re.compile(r"(?<![0-9A-Za-z])func_([0-9A-Fa-f]{8})(?![0-9A-Fa-f])")
+
+
+def _address(meta: dict, fn) -> int | None:
+    """The original's address of a function: a PC or Xbox project's symbol says it (`_func_0001A8F0@4`), else the
+    report's virtual address."""
+    if (m := _FUNC_ADDRESS.search(meta.get("symbol") or fn["name"])):
+        return int(m.group(1), 16)
+    try:
+        vram = fn["vram"]
+    except (IndexError, KeyError):
+        return None
+    return int(vram) if vram else None
+
+
 # a source file that includes another source file: Mario Party 6's REL runtime.c files are one line,
 # #include "src/Runtime.PPCEABI.H/runtime.c" (its asm helpers, which every module links a copy of)
 _SOURCE_INCLUDE = re.compile(r'^\s*#\s*include\s*"([^"]+\.(?:c|cc|cp|cpp))"', re.M)
@@ -1607,8 +1622,12 @@ class ForkEngine:
 
     @staticmethod
     def _names(meta: dict, fn) -> list[str]:
-        """Ways the function may be spelled in source: full C++ name, Class::method, then the plain symbol."""
+        """Ways the function may be spelled in source: its `// FUNCTION: 0x<address>` annotation when the address is
+        known (decompilations of PC and Xbox games give functions real names, `CAIBehaviour::Update`, and say which
+        original function each is that way), full C++ name, Class::method, then the plain symbol."""
         out = []
+        if (addr := _address(meta, fn)) is not None:
+            out.append(csource.address_key(addr))
         dem = (meta.get("demangled") or "").split("(", 1)[0].strip()
         if dem:
             dem = dem.split(" ")[-1] if " " in dem and "operator" not in dem else dem
@@ -2010,8 +2029,14 @@ class ForkEngine:
             raise NetworkError("inline assembly, asm functions and asm includes aren't allowed: a match has to come from C/C++")
         names = self._names(meta, fn)
         _, span = self._find(source, names)
+        if span is None and (current := self._current_source(fp, fn)) is not None:
+            # sent without its `// FUNCTION:` annotation: the name its file's definition gives it
+            if (given := csource.defined_name(current, (0, len(current)))) and given not in names:
+                names.append(given)
+                _, span = self._find(source, names)
         if span is None:
-            raise NetworkError(f"send the complete definition of {names[0]} (with its body)")
+            shown = next((n for n in names if not n.startswith(csource.ADDRESS_KEY)), names[0])
+            raise NetworkError(f"send the complete definition of {shown} (with its body)")
         code = source[span[0]:span[1]]
         unit = fp.unit(fn["unit"])
         if not unit.source:

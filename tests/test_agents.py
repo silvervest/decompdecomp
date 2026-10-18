@@ -208,6 +208,8 @@ def test_stopping_a_helper_frees_its_function_at_once(tmp_path):
     m.sessions["api-1"] = agents.Session("api-1", "api", "DeepSeek", "demo", "api-1", {})
     m.stop("api-1")
     assert net.store.one("SELECT COUNT(*) AS n FROM claims")["n"] == 0
+    # its run is over: what it released in it no longer keeps it off those functions next time
+    assert net.store.one("SELECT COUNT(*) AS n FROM events WHERE agent_id=? AND kind='stopped'", helper.id)["n"] == 1
 
 
 def test_a_helpers_identity_says_its_model_so_records_never_mix():

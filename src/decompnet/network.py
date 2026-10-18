@@ -26,6 +26,12 @@ CLAIM_TTL = 30 * 60
 # A function an agent just released goes to the back of the queue for this long, for every agent: the next one
 # starts on something fresh instead of passing the same function back and forth. Asked for by name, it comes at once.
 RELEASE_COOLDOWN = 15 * 60
+# The agent that released a function doesn't get it back automatically for this long, or until its run ends (the
+# app writes a 'stopped' event when one of its helpers stops). It used to be kept off every function it ever
+# released: helper identities are reused by name across runs (claude-haiku-1..8), so on demo_ltcg four Haiku helpers
+# found "nothing left to claim" among exactly the ten functions their names gave up on in earlier runs, while a new
+# Opus helper claimed at once. After that the function still comes to it last.
+SELF_RELEASE_WINDOW = RELEASE_COOLDOWN
 MACHINE_AGENTS = ("autopilot", "permuter")  # decompdecomp's own workers: their claims never mean "given up on"
 # Twins first (see app/twins.py): a function whose code the game has more than once (boost: how many more times)
 # and isn't too big or given up on, best value per instruction first; its twins (boost -1) last, as they match for
@@ -245,9 +251,48 @@ class Network:
               strategy: str = "easiest") -> str:
         fn = self.claim_row(agent, project, function, strategy)
         if fn is None:
-            proj = self._project(project)
-            return f"Nothing left to claim in {proj['slug']} — every open function is matched or claimed. 🎉"
+            return self.nothing_to_claim(agent, self._project(project))
         return self._brief(fn, agent, header="CLAIMED")
+
+    def _own_release_cutoff(self, db, agent_id: int, now: float) -> float:
+        """Releases by this agent after this time keep it off those functions: the last SELF_RELEASE_WINDOW, and
+        only since its run started (its last 'stopped' event)."""
+        row = db.execute("SELECT MAX(created_at) AS t FROM events WHERE agent_id=? AND kind='stopped'",
+                         (agent_id,)).fetchone()
+        return max(now - SELF_RELEASE_WINDOW, (row["t"] if row else None) or 0)
+
+    def nothing_to_claim(self, agent: Agent, proj, scope: str = "") -> str:
+        """What a claim that found nothing tells the agent: whether the open functions are held (by whom, for how
+        long), ones it set aside itself (which it can still take by name), or really all done. A bare "nothing left"
+        sent four helpers away from a project with ten open functions."""
+        now = time.time()
+        n_open = self.store.one("SELECT COUNT(*) AS n FROM functions WHERE project_id=? AND status='open'",
+                                proj["id"])["n"]
+        if not n_open:
+            return f"Nothing left to claim in {proj['slug']}: every function{scope} matches. 🎉"
+        held = self.store.all(
+            "SELECT f.name, a.name AS agent, c.expires_at FROM claims c JOIN functions f ON f.id=c.function_id "
+            "LEFT JOIN agents a ON a.id=c.agent_id WHERE f.project_id=? AND f.status='open' ORDER BY c.expires_at",
+            proj["id"])
+        with self.store.tx() as db:
+            cutoff = self._own_release_cutoff(db, agent.id, now)
+        mine = self.store.all(
+            "SELECT DISTINCT f.name FROM functions f JOIN events e ON e.project_id=f.project_id AND e.detail=f.name "
+            "WHERE f.project_id=? AND f.status='open' AND e.agent_id=? AND e.kind='release' AND e.created_at > ? "
+            "AND f.id NOT IN (SELECT function_id FROM claims) ORDER BY f.name", proj["id"], agent.id, cutoff)
+        lines = [f"Nothing to claim in {proj['slug']} right now: {n_open} function{'s' * (n_open != 1)} "
+                 f"{'are' if n_open != 1 else 'is'} open, but none is free for you."]
+        if held:
+            shown = ", ".join(f"{r['name']} ({r['agent'] or '?'}, {max(0, int(r['expires_at'] - now)) // 60} min left)"
+                              for r in held[:10])
+            lines.append(f"{len(held)} held by other agents: {shown}{', ...' if len(held) > 10 else ''}. Each is "
+                         "free again when its agent matches or releases it, or when its lease runs out.")
+        if mine:
+            names = [r["name"] for r in mine]
+            lines.append(f"{len(names)} you released yourself in the last {SELF_RELEASE_WINDOW // 60} minutes: "
+                         f"{', '.join(names[:10])}{', ...' if len(names) > 10 else ''}. They come back to you later. "
+                         f"To take one now, call claim_function with function=\"{names[0]}\".")
+        return "\n".join(lines)
 
     def claim_row(self, agent: Agent, project: str | None = None, function: str | None = None,
                   strategy: str = "easiest"):
@@ -278,13 +323,17 @@ class Network:
                 db.execute("INSERT INTO claims VALUES(?,?,?,?)", (fn["id"], agent.id, now, now + self.claim_ttl))
                 self._event(db, fn["project_id"], agent.id, "claim", fn["name"])
             else:
+                # not what this agent released lately (see SELF_RELEASE_WINDOW); what it released before that last
                 fn = db.execute(
                     f"""SELECT f.* FROM functions f WHERE f.project_id=? AND f.status='open'
                         AND f.id NOT IN (SELECT function_id FROM claims)
-                        AND f.name NOT IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release')
-                        ORDER BY f.name IN (SELECT detail FROM events WHERE project_id=? AND kind='release'
+                        AND f.name NOT IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release'
+                                           AND created_at > ?)
+                        ORDER BY f.name IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release'),
+                                 f.name IN (SELECT detail FROM events WHERE project_id=? AND kind='release'
                                             AND created_at > ?), {STRATEGIES[strategy]} LIMIT 1""",
-                    (proj["id"], proj["id"], agent.id, proj["id"], now - RELEASE_COOLDOWN),
+                    (proj["id"], proj["id"], agent.id, self._own_release_cutoff(db, agent.id, now),
+                     proj["id"], agent.id, proj["id"], now - RELEASE_COOLDOWN),
                 ).fetchone()
                 if fn is None:
                     return None
@@ -306,6 +355,38 @@ class Network:
             self._event(db, fn["project_id"], agent.id, "release", fn["name"])
         return (f"Released {fn['name']}. Your best attempt and notes are saved so the next agent starts "
                 f"where you left off. Call claim_function for a new one.")
+
+    def release_stopped(self, agent_ids, why: str) -> list[str]:
+        """The claims of agents whose process is gone, released at once with a note (`why`), instead of holding their
+        functions until CLAIM_TTL runs out: after an update or a restart of the app, every open function looked held
+        by helpers that had died with it. Not counted as giving up. Each agent also gets a 'stopped' event, which
+        ends its run: what it released before no longer keeps it off those functions (SELF_RELEASE_WINDOW).
+        Returns the functions released."""
+        now, freed = time.time(), []
+        with self.store.tx() as db:
+            own = {r["id"] for r in db.execute("SELECT id FROM agents WHERE name IN (?, ?)", MACHINE_AGENTS)}
+            for aid in agent_ids:
+                rows = db.execute("SELECT f.id, f.project_id, f.name FROM claims c JOIN functions f ON f.id=c.function_id "
+                                  "WHERE c.agent_id=?", (aid,)).fetchall()
+                db.execute("DELETE FROM claims WHERE agent_id=?", (aid,))
+                for r in rows:
+                    if aid not in own:  # decompdecomp's own tries leave no notes
+                        db.execute("INSERT INTO notes(project_id,function_id,agent_id,text,created_at) VALUES(?,?,?,?,?)",
+                                   (r["project_id"], r["id"], aid, f"Released because its agent stopped ({why}); its "
+                                    "attempts are kept.", now))
+                    self._event(db, r["project_id"], aid, "stopped", r["name"])
+                    freed.append(r["name"])
+                if not rows:
+                    self._event(db, None, aid, "stopped", "")
+        return freed
+
+    def release_local_claims(self, why: str) -> list[str]:
+        """When the app starts: none of its own helpers (origin 'local') or workers (autopilot, permuter) is running
+        yet, so whatever they hold is left over from the last run. Agents that run elsewhere (the one the user talks
+        to, a room's members) may still be working: theirs keep the CLAIM_TTL rule."""
+        ids = [r["id"] for r in self.store.all("SELECT id FROM agents WHERE origin='local' OR name IN (?, ?)",
+                                               *MACHINE_AGENTS)]
+        return self.release_stopped(ids, why)
 
     def get_function(self, function: str, project: str | None = None, agent: Agent | None = None) -> str:
         return self._brief(self._function(function, project), agent, header="VIEW")

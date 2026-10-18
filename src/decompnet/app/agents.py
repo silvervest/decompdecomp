@@ -667,8 +667,9 @@ class Manager:
                 if s.state not in ("error",):
                     s.state = "stopped"
                 if sid is not None:  # its function is free now, not when its thread notices (an API helper waits on
-                    with self.net.store.tx() as db:  # its model meanwhile, and showed up as a "connected agent")
-                        db.execute("DELETE FROM claims WHERE agent_id=(SELECT id FROM agents WHERE name=?)", (s.agent_name,))
+                    row = self.net.store.one("SELECT id FROM agents WHERE name=?", s.agent_name)  # its model meanwhile)
+                    if row is not None:
+                        self.net.release_stopped([row["id"]], "you stopped it")
         if sid is not None:
             self.persist(self.running())
 
@@ -793,6 +794,7 @@ class Manager:
             s.stop.wait(3 if ok else min(60, 5 * failures + max(0, 10 - (time.time() - t0))))
         if s.state != "error":
             s.state = "stopped"
+        why = "it was stopped" if s.stop.is_set() else (s.error or "it finished")[:200]
         if not s.stop.is_set():  # finished by itself (done, budget, errors): no need to resume it
             s.stop.set()
             self.persist(self.running())
@@ -803,8 +805,8 @@ class Manager:
                 link.call("/collab/release", agent, function=held["name"], notes="")
             except Exception:
                 pass
-        with self.net.store.tx() as db:  # release any claim the agent still holds so others can take it
-            db.execute("DELETE FROM claims WHERE agent_id=?", (agent.id,))
+        # its claims go now, with a note, rather than when their lease runs out; and its next run starts afresh
+        self.net.release_stopped([agent.id], why)
 
     def prompt(self, s: Session) -> str:
         text = self._prompt(s)

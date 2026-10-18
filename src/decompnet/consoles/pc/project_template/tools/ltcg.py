@@ -110,7 +110,9 @@ def write_rules(n, *, units: list[str], source_of, build: Path, config: Path, cl
     files the build depends on, so editing a driver re-runs configure)."""
     q = subprocess.list2cmdline
     out = build / "ltcg"
-    n.rule("ltcg_cc", f'{sh}{wrap}"{cl}" $flags /Iinclude /Iharness "/I{include}" /Fo$out $in')
+    # what each file includes (headers, another unit's source a driver includes) is its dependency: tools/cldeps.py
+    n.rule("ltcg_cc", f'{sh}{py} tools/cldeps.py $out -- {wrap}"{cl}" $flags /Iinclude /Iharness "/I{include}"'
+                      f' /showIncludes /Fo$out $in', deps="gcc", depfile="$out.d")
     support = out / "support.lib"
     n.rule("ltcg_support", f'{py} tools/ltcg.py support $out --cl "{cl}" --lib "{lib}"'
                            + (f" --wibo {wrap.strip()}" if wrap else ""))
@@ -133,7 +135,7 @@ def write_rules(n, *, units: list[str], source_of, build: Path, config: Path, cl
         for i, path in enumerate(sources):
             obj = out / unit / f"{i:02d}_{path.stem.replace('.', '_')}.obj"
             flags = [f for f in gl if f.upper() != "/GL"] if ".nogl." in path.name.lower() else gl
-            n.build(str(obj), "ltcg_cc", str(path), implicit=headers, variables={"flags": q(flags)})
+            n.build(str(obj), "ltcg_cc", str(path), implicit=["tools/cldeps.py"], variables={"flags": q(flags)})
             objs.append(str(obj))
         dll, mapf = out / unit / f"{unit}.dll", out / unit / f"{unit}.map"
         n.build(str(dll), "ltcg_link", [*objs, str(support)], implicit_outputs=[str(mapf)],

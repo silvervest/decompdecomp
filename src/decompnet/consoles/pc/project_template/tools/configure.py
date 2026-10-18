@@ -88,12 +88,14 @@ def main() -> None:
         n = ninja_syntax.Writer(f)
         n.rule("delink", f"{PY} tools/delink.py {CONFIG} {BUILD / 'target'}", restat=True)
         compiler = [PYTHON, "tools/compile.py", "--compiler", str(CL), "--include", str(INCLUDE),
-                    "--config", str(CONFIG)]
+                    "--config", str(CONFIG), "--deps"]
         if args.wibo and sys.platform != "win32":
             compiler += ["--wrapper", args.wibo]
         # The runner invokes the compiler and names.py separately: cmd /c misparsed quoted compiler paths.
+        # The headers it reads are its dependencies (--deps: tools/cldeps.py): editing one rebuilds only what
+        # includes it
         n.rule("cl", q(compiler).replace("$", "$$") + " --output $out --source $in -- "
-               + q(CL_FLAGS).replace("$", "$$") + " $cflags")
+               + q(CL_FLAGS).replace("$", "$$") + " $cflags", deps="gcc", depfile="$out.d")
         n.rule("configure", f"{PY} tools/configure.py " + q(sys.argv[1:]).replace("$", "$$"), generator=True)
 
         targets = [str(BUILD / "target" / f"{u}.obj") for u in units]
@@ -117,7 +119,8 @@ def main() -> None:
             if src.parent == Path("src") / "auto" and src.stem in harness_units:
                 continue
             obj = BUILD / src.with_suffix(".obj")
-            n.build(str(obj), "cl", str(src), implicit=[*headers, str(CONFIG), "tools/compile.py", "tools/names.py"])
+            n.build(str(obj), "cl", str(src), implicit=[str(CONFIG), "tools/compile.py", "tools/names.py",
+                                                        "tools/cldeps.py"])
             objs.append(str(obj))
         n.build("all_source", "phony", objs)
         n.build("prepare", "phony", [*targets, *objs])

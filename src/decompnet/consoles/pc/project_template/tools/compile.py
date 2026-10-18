@@ -18,12 +18,17 @@ def main() -> int:
     parser.add_argument("--wrapper", default="")
     parser.add_argument("--output", required=True)
     parser.add_argument("--source", required=True)
+    # the project headers the compiler reads go into OUTPUT.d, for ninja (tools/cldeps.py; Visual C++ 7.1 and later)
+    parser.add_argument("--deps", action="store_true")
     parser.add_argument("flags", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     flags = args.flags[1:] if args.flags[:1] == ["--"] else args.flags
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     command = ([args.wrapper] if args.wrapper else []) + [args.compiler, *flags, "/Iinclude", f"/I{args.include}",
+                                                         *(["/showIncludes"] if args.deps else []),
                                                          f"/Fo{args.output}", args.source]
+    if args.deps:
+        command = [sys.executable, str(Path(__file__).with_name("cldeps.py")), args.output, "--", *command]
     result = subprocess.run(command, timeout=COMPILE_SECONDS, creationflags=NO_WINDOW)
     if result.returncode:
         return result.returncode

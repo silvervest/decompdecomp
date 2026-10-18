@@ -185,9 +185,9 @@ the game.
 | **PlayStation** | Beta | ✓ disc (BIN, ISO, CHD) or PS-X EXE | GCC 2.6.3 · 2.7.2 · 2.8.1 (PSY-Q), with maspsx | ✓ export | ✓ |
 | **PlayStation 2** | Beta | ✓ disc or ELF | EE-GCC 2.9 · 2.95.2/2.95.3 (SN) · 2.96 · 3.2 · CodeWarrior 2.3.3 / 3.0.1 | ✓ export | ✓ |
 | **GameCube · Wii** | Beta | ✓ disc (ISO, RVZ, WBFS…) or DOL | CodeWarrior GC 1.0 – Wii 1.7 | ✓ dtk-template | ✓ |
-| **Windows PC** | Beta | ✓ program (32-bit x86 .exe) | Visual C++ 6.0 · 7.0 · 7.1 | — | ✓ |
+| **Windows PC** | Beta | ✓ program (32-bit x86 .exe) | Visual C++ 6.0 · 7.0 · 7.1 | ✓ `ninja export` (homemade programs) | ✓ |
 | **Nintendo DS** | Beta | ✓ ROM (.nds) | CodeWarrior for DS 1.2 – DSi 1.6 (24 versions), one per source file | ✓ ds-decomp | ✓ |
-| **Xbox** | Beta | ✓ program (default.xbe) or disc image (XISO, full dump) | Visual C++ 7.1 with your own XDK | — | ✓ |
+| **Xbox** | Beta | ✓ program (default.xbe) or disc image (XISO, full dump) | Visual C++ 7.1 with your own XDK | ✓ `ninja export` | ✓ |
 | **GBA · 3DS · PSP · Switch · Xbox 360** | Public decomps only | | | | ✓ |
 
 [ROADMAP.md](../ROADMAP.md) has a table of which feature works on which platform.
@@ -237,6 +237,22 @@ with a memory limit.
 and `build.py`. The export proves that the tree builds your game byte for byte. Game code and data are not in git.
 The build makes them again from your copy of the game. GameCube and Wii projects are dtk-template projects. They
 build the game again on each build.
+
+Windows PC and Xbox projects rebuild the game with `ninja export` (or *Rebuild the game and compare* on the
+project). It links the game's program again with the game's own linker:
+
+- Each function is a section of its own, with its calls and data addresses as relocations.
+- A function that `src/` compiles to the original's bytes comes from the compiled object. Its references to the
+  game keep their names, and must point where the original's do. The compiler's own data (floats, strings) is the
+  original's copy.
+- Everything else (data, padding) comes from your copy, at its address.
+- An Xbox game's kernel imports come from your XDK's `xboxkrnl.lib`. The XDK's `imagebld` makes the XBE.
+- The headers come from your copy once every section is identical. They hold the certificate and Microsoft's
+  signature, which no build can make.
+
+`build/<version>/export/export.json` says which functions came from `src/` and what differs. A game built with
+link-time code generation takes a unit's functions from its harness link, which the unit's match proved
+identical. The rebuilt program can't move code yet: its data keeps its addresses.
 
 ## Installation details
 

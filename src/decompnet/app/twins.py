@@ -76,9 +76,68 @@ def _key(code: bytes, layout: list[tuple[int, int]]) -> str:
     return digest.hexdigest()
 
 
+_DECORATED = re.compile(r"[_@]?((?:func|D)_[0-9A-Fa-f]{8})(?:@\d+)?")
+_COFF_RELOC_BYTES = {0x01: 2, 0x02: 2, 0x06: 4, 0x07: 4, 0x0A: 2, 0x0B: 4, 0x14: 4}  # i386 relocation -> bytes
+
+
+def c_name(symbol: str) -> str:
+    """The name C writes for a PC or Xbox project's symbol: `_func_00011000`, `@func_00011000@8` and
+    `_D_00402034` are func_00011000 and D_00402034 in the source (other names are left as they are)."""
+    m = _DECORATED.fullmatch(symbol)
+    return m.group(1) if m else symbol
+
+
+def coff_prints(data: bytes) -> dict[str, Print]:
+    """object_prints() for an x86 COFF object (PC and Xbox projects: one section per function, as /Gy and the
+    delinker write them): the code with the bytes its relocations fill in zeroed, and the C name of what each
+    relocation refers to."""
+    import struct
+
+    if len(data) < 20:
+        return {}
+    _, count, _, symbols_at, n_symbols, opt_size, _ = struct.unpack_from("<HHIIIHH", data, 0)
+    strings = symbols_at + 18 * n_symbols
+    names: list[str | None] = []
+    funcs: dict[int, str] = {}
+    i = 0
+    while i < n_symbols and symbols_at + 18 * (i + 1) <= len(data):
+        at = symbols_at + 18 * i
+        raw = data[at:at + 8]
+        if raw[:4] == b"\0\0\0\0":
+            off = strings + struct.unpack_from("<I", raw, 4)[0]
+            name = data[off:data.find(b"\0", off)].decode("latin-1")
+        else:
+            name = raw.rstrip(b"\0").decode("latin-1")
+        value, section, typ, cls, aux = struct.unpack_from("<IhHBB", data, at + 8)
+        if section > 0 and value == 0 and cls in (2, 3) and (typ & 0x20 or cls == 2) and not name.startswith("."):
+            funcs.setdefault(section, name)
+        names += [name] + [None] * aux
+        i += 1 + aux
+    out: dict[str, Print] = {}
+    for k in range(count):
+        at = 20 + opt_size + 40 * k
+        size, raw_at, relocs_at, _, n_relocs, _, flags = struct.unpack_from("<IIIIHHI", data, at + 16)
+        if k + 1 not in funcs or not flags & 0x20 or not raw_at:
+            continue
+        code = bytearray(data[raw_at:raw_at + size])
+        rels = []
+        for r in range(n_relocs):
+            off, sym, typ = struct.unpack_from("<IIH", data, relocs_at + 10 * r)
+            for b in range(_COFF_RELOC_BYTES.get(typ, 4)):
+                if off + b < size:
+                    code[off + b] = 0
+            rels.append((off, typ, c_name(names[sym] or "") if sym < len(names) else ""))
+        rels.sort()
+        out[funcs[k + 1]] = Print(_key(bytes(code), [(o, t) for o, t, _ in rels]), [n for _, _, n in rels], size)
+    return out
+
+
 def object_prints(data: bytes) -> dict[str, Print]:
     """Fingerprints of every function an object file defines, by symbol, with whether its code is hand-written
-    assembly where its processor tells that without its console's facts (PowerPC: arch/)."""
+    assembly where its processor tells that without its console's facts (PowerPC: arch/). x86 COFF objects (PC,
+    Xbox) are read by coff_prints()."""
+    if data[:2] == b"\x4c\x01":
+        return coff_prints(data)
     from elftools.elf.elffile import ELFFile
     from elftools.elf.relocation import RelocationSection
 
@@ -484,7 +543,7 @@ class Twins:
     @staticmethod
     def _fork_names(pa: Print, pb: Print, a, b) -> dict[str, str] | None:
         meta_a, meta_b = json.loads(a["meta"] or "{}"), json.loads(b["meta"] or "{}")
-        return renames(pa, pb, meta_a.get("symbol") or a["name"], meta_b.get("symbol") or b["name"])
+        return renames(pa, pb, c_name(meta_a.get("symbol") or a["name"]), c_name(meta_b.get("symbol") or b["name"]))
 
     # ------------------------------------------------------------------ the work
 

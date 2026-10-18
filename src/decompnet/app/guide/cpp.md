@@ -29,6 +29,12 @@ Matching tips
   `get_function` says which fields of `this` the function uses. Field types are what the loads and
   stores say (lwc1: float, lh: s16, a word used as an address: a pointer); the names are yours to give.
 <!-- end -->
+- PC and Xbox projects made from scratch (MSVC) get the same from `get_class`, for structs with member
+  functions too: functions that use `this` (ecx under __thiscall; under LTCG the register the linker chose) as
+  the base of field accesses, grouped by the object they share (a vtable, a global object they're called on,
+  `this` passed on). The brief says "Looks like a member function of ...": write it as one
+  (`int Struct_00011570::func_000115A0(int edx)`), with `struct` for plain data and `class` only when there's a
+  vtable, a constructor/destructor pair or a base class.
 - Member initialisation order in constructors follows declaration order in the class, not the
   initialiser list order.
 - Inlined base-class constructors show up as stores of the base vtable before the derived one.

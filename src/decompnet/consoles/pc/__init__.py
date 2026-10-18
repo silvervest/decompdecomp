@@ -76,6 +76,12 @@ class WindowsPC(Console):
 
         return scratch.data_bytes(fp.root, fp.manifest or {}, addr, length)
 
+    def refresh_project(self, fp, log=print) -> None:
+        """The project's tools/ brought up to the template (scratch.refresh_tools)."""
+        from . import scratch
+
+        scratch.refresh_tools(fp, log=log)
+
     def check_rebuild(self, fp, version: str, log=print) -> dict:
         """The project's `ninja export`: the program linked again with the game's own linker, compared byte for byte."""
         from . import scratch

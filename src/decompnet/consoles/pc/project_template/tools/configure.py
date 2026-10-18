@@ -73,9 +73,11 @@ def linker() -> Path:
 
 
 def main() -> None:
-    units =json.loads(CONFIG.read_text(encoding="utf-8"))["units"]
+    units = json.loads(CONFIG.read_text(encoding="utf-8"))["units"]
     headers = [str(p) for p in files("include", (".h", ".hpp"))]
-    with open("build.ninja", "w", encoding="utf-8") as f:
+    # written aside and put in place whole: a configure that stops half way (a driver it can't read) leaves the
+    # last build.ninja, so ninja runs this again and shows why, instead of missing the rest of the build
+    with open("build.ninja.tmp", "w", encoding="utf-8") as f:
         n = ninja_syntax.Writer(f)
         n.rule("delink", f"{PY} tools/delink.py {CONFIG} {BUILD / 'target'}", restat=True)
         # then the original's names on what it compiled to (C++ mangles them: tools/names.py)
@@ -119,6 +121,7 @@ def main() -> None:
         n.build("build.ninja", "configure", ["tools/configure.py", str(CONFIG), *headers, *harness_files,
                                              *[str(s) for s in files("src", (".c", ".cpp"))]])
         n.default(["prepare"])
+    os.replace("build.ninja.tmp", "build.ninja")
 
     objdiff = {
         "$schema": "https://raw.githubusercontent.com/encounter/objdiff/main/config.schema.json",
@@ -128,7 +131,8 @@ def main() -> None:
                    "base_path": str(BUILD / "src" / "auto" / f"{u}.obj"),
                    "metadata": {"source_path": source_of(u), "complete": False}} for u in units],
     }
-    Path("objdiff.json").write_text(json.dumps(objdiff, indent=2), encoding="utf-8")
+    Path("objdiff.json.tmp").write_text(json.dumps(objdiff, indent=2), encoding="utf-8")
+    os.replace("objdiff.json.tmp", "objdiff.json")
 
 
 if __name__ == "__main__":

@@ -672,24 +672,51 @@ def _run(cmd: list[str], root: Path, what: str, log) -> None:
         raise ForkError(f"{what} failed:\n{tail[-ERROR_TAIL:]}")
 
 
+TEMPLATE_TOOLS = ("configure.py", "delink.py", "names.py", "ltcg.py", "dll2coff.py", "export.py", "ninja_syntax.py")
+SETTINGS = ("MSVC_VERSION", "CL_FLAGS", "LTCG")  # configure.py's per-game settings, kept when it's refreshed
+
+
+def made_here(fp: ForkProject) -> bool:
+    """A PC or Xbox project this app made (its tools/ are the template's)."""
+    from .. import get
+
+    m = fp.manifest or {}
+    return m.get("created") == "from scratch" and get(m.get("platform")).arch == "x86" and \
+        (fp.root / "tools" / "delink.py").is_file()
+
+
+def refresh_tools(fp: ForkProject, log=print, *, force: bool = False) -> list[str]:
+    """Bring a PC or Xbox project's tools/ up to this decompdecomp's template (fixes in the build and the judge
+    reach projects made before them): every template tool that differs is copied in, configure.py with the
+    project's own settings (compiler, flags, LTCG) kept, and configure runs again if anything changed. Returns
+    the tools replaced. `force`: also when the manifest doesn't say the project was made here."""
+    if not force and not made_here(fp):
+        return []
+    changed = []
+    for name in TEMPLATE_TOOLS:
+        src, dst = TEMPLATE / "tools" / name, fp.root / "tools" / name
+        new = src.read_text(encoding="utf-8")
+        old = dst.read_text(encoding="utf-8") if dst.exists() else ""
+        if name == "configure.py" and old:
+            for k in SETTINGS:
+                if (m := re.search(rf"^{k} = .*$", old, re.M)):
+                    line = m.group(0)
+                    new = re.sub(rf"^{k} = .*$", lambda _, line=line: line, new, count=1, flags=re.M)
+        if new != old:
+            dst.write_text(new, encoding="utf-8")
+            changed.append(name)
+    if changed:
+        log(f"updated the project's tools from decompdecomp's template: {', '.join(changed)}")
+        for cmd in (fp.manifest or {}).get("setup", [])[:1]:  # configure again with them
+            fp.run([sys.executable if cmd[0] == "python" else cmd[0], *cmd[1:]], log=log)
+    return changed
+
+
 def check_program(fp: ForkProject, version: str, log=print) -> dict:
     """The project's export (`ninja export`, the template's tools/export.py): the game's program rebuilt with its own
     linker from the matched functions and the rest of the user's copy, compared byte for byte. {"identical",
     "detail", "compiled", "functions"}; a project made before the export existed gets the template's tool first."""
-    tool = fp.root / "tools" / "export.py"
-    if not tool.exists():  # made by an older decompdecomp: the template's export and its ninja rule
-        shutil.copyfile(TEMPLATE / "tools" / "export.py", tool)
-        cfg = fp.root / "tools" / "configure.py"
-        new = (TEMPLATE / "tools" / "configure.py").read_text(encoding="utf-8")
-        old = cfg.read_text(encoding="utf-8")
-        if "def linker()" not in old:  # its settings (compiler, flags, LTCG) kept, the rest the template's
-            keep = {k: m.group(0) for k in ("MSVC_VERSION", "CL_FLAGS", "LTCG")
-                    if (m := re.search(rf"^{k} = .*$", old, re.M))}
-            for k, line in keep.items():
-                new = re.sub(rf"^{k} = .*$", lambda _, line=line: line, new, count=1, flags=re.M)
-            cfg.write_text(new, encoding="utf-8")
-        for cmd in (fp.manifest or {}).get("setup", [])[:1]:  # configure again, for the export rule
-            fp.run([sys.executable if cmd[0] == "python" else cmd[0], *cmd[1:]], log=log)
+    refresh_tools(fp, log=log, force=True)  # a project made by an older decompdecomp gets the export and its ninja rule
     ok, tail = fp.run(["ninja", "export"], log=log, timeout=3600)
     report = fp.root / "build" / version / "export" / "export.json"
     try:

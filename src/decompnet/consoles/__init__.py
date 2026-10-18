@@ -190,6 +190,10 @@ class Console:
         None where the project can't tell."""
         return None
 
+    def refresh_project(self, fp, log=print) -> None:
+        """Before a project's first build in a run of the app: bring what this console wrote into it (its tools/) up
+        to this version's, so fixes reach projects made by older ones."""
+
     # for agents
 
     def asm_reason(self, code: bytes) -> str | None:

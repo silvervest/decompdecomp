@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import toolchains
+from . import ltcg as ltcg_mode
 from . import scratch_pe, xboxkrnl, xdklib, xdvdfs
 from .project import ForkError
 from .scratch_pe import PE, Section
@@ -48,9 +49,10 @@ XDK_COMPILERS = {5849: "7.1"}
 DEFAULT_COMPILER = "7.1"  # for an XDK whose compiler isn't known yet: most Xbox games are from the 7.1 years
 # The template's compiler flags for Xbox games: what the XDK's project templates set for a release build (/G6 for the
 # Pentium III, /arch:SSE, /Gy for a section per function) plus _XBOX, which the XDK's headers expect.
-# shortcut: games built with /GL (link-time code generation: custom register conventions, cross-file inlining) need
-# an LTCG mode, still to come; nothing detects them yet, so /GL is never the default.
+# Games built with /GL (link-time code generation: custom register conventions, cross-file inlining) get the LTCG
+# mode and its flags (forks/ltcg.py). shortcut: nothing detects them yet, so it's an explicit choice.
 CL_FLAGS = ["/nologo", "/c", "/O2", "/G6", "/GF", "/Gy", "/arch:SSE", "/W3", "/D_XBOX"]
+LTCG_CL_FLAGS = ltcg_mode.XBOX_CL_FLAGS
 # Data sections by name. The Xbox linker marks .rdata and .data executable too (and code sections writable), so the
 # flags don't tell code from data: Burnout 3's .rdata, .data and .data1 all carry the executable flag.
 _DATA_NAME = re.compile(r"(?i)^(\.r?data\w*|\.bss|\.tls|\.xtlid|\$\$x\w*|\w+_RD)$")
@@ -343,7 +345,7 @@ def set_aside(xbe: XBE, functions: list[scratch_pe.Function], xdk: Path | None) 
     return {f.addr: hits[f.addr].reason for f in functions if f.addr in hits}
 
 
-def create(root: Path, game: Path, *, compiler: str | None = None, log=print) -> dict:
+def create(root: Path, game: Path, *, compiler: str | None = None, ltcg: bool | None = None, log=print) -> dict:
     """Make the project in `root` (which must not exist yet) and build it once, as scratch_pe does for a PC game:
     Ghidra finds the functions (from the XBE's memory image, ghidra_layout), the XDK's own code is set aside (its
     sections outright, its functions in .text by matching the user's XDK libraries), and the rest is grouped into
@@ -383,10 +385,17 @@ def create(root: Path, game: Path, *, compiler: str | None = None, log=print) ->
     groups |= {f"xdk_{u.removeprefix('text_')}": fns for u, fns in scratch_pe.units(library).items()}
     log(f"{len(functions)} functions, {len(library)} of them the XDK's library code (set aside); "
         f"{info['compiler_why']}: Visual C++ {compiler}")
+    # link-time code generation (forks/ltcg.py): an explicit choice until something detects it
+    if ltcg is None:
+        ltcg = os.environ.get("DECOMP_XBOX_LTCG", "") not in ("", "0")
+    lt = {"cl_flags": LTCG_CL_FLAGS, "prepare": ltcg_mode.prepare, "manifest": {"ltcg": True}} if ltcg else \
+        {"cl_flags": CL_FLAGS}
+    if ltcg:
+        log("link-time code generation: units are built in harness mode once their driver (harness/) calls them")
     return scratch_pe.write_project(
         root, game if is_xbe_file(game) else data, info=info, compiler=compiler, args=args,
         pe=xbe, groups=groups, platform="xbox", suffix=".xbe", what="your copy of the game's program (default.xbe)",
-        cl_flags=CL_FLAGS, set_aside={f.name: aside[f.addr] for f in library}, log=log)
+        set_aside={f.name: aside[f.addr] for f in library}, log=log, **lt)
 
 
 def is_xbe_file(path: Path) -> bool:

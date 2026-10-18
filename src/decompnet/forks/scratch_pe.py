@@ -244,6 +244,27 @@ def _tables(md, pe: PE, start: int, code_end: int, limit: int) -> tuple[int, int
     return code_end, data_end, entries
 
 
+def _whole_instructions(md, pe: PE, start: int, code_end: int, limit: int) -> int:
+    """`code_end` moved past the instruction it cuts, if any: Ghidra's body for a function ending in a tail call
+    (`jmp` to another function) can stop a byte short of the jmp's end, and the cut byte then decodes as garbage
+    on the original's side only (seen in a real Xbox game, against an LTCG harness that matched it)."""
+    at = code_end
+    for ins in _disasm(md, pe.read(start, limit - start), start):
+        if ins.address >= code_end:
+            break
+        at = ins.address + ins.size
+    return max(code_end, min(at, limit))
+
+
+def _mid_code(pe: PE, value: int, starts, start: int, end: int) -> bool:
+    """An immediate that lands inside another function's code: a constant, not an address. Xbox programs load at
+    0x10000, so flag masks like `and edx, 0x70000` fall inside .text (seen in a real Xbox game; the LTCG harness,
+    comparing numbers, matched where objdiff saw a relocation on one side). A real code address in an immediate is
+    a function (a callback) or a label of the function itself."""
+    sec = pe.section_at(value)
+    return sec is not None and sec.code and value not in starts and not start <= value < end
+
+
 def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False) -> list[Function]:
     """Every function's extent, name and relocations, from Ghidra's function list.
 
@@ -268,7 +289,9 @@ def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False) -> list[
         start = starts[i]
         sec = pe.section_at(start)
         limit = min(starts[i + 1] if i + 1 < len(starts) else sec.va + sec.size, sec.va + sec.size)
-        code_end = max(start + 1, min(rows[start].get("end", limit), limit))
+        code_end = _whole_instructions(md, pe, start, max(start + 1, min(rows[start].get("end", limit), limit)), limit)
+        if linker_padding:  # Ghidra's body can run over the linker's int3s into a function it missed
+            code_end = start + max(1, len(pe.read(start, code_end - start).rstrip(b"\xcc")))
         code_end, end, entries = _tables(md, pe, start, code_end, limit)
         gap = pe.read(end, limit - end)
         rest = gap.lstrip(b"\x90").lstrip(b"\xcc\x00")
@@ -322,7 +345,8 @@ def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False) -> list[
                 if op.type == x86.X86_OP_MEM and ins.disp_size == 4 and pe.contains(op.mem.disp & 0xFFFFFFFF):
                     name, addend = symbol(op.mem.disp & 0xFFFFFFFF)
                     fn.relocs.append((at + ins.disp_offset, DIR32, name, addend))
-                elif op.type == x86.X86_OP_IMM and ins.imm_size == 4 and pe.contains(op.imm & 0xFFFFFFFF):
+                elif op.type == x86.X86_OP_IMM and ins.imm_size == 4 and pe.contains(op.imm & 0xFFFFFFFF) \
+                        and not _mid_code(pe, op.imm & 0xFFFFFFFF, names, start, end):
                     name, addend = symbol(op.imm & 0xFFFFFFFF)
                     fn.relocs.append((at + ins.imm_offset, DIR32, name, addend))
         for off in entries:
@@ -472,12 +496,14 @@ def create(root: Path, game: Path, *, compiler: str | None = None, log=print) ->
 def write_project(root: Path, game: Path | bytes, *, info: dict, compiler: str, args: list[str], pe: PE,
                   groups: dict[str, list[Function]], platform: str = "win32", suffix: str = ".exe",
                   what: str = "your copy of the game's program (.exe)", cl_flags: list[str] | None = None,
-                  set_aside: dict[str, str] | None = None, log=print) -> dict:
+                  set_aside: dict[str, str] | None = None, prepare=None, manifest: dict | None = None,
+                  log=print) -> dict:
     """Write the project for analysed functions (the template, the user's program in orig/, functions.json, a source
     file per unit, the manifest) and build it once. Shared by PC and Xbox (scratch_xbe), which differ in the
     program's format, not in the project. `game`: the program's file, or its bytes (an XBE read off a disc image);
     `cl_flags` replace the template's compiler flags; `set_aside`: symbol -> why agents don't get it (library
-    code), kept in config/<version>/set_aside.json and read when the project is measured."""
+    code), kept in config/<version>/set_aside.json and read when the project is measured; `prepare(root, units)`
+    adds a mode's files and settings before the first build and `manifest` its keys (an Xbox LTCG project, ltcg.py)."""
     version = info["id"]
     shutil.copytree(TEMPLATE, root)
     (root / "orig").mkdir()
@@ -512,6 +538,8 @@ def write_project(root: Path, game: Path | bytes, *, info: dict, compiler: str, 
                        f"0x{fns[-1].addr + fns[-1].size:08X}, found by Ghidra. */\n#include \"common.h\"\n",
                        encoding="utf-8")
     log(f"{len(groups)} source files for agents to write into")
+    if prepare is not None:  # a mode's own files and settings before the first build (forks/ltcg.py)
+        prepare(root, list(groups))
 
     setup = [[sys.executable, "tools/configure.py", version, *args], ["ninja", "prepare"]]
     for cmd in setup:
@@ -523,7 +551,7 @@ def write_project(root: Path, game: Path | bytes, *, info: dict, compiler: str, 
         "created": "from scratch", "platform": platform, "version": version, "compiler": f"MSVC/{compiler}",
         "game": {"what": what, "path": f"orig/{version}{suffix}", "sha1": info["sha1"]},
         "setup": [["python", "tools/configure.py", version, *args], ["ninja", "prepare"]],
-        **({"set_aside": f"config/{version}/set_aside.json"} if set_aside else {}),
+        **({"set_aside": f"config/{version}/set_aside.json"} if set_aside else {}), **(manifest or {}),
     }, indent=2), encoding="utf-8")
     (root / ".gitignore").write_text("# made from your copy of the game, or by the build\norig/\nbuild/\nbuild.ninja\n"
                                      ".ninja_*\nobjdiff.json\n__pycache__/\n.decomp-wtf/\n", encoding="utf-8")

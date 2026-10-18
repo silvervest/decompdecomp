@@ -91,6 +91,12 @@ class FunctionDiff:
     def literals_note(self) -> str:
         if not self.literals:
             return ""
+        if all(isinstance(m, MappingConflict) for m in self.literals):  # an LTCG unit's address check
+            listing = "\n".join(f"- {m.describe()}" for m in self.literals[:6])
+            return ("NOT A MATCH YET: every instruction matches, but your code refers to other things than the "
+                    f"original's (one original address paired with two of yours, or the other way round):\n{listing}\n"
+                    "Use the same global or callee where the original does (in the source, or in the driver and "
+                    "stand-ins).")
         listing = "\n".join(f"- {m.describe()}" for m in self.literals[:6])
         return ("NOT A MATCH YET: every instruction matches, but constants it loads differ from the original's:\n"
                 f"{listing}\nWrite the literal with the original's value (float vs double, the exact digits).")
@@ -103,6 +109,30 @@ class FunctionDiff:
 
         return render_rows(self.rows, context, max_rows, legend="markers: |=different instruction i=operand differs "
                            "<=missing (target only) >=extra (yours only)")
+
+
+@dataclass
+class MappingConflict:
+    """A 100% function whose references don't map one to one onto the original's (tools/dll2coff.py, LTCG units):
+    objdiff, as decompdecomp runs it, doesn't compare what relocations point at, so swapped or split globals and
+    callees would pass. Kept with the literal mismatches, the other '100% but not a match' finding."""
+
+    text: str
+
+    def describe(self) -> str:
+        return self.text
+
+
+def mapping_conflicts(base: Path | None, symbol: str | None) -> list[MappingConflict]:
+    """The address mapping check dll2coff wrote next to an LTCG unit's object (<object>.ltcg.json), for a function."""
+    if base is None or symbol is None:
+        return []
+    side = base.with_suffix(".ltcg.json")
+    try:
+        found = json.loads(side.read_text(encoding="utf-8")).get("functions", {}).get(symbol) or {}
+    except (OSError, ValueError):
+        return []
+    return [MappingConflict(c) for c in found.get("conflicts", [])]
 
 
 def _sym(obj: dict | None, name: str) -> dict | None:
@@ -194,5 +224,6 @@ def diff(target: Path | None, base: Path | None, symbol: str | None, cwd: Path, 
                 insns.append((at, ins["formatted"].split(None, 1)[0]))
             at += int(ins.get("size") or 4)
         wrong = literals.mismatches(target, base, symbol, insns)
+        wrong += mapping_conflicts(base, symbol)
     return FunctionDiff(symbol, float(pct) if pct is not None else None, rows, int(left.get("size", 0)), scores, order, ops,
                         renamed, wrong)

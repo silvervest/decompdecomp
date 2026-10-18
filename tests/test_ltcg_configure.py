@@ -82,16 +82,21 @@ def test_objects_depend_on_the_project_files_the_compiler_includes_and_nothing_e
     sdk = tmp_path / "sdk"
     sdk.mkdir()
     (sdk / "xtl.h").write_text("")
+    (root / "harness" / "common").mkdir()
+    (root / "harness" / "common" / "conv.h").write_text("")
+    # a file found by the including file's own folder: wibo shows it by the host's / as drive Z:
+    local = ("z:" + str(root).replace("/", "\\") if sys.platform != "win32" else str(root)) + "\\harness\\common/conv.h"
     fake = tmp_path / "cl.py"
     fake.write_text("import sys\nprint('u.drv.cpp')\nprint('Note: including file: include\\\\core/maths.h')\n"
                     f"print('Note: including file:  {sdk.as_posix()}\\\\xtl.h')\n"
+                    f"print('Note: including file: ' + {local!r})\n"
                     "print('Note: including file:   harness/../src/auto/w.cpp')\nprint('warning C4100: x')\n"
                     "sys.exit(int(sys.argv[1]))\n")
     out = "build/v/ltcg/u/01_u_drv.obj"
     res = subprocess.run([sys.executable, "tools/cldeps.py", out, "--", sys.executable, str(fake), "0"], cwd=root,
                          capture_output=True, text=True)
     assert res.returncode == 0 and res.stdout.splitlines() == ["u.drv.cpp", "warning C4100: x"]
-    assert (root / f"{out}.d").read_text() == f"{out}: include/core/maths.h src/auto/w.cpp\n"
+    assert (root / f"{out}.d").read_text() == f"{out}: include/core/maths.h harness/common/conv.h src/auto/w.cpp\n"
     (root / f"{out}.d").unlink()
     res = subprocess.run([sys.executable, "tools/cldeps.py", out, "--", sys.executable, str(fake), "2"], cwd=root,
                          capture_output=True, text=True)

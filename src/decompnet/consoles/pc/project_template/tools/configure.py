@@ -81,8 +81,9 @@ def main() -> None:
         n = ninja_syntax.Writer(f)
         n.rule("delink", f"{PY} tools/delink.py {CONFIG} {BUILD / 'target'}", restat=True)
         # then the original's names on what it compiled to (C++ mangles them: tools/names.py)
-        n.rule("cl", f'{SH}{WRAP}"{CL}" {q(CL_FLAGS)} /Iinclude "/I{INCLUDE}" $cflags /Fo$out $in'
-               f' && {PY} tools/names.py {CONFIG} $out')
+        # the headers it reads are its dependencies (tools/cldeps.py): editing one rebuilds only what includes it
+        n.rule("cl", f'{SH}{PY} tools/cldeps.py $out -- {WRAP}"{CL}" {q(CL_FLAGS)} /Iinclude "/I{INCLUDE}" $cflags'
+               f' /showIncludes /Fo$out $in && {PY} tools/names.py {CONFIG} $out', deps="gcc", depfile="$out.d")
         n.rule("configure", f"{PY} tools/configure.py {q(sys.argv[1:])}", generator=True)
 
         targets = [str(BUILD / "target" / f"{u}.obj") for u in units]
@@ -106,7 +107,7 @@ def main() -> None:
             if src.parent == Path("src") / "auto" and src.stem in harness_units:
                 continue
             obj = BUILD / src.with_suffix(".obj")
-            n.build(str(obj), "cl", str(src), implicit=[*headers, str(CONFIG), "tools/names.py"])
+            n.build(str(obj), "cl", str(src), implicit=[str(CONFIG), "tools/names.py", "tools/cldeps.py"])
             objs.append(str(obj))
         n.build("all_source", "phony", objs)
         n.build("prepare", "phony", [*targets, *objs])

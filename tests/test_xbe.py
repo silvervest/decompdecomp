@@ -96,9 +96,25 @@ def test_the_pc_analysis_finds_the_functions_and_their_relocations():
     assert fns[HELPER].relocs == [(2, DIR32, "__imp__KeQueryPerformanceCounter", 0), (8, DIR32, data, 0)]
     assert fns[PUSHES].relocs == [(1, DIR32, data, 0), (6, REL32, helper, 0), (12, REL32, f"_func_{ENTRY:08X}", 0)]
     assert fns[PUSHES].size == 0x10
-    # analyse() counts only Visual C++ 6's 0x90 padding as part of a function, so the int3 padding between these
-    # leaves gaps and each function is a unit of its own (to revisit with real XDK-built code)
-    assert set(scratch_pe.units(list(fns.values()))) == {f"text_{a:08X}" for a in (ENTRY, HELPER, PUSHES)}
+
+
+def test_visual_cpp_7_int3_padding_keeps_neighbours_in_one_source_file():
+    xbe = scratch_xbe.read_xbe(demo.xbe())
+    fns = scratch_pe.analyse(xbe, _ghidra_rows(ENTRY, HELPER, PUSHES), linker_padding=True)
+    # the int3 run is the linker's, so it isn't in the function's section (nor delinked), only its pad
+    assert [(f.addr, f.size, f.pad) for f in fns] == [(ENTRY, 0x16, 0x0A), (HELPER, 0x0D, 0x03), (PUSHES, 0x10, 0)]
+    assert list(scratch_pe.units(fns)) == [f"text_{ENTRY:08X}"]
+
+
+def test_visual_cpp_6_keeps_its_nop_padding_and_splits_at_int3_gaps():
+    data = bytearray(demo.xbe())
+    at = demo.TEXT - demo.BASE
+    data[at + 0x16:at + 0x20] = b"\x90" * 0x0A  # the compiler's nops after entry; helper keeps the linker's int3s
+    xbe = scratch_xbe.read_xbe(bytes(data))
+    fns = scratch_pe.analyse(xbe, _ghidra_rows(ENTRY, HELPER, PUSHES))
+    assert [(f.addr, f.size, f.pad) for f in fns] == [(ENTRY, 0x20, 0), (HELPER, 0x0D, 0), (PUSHES, 0x10, 0)]
+    # without linker padding an int3 gap is where one object file ended: a new source file starts after it
+    assert list(scratch_pe.units(fns)) == [f"text_{ENTRY:08X}", f"text_{PUSHES:08X}"]
 
 
 def test_code_ghidra_missed_becomes_a_function_of_its_own():

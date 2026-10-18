@@ -237,6 +237,7 @@ class Function:
     size: int
     name: str  # the symbol, decorated as MSVC decorates the C name
     relocs: list[tuple[int, int, str | None, int]] = field(default_factory=list)  # (offset, type, symbol, addend)
+    pad: int = 0  # int3 bytes the linker put after it (Visual C++ 7): not in its section, but no gap between files
 
 
 def decorate(name: str, convention: str, purge: int, params: int) -> str:
@@ -288,8 +289,15 @@ def _tables(md, pe: PE, start: int, code_end: int, limit: int) -> tuple[int, int
     return code_end, data_end, entries
 
 
-def analyse(pe: PE, found: list[dict]) -> list[Function]:
-    """Every function's extent, name and relocations, from Ghidra's function list."""
+def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False) -> list[Function]:
+    """Every function's extent, name and relocations, from Ghidra's function list.
+
+    Visual C++ 6 pads a function's own section with nops (0x90), so they're part of the function. From Visual C++ 7
+    on (Xbox games, PC games of 2002 on) the compiler pads nothing and the linker fills the space up to the next
+    function's 16-byte boundary with int3 (0xCC). `linker_padding` (for those programs) records that run as the
+    function's `pad`: the compiled section doesn't hold it, so it isn't delinked, but units() doesn't take it for
+    the gap between two object files either (with /Gy every function has one). Multi-byte nops inside a function
+    (`lea ecx, [ecx]` before a loop) are code, and Ghidra's extent already covers them."""
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
     md.detail = True
     rows: dict[int, dict] = {}
@@ -300,7 +308,7 @@ def analyse(pe: PE, found: list[dict]) -> list[Function]:
         rows[r["entry"]] = r
     starts = sorted(rows)
     i = 0
-    extents: dict[int, tuple[int, int, list[int]]] = {}  # start -> (code end, end, jump table entries)
+    extents: dict[int, tuple[int, int, list[int], int]] = {}  # start -> (code end, end, jump table entries, pad)
     while i < len(starts):
         start = starts[i]
         sec = pe.section_at(start)
@@ -317,9 +325,12 @@ def analyse(pe: PE, found: list[dict]) -> list[Function]:
             starts.insert(i + 1, missed)
             limit = missed
             gap = pe.read(end, limit - end)
+        pad = 0
         if gap and gap.strip(b"\x90") == b"":
             end = limit  # Visual C++ 6's own padding: part of the compiled function's section too
-        extents[start] = (code_end, end, entries)
+        elif gap and linker_padding and gap.strip(b"\xcc") == b"":
+            pad = len(gap)
+        extents[start] = (code_end, end, entries, pad)
         i += 1
 
     names = {}
@@ -331,8 +342,8 @@ def analyse(pe: PE, found: list[dict]) -> list[Function]:
 
     out = []
     for start in starts:
-        code_end, end, entries = extents[start]
-        fn = Function(start, end - start, names[start])
+        code_end, end, entries, pad = extents[start]
+        fn = Function(start, end - start, names[start], pad=pad)
 
         def symbol(addr: int) -> tuple[str | None, int]:
             if start <= addr < end:  # noqa: B023  called within this pass of the loop
@@ -367,11 +378,12 @@ def analyse(pe: PE, found: list[dict]) -> list[Function]:
 
 
 def units(functions: list[Function]) -> dict[str, list[Function]]:
-    """Source files: runs of neighbouring functions of about UNIT_BYTES each."""
+    """Source files: runs of neighbouring functions of about UNIT_BYTES each. A gap between two functions (other
+    than the linker's padding, `pad`) is where one object file ended, so a source file never spans one."""
     out: dict[str, list[Function]] = {}
     cur: list[Function] = []
     for fn in functions:
-        if cur and (fn.addr + fn.size - cur[0].addr > UNIT_BYTES or fn.addr != cur[-1].addr + cur[-1].size):
+        if cur and (fn.addr + fn.size - cur[0].addr > UNIT_BYTES or fn.addr != cur[-1].addr + cur[-1].size + cur[-1].pad):
             out[f"text_{cur[0].addr:08X}"] = cur
             cur = []
         cur.append(fn)
@@ -521,7 +533,7 @@ def create(root: Path, game: Path, *, compiler: str | None = None, log=print) ->
                "to 7.1 for now" if newer else "a program that is packed or protected (some games' DRM wraps their code) "
                "shows none until it's unpacked")
         raise ForkError(f"Ghidra found no functions in this program: {why}.")
-    functions = analyse(pe, found)
+    functions = analyse(pe, found, linker_padding=compiler != "6.0")
     groups = units(functions)
     log(f"{len(functions)} functions; {info['compiler_why']}: Visual C++ {compiler}")
 

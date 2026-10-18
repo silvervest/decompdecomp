@@ -64,6 +64,39 @@ def test_an_unreadable_harness_link_line_says_where_and_keeps_the_last_build_fil
     assert (root / "build.ninja").read_text() == before
 
 
+def test_objects_depend_on_the_project_files_the_compiler_includes_and_nothing_else(tmp_path):
+    root = _project(tmp_path)
+    _entry(root)
+    assert _configure(root).returncode == 0
+    ninja = (root / "build.ninja").read_text().replace("$\n", "")
+    for rule in ("cl", "ltcg_cc"):
+        block = ninja.split(f"rule {rule}\n", 1)[1].split("\nrule ", 1)[0]
+        assert "tools/cldeps.py $out --" in block and "/showIncludes" in block
+        assert "deps = gcc" in block and "depfile = $out.d" in block
+    assert "include/" not in ninja.split("build build/v/ltcg/u/01_u_drv.obj", 1)[1].split("\n", 1)[0]
+    # a stand-in compiler that reports includes as Visual C++ does: inside the project, and an SDK's outside it
+    (root / "include" / "core").mkdir()
+    (root / "include" / "core" / "maths.h").write_text("")
+    (root / "src" / "auto" / "w.cpp").write_text("")
+    sdk = tmp_path / "sdk"
+    sdk.mkdir()
+    (sdk / "xtl.h").write_text("")
+    fake = tmp_path / "cl.py"
+    fake.write_text("import sys\nprint('u.drv.cpp')\nprint('Note: including file: include\\\\core/maths.h')\n"
+                    f"print('Note: including file:  {sdk.as_posix()}\\\\xtl.h')\n"
+                    "print('Note: including file:   harness/../src/auto/w.cpp')\nprint('warning C4100: x')\n"
+                    "sys.exit(int(sys.argv[1]))\n")
+    out = "build/v/ltcg/u/01_u_drv.obj"
+    res = subprocess.run([sys.executable, "tools/cldeps.py", out, "--", sys.executable, str(fake), "0"], cwd=root,
+                         capture_output=True, text=True)
+    assert res.returncode == 0 and res.stdout.splitlines() == ["u.drv.cpp", "warning C4100: x"]
+    assert (root / f"{out}.d").read_text() == f"{out}: include/core/maths.h src/auto/w.cpp\n"
+    (root / f"{out}.d").unlink()
+    res = subprocess.run([sys.executable, "tools/cldeps.py", out, "--", sys.executable, str(fake), "2"], cwd=root,
+                         capture_output=True, text=True)
+    assert res.returncode == 2 and not (root / f"{out}.d").exists()
+
+
 def test_projects_made_before_a_template_fix_get_the_fixed_tools_with_their_settings(tmp_path):
     root = _project(tmp_path)
     cfg = root / "tools" / "configure.py"

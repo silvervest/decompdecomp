@@ -88,6 +88,7 @@ def code_sections(obj: bytes):
         return
     strings = symbols_at + 18 * n_symbols
     names: dict[int, str] = {}
+    inside: dict[int, dict[int, str]] = {}  # section -> offset -> the function starting there
     i = 0
     while i < n_symbols and symbols_at + 18 * (i + 1) <= len(obj):
         at = symbols_at + 18 * i
@@ -100,6 +101,10 @@ def code_sections(obj: bytes):
         value, section, typ, cls, aux = struct.unpack_from("<IhHBB", obj, at + 8)
         if section > 0 and value == 0 and cls in (2, 3) and (typ & 0x20 or cls == 2):
             names.setdefault(section, name)  # the function the section holds (the first symbol at its start)
+        # public symbols, or static ones typed as functions: an assembler's other statics are labels inside one
+        # function (the C runtime's memmove has a dozen)
+        if section > 0 and (cls == 2 or (cls == 3 and typ & 0x20)) and not aux and not name.startswith((".", "$")):
+            inside.setdefault(section, {}).setdefault(value, name)
         i += 1 + aux
     for k in range(count):
         at = 20 + opt_size + 40 * k
@@ -113,6 +118,13 @@ def code_sections(obj: bytes):
             for b in range(RELOC_BYTES.get(typ, 4)):
                 if va + b < size:
                     mask[va + b] = 1
+        cuts = sorted((o, n) for o, n in inside.get(k + 1, {}).items() if 0 <= o < size)
+        if len(cuts) > 1 and cuts[0][0] == 0:
+            # an assembly object (the C runtime's SEH helpers): one section holding several functions, each its own
+            # symbol; matched whole, it would take its neighbours along
+            for (o, n), nxt in zip(cuts, [c[0] for c in cuts[1:]] + [size]):
+                yield n, body[o:nxt], bytes(mask[o:nxt])
+            continue
         yield names.get(k + 1, f"{obj[at:at + 8].rstrip(b'\0').decode('latin-1')}#{k + 1}"), body, bytes(mask)
 
 
@@ -151,6 +163,38 @@ def libraries(lib_dir: Path, library_names: list[str]) -> list[Path]:
         if name in present and present[name] not in out and not name.endswith("ltcg.lib"):
             out.append(present[name])
     return out
+
+
+def match_small(functions: list[tuple[int, bytes]], libs: list[Path], known: dict[int, LibraryFunction]) -> \
+        dict[int, LibraryFunction]:
+    """Address -> library function for the small ones match() can't place (shorter than MIN_BYTES, or without a
+    fixed run long enough to search by): each of `functions` ((address, its exact bytes)) whose bytes are a whole
+    library function, relocated fields aside, and that sits next to library code already found (`known`). A few
+    bytes such as `xor eax, eax; ret` fit game code just as well; the linker puts library objects together, after
+    the game's, so a neighbour that is library code is what tells them apart."""
+    small: dict[int, list[tuple[bytes, bytes, str, str, str]]] = {}
+    for lib in libs:
+        for member, obj in members(lib.read_bytes()):
+            for symbol, body, mask in code_sections(obj):
+                if len(body) < MIN_BYTES or len(_pattern(body, mask)[1]) < ANCHOR:
+                    small.setdefault(len(body), []).append((body, mask, symbol, lib.name, Path(member).name))
+    ordered = sorted(functions)
+    found: dict[int, LibraryFunction] = {}
+    for _ in range(16):  # a run of small helpers is reached from its library neighbour one at a time
+        before = len(found)
+        for k, (addr, code) in enumerate(ordered):
+            if addr in known or addr in found or len(code) not in small:
+                continue
+            near = [ordered[j][0] for j in (k - 1, k + 1) if 0 <= j < len(ordered)]
+            if not any(a in known or a in found for a in near):
+                continue
+            for body, mask, symbol, lib, member in small[len(code)]:
+                if all(m or a == b for a, b, m in zip(code, body, mask)):
+                    found[addr] = LibraryFunction(addr, len(body), symbol, lib, member)
+                    break
+        if len(found) == before:
+            break
+    return found
 
 
 def match(regions: list[tuple[int, bytes]], libs: list[Path], min_bytes: int = MIN_BYTES) -> dict[int, LibraryFunction]:

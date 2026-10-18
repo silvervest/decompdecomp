@@ -224,14 +224,16 @@ def test_ghidra_finds_xbe_functions_without_an_xbe_loader():
     assert [f.addr for f in scratch_pe.analyse(xbe, rows, linker_padding=True)] == [ENTRY, HELPER, PUSHES]
 
 
-def _coff(name: str, code: bytes, relocs: list[int], machine: int = 0x14C) -> bytes:
-    """A COFF object with one code section holding `name` (DIR32 relocations at `relocs`), as /Gy writes them."""
+def _coff(name: str, code: bytes, relocs: list[int], machine: int = 0x14C, more: tuple = ()) -> bytes:
+    """A COFF object with one code section holding `name` (DIR32 relocations at `relocs`), as /Gy writes them;
+    `more`: (name, offset) of further functions in the same section, as an assembler writes them."""
     import struct
 
     body = code + b"".join(struct.pack("<IIH", at, 1, 6) for at in relocs)
-    head = struct.pack("<HHIIIHH", machine, 1, 0, 20 + 40 + len(body), 2, 0, 0)
+    head = struct.pack("<HHIIIHH", machine, 1, 0, 20 + 40 + len(body), 2 + len(more), 0, 0)
     section = struct.pack("<8sIIIIIIHHI", b".text", 0, 0, len(code), 60, 60 + len(code), 0, len(relocs), 0, 0x60500020)
     symbols = struct.pack("<8sIhHBB", name.encode().ljust(8, b"\0"), 0, 1, 0x20, 2, 0)
+    symbols += b"".join(struct.pack("<8sIhHBB", n.encode().ljust(8, b"\0"), at, 1, 0, 2, 0) for n, at in more)
     symbols += struct.pack("<8sIhHBB", b"_D", 0, 0, 0, 2, 0)
     return head + section + body + symbols + struct.pack("<I", 4)
 
@@ -323,6 +325,68 @@ def test_vtables_and_tail_jumps_seed_ghidra_but_a_lone_word_does_not():
     # the entry, the vtable's two methods, and the function the entry tail-jumps to; not the lone word's target
     assert scratch_xbe.function_starts(pe) == [0x11000, 0x11010, 0x11020, 0x11040]
     assert {0x11010, 0x11020, 0x11030} <= scratch_pe.referenced(pe)
+
+
+def test_library_functions_split_what_ghidra_merged_and_drop_its_starts_inside_them():
+    lib = {0x11000: xdklib.LibraryFunction(0x11000, 0x30, "_a", "libcmt.lib", "a.obj"),
+           0x11030: xdklib.LibraryFunction(0x11030, 0x10, "_b", "libcmt.lib", "b.obj")}
+    rows = [_row(0x11000, 0x11040), _row(0x11010, 0x11020), _row(0x11050, 0x11060)]
+    out = scratch_xbe.with_library_code(rows, lib)
+    assert [(r["entry"], r["end"], r.get("exact", False)) for r in out] == [
+        (0x11000, 0x11030, True), (0x11030, 0x11040, True), (0x11050, 0x11060, False)]
+    assert out[1]["source"] == "LIBRARY"
+    # analyse() keeps a library function's extent even where its own flow would say otherwise
+    text = bytes.fromhex("c3").ljust(0x30, b"\x90") + bytes.fromhex("33c0c3").ljust(0x10, b"\xcc") + b"\xcc" * 0x10
+    fns = scratch_pe.analyse(_program(text + b"\xc3"), out, linker_padding=True)
+    assert [(f.addr, f.size) for f in fns][:2] == [(0x11000, 0x30), (0x11030, 0x10)]
+
+
+def test_an_assembly_object_holding_several_functions_is_matched_function_by_function(tmp_path):
+    one, two = bytes(range(0x40, 0x54)) + b"\xc3", bytes(range(0x60, 0x74)) + b"\xc3"  # 21 bytes each
+    lib = tmp_path / "libcmt.lib"
+    lib.write_bytes(_archive([("seh.obj", _coff("_one", one + two, [], more=(("_two", len(one)),)))]))
+    assert [(s, len(b)) for s, b, _ in xdklib.code_sections(_coff("_one", one + two, [], more=(("_two", 21),)))] == \
+        [("_one", 21), ("_two", 21)]
+    # the program links only the second one: matched whole, the section wouldn't fit anywhere
+    found = xdklib.match([(0x20000, b"\xcc" * 16 + two + b"\xcc" * 11)], [lib])
+    assert [(a, h.symbol, h.size) for a, h in found.items()] == [(0x20010, "_two", 21)]
+
+
+def test_small_library_functions_are_matched_by_their_whole_bytes_next_to_library_code(tmp_path):
+    tiny = bytes.fromhex("33c0c3")  # xor eax, eax; ret: too short to search for
+    lib = tmp_path / "libcmt.lib"
+    lib.write_bytes(_archive([("tiny.obj", _coff("_tiny", tiny, []))]))
+    known = {0x20000: xdklib.LibraryFunction(0x20000, 0x20, "_big", "libcmt.lib", "big.obj")}
+    functions = [(0x10000, tiny), (0x10010, b"\xc3"), (0x20000, bytes(0x20)), (0x20020, tiny), (0x20030, tiny + b"\x90")]
+    found = xdklib.match_small(functions, [lib], known)
+    # next to library code, it's the library's; the same bytes among the game's functions stay the game's
+    assert list(found) == [0x20020] and found[0x20020].symbol == "_tiny"
+
+
+def test_a_kernel_import_stub_is_set_aside_as_library_code():
+    import struct
+
+    data = bytearray(demo.xbe())
+    at = PUSHES - demo.BASE
+    data[at:at + 16] = (b"\xff\x25" + struct.pack("<I", demo.RDATA)).ljust(16, b"\xcc")
+    xbe = scratch_xbe.read_xbe(bytes(data))
+    fns = [scratch_pe.Function(HELPER, 0x0D, "_h"), scratch_pe.Function(PUSHES, 6, "_stub")]
+    assert scratch_xbe.set_aside(xbe, fns, {}, []) == {
+        PUSHES: "XDK library code: the linker's stub for the kernel import KeQueryPerformanceCounter"}
+
+
+def test_twins_fingerprint_coff_objects_and_speak_in_the_names_the_c_writes():
+    from decompnet.app import twins
+
+    # mov eax, [global]; ret -- the same code reading two different globals: twins
+    a = twins.object_prints(_coff("_fa", bytes.fromhex("a178563412c3"), [1]))
+    b = twins.object_prints(_coff("_fb", bytes.fromhex("a1efbeaddec3"), [1]))
+    other = twins.object_prints(_coff("_fc", bytes.fromhex("a178563412c20400"), [1]))
+    assert list(a) == ["_fa"] and a["_fa"].key == b["_fb"].key
+    assert a["_fa"].key != other["_fc"].key and a["_fa"].size == 6
+    assert a["_fa"].refs == ["_D"]  # what the relocation names (the helper's one data symbol)
+    assert [twins.c_name(s) for s in ("_func_00011000", "@func_00011000@8", "_D_00402034", "__imp__Sleep@4")] == [
+        "func_00011000", "func_00011000", "D_00402034", "__imp__Sleep@4"]
 
 
 def test_xdk_sections_are_set_aside_by_name():

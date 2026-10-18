@@ -359,6 +359,8 @@ def referenced(pe: PE) -> set[int]:
 def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False) -> list[Function]:
     """Every function's extent, name and relocations, from Ghidra's function list.
 
+    A row with `exact` (library code matched byte for byte, scratch_xbe) keeps its extent as given.
+
     Visual C++ 6 pads a function's own section with nops (0x90), so they're part of the function. From Visual C++ 7
     on (Xbox games, PC games of 2002 on) the compiler pads nothing and the linker fills the space up to the next
     function's 16-byte boundary with int3 (0xCC). `linker_padding` (for those programs) records that run as the
@@ -380,7 +382,8 @@ def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False) -> list[
         """A start nothing vouches for: not the entry point, not named, no call or pointer to it, and not after
         padding (padding only ever comes between functions)."""
         r, sec = rows[addr], pe.section_at(addr)
-        return addr != pe.entry and r.get("source") not in ("IMPORTED", "USER_DEFINED") and addr not in refs and \
+        return addr != pe.entry and r.get("source") not in ("IMPORTED", "USER_DEFINED", "LIBRARY") and \
+            addr not in refs and \
             addr > sec.va and pe.read(addr - 1, 1) not in (b"\xcc", b"\x90")
 
     i = 0
@@ -396,8 +399,13 @@ def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False) -> list[
                 break
             del rows[starts.pop(i + 1)]
         limit = min(starts[i + 1] if i + 1 < len(starts) else sec.va + sec.size, sec.va + sec.size)
-        code_end = max(start + 1, min(rows[start].get("end", limit), limit), flow_end(md, pe, start, limit))
-        code_end, end, entries = _tables(md, pe, start, code_end, limit)
+        if rows[start].get("exact"):  # a library function: its size is the library object's, not a guess
+            code_end, end, entries = _tables(md, pe, start, min(rows[start]["end"], limit), limit)
+            end = min(rows[start]["end"], limit)
+            code_end = min(code_end, end)
+        else:
+            code_end = max(start + 1, min(rows[start].get("end", limit), limit), flow_end(md, pe, start, limit))
+            code_end, end, entries = _tables(md, pe, start, code_end, limit)
         gap = pe.read(end, limit - end)
         rest = gap.lstrip(b"\x90").lstrip(b"\xcc\x00")
         if rest and not rest.strip(b"\x90\xcc\x00") == b"":

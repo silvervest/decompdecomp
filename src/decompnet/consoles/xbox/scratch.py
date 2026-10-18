@@ -20,6 +20,7 @@ the [msvc] pack's Visual C++ 7.1 (the XDK's own compiler) against the headers of
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import os
 import re
@@ -364,15 +365,50 @@ def tool_args(log=lambda *_: None) -> list[str]:
     return args
 
 
-def set_aside(xbe: XBE, functions: list[scratch_pe.Function], xdk: Path | None) -> dict[int, str]:
-    """Address -> why, for the analysed functions that are the XDK's library code rather than the game's: the ones
-    the user's own XDK libraries match byte for byte (xdklib). Nothing without an XDK folder."""
+def library_code(xbe: XBE, xdk: Path | None) -> tuple[dict[int, xdklib.LibraryFunction], list[Path]]:
+    """(address -> library function, the libraries matched): the XDK's own functions in the code sections that
+    aren't set aside whole, as the user's own XDK libraries match them byte for byte (xdklib). Nothing without an
+    XDK folder."""
     if xdk is None:
-        return {}
+        return {}, []
     skip = xdklib.library_sections([s.name for s in xbe.sections], [lib.name for lib in xbe.libraries])
     regions = [(s.va, xbe.data[s.offset:s.offset + s.size]) for s in xbe.sections if s.code and s.name not in skip]
-    hits = xdklib.match(regions, xdklib.libraries(xdk / "lib", [lib.name for lib in xbe.libraries]))
-    return {f.addr: hits[f.addr].reason for f in functions if f.addr in hits}
+    libs = xdklib.libraries(xdk / "lib", [lib.name for lib in xbe.libraries])
+    return xdklib.match(regions, libs), libs
+
+
+def with_library_code(found: list[dict], hits: dict[int, xdklib.LibraryFunction]) -> list[dict]:
+    """Ghidra's rows with every library function found at its exact extent (`exact`, which analyse() keeps): a
+    library function Ghidra merged with its neighbour is split at its end, one it missed is added, and Ghidra's
+    starts inside one (labels in the C runtime's assembly) are dropped."""
+    inside = sorted((a, a + h.size) for a, h in hits.items())
+    rows = {}
+    for r in found:
+        k = bisect.bisect_right(inside, (r["entry"], 1 << 32)) - 1
+        if k >= 0 and inside[k][0] < r["entry"] < inside[k][1]:
+            continue
+        rows[r["entry"]] = r
+    for a, h in hits.items():
+        base = rows.get(a, {"name": "", "source": "LIBRARY", "convention": "__cdecl", "purge": 0, "params": 0})
+        source = base.get("source") if base.get("source") in ("IMPORTED", "USER_DEFINED") else "LIBRARY"
+        rows[a] = {**base, "entry": a, "end": a + h.size, "source": source, "exact": True}
+    return sorted(rows.values(), key=lambda r: r["entry"])
+
+
+def set_aside(xbe: XBE, functions: list[scratch_pe.Function], hits: dict[int, xdklib.LibraryFunction],
+              libs: list[Path]) -> dict[int, str]:
+    """Address -> why, for the analysed functions that are the XDK's library code rather than the game's: the
+    library functions found by their bytes (`hits`), and the small ones only their exact bytes and a library
+    neighbour place (xdklib.match_small)."""
+    small = xdklib.match_small([(f.addr, xbe.read(f.addr, f.size)) for f in functions], libs, hits)
+    every = {a: h.reason for a, h in (hits | small).items()}
+    for f in functions:
+        # `jmp [slot]`: the stub the linker makes for a kernel import (xboxkrnl.lib holds no code to match it by)
+        code = xbe.read(f.addr, f.size)
+        if f.addr not in every and len(code) == 6 and code[:2] == b"\xff\x25" and \
+                (slot := struct.unpack_from("<I", code, 2)[0]) in xbe.imports:
+            every[f.addr] = f"XDK library code: the linker's stub for the kernel import {xbe.imports[slot]}"
+    return {f.addr: every[f.addr] for f in functions if f.addr in every}
 
 
 def create(root: Path, game: Path, *, compiler: str | None = None, log=print) -> dict:
@@ -406,9 +442,9 @@ def create(root: Path, game: Path, *, compiler: str | None = None, log=print) ->
     if not found:
         raise ForkError("Ghidra found no functions in this program (did its analysis fail or time out?)")
     found = [r for r in found if (s := xbe.section_at(r["entry"])) is not None and s.name not in skip]
-    functions = scratch_pe.analyse(xbe, found, linker_padding=True)
-    xdk = Path(args[args.index("--xdk") + 1])
-    aside = set_aside(xbe, functions, xdk)
+    hits, libs = library_code(xbe, Path(args[args.index("--xdk") + 1]))
+    functions = scratch_pe.analyse(xbe, with_library_code(found, hits), linker_padding=True)
+    aside = set_aside(xbe, functions, hits, libs)
     game_fns = [f for f in functions if f.addr not in aside]
     library = [f for f in functions if f.addr in aside]
     groups = scratch_pe.units(game_fns)

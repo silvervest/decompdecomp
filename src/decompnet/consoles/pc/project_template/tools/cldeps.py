@@ -21,6 +21,8 @@ ROOT = Path.cwd().resolve()
 def project_path(raw: str) -> str | None:
     """The included file as a path relative to the project, or None outside it."""
     path = raw.strip().replace("\\", "/")
+    if sys.platform != "win32" and path[:2].lower() == "z:":
+        path = path[2:]  # wibo shows the host's / as drive Z: (files a source includes by its own folder)
     p = Path(path)
     if not p.is_absolute() and not (len(path) > 1 and path[1] == ":"):
         p = ROOT / p

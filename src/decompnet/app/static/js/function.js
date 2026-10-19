@@ -22,8 +22,7 @@ async function openFn(name) {
   const again = S.fn === name && !$("drawer").hidden;
   if (!again) { giveBack(name); S.editDirty = false; $("tryMsg").hidden = true; }
   S.fn = name;
-  $("drawer").hidden = false;
-  document.body.classList.add("locked");
+  showDrawer("drawer");
   if (!again) { S.ftab = null; S.which = "latest"; S.diffKey = null; $("diff").innerHTML = ""; $("diffSum").textContent = ""; }
   drawMap();
   document.querySelectorAll("#fnRows tr").forEach((tr) => tr.classList.toggle("sel", tr.dataset.fn === name));
@@ -69,7 +68,8 @@ async function refreshFn(first) {
     const pinned = (S.ov.priority || []).includes(d.name);
     $("fnPin").hidden = S.ov.kind === "fork" || d.status !== "open";
     $("fnPin").classList.toggle("on", pinned);
-    $("fnPin").textContent = pinned ? "★ Next (on)" : "★ Next";
+    $("fnPin").setAttribute("aria-pressed", pinned);
+    $("fnPin").textContent = pinned ? "★ Agents do this first" : "☆ Do this first";
     $("fnPin").onclick = () => togglePrio(d.name, !pinned).then(() => refreshFn(false));
     $("noteAdd").onclick = async () => {
       const text = $("noteText").value.trim();
@@ -93,7 +93,10 @@ async function refreshFn(first) {
     if (d.called_by.length) xr.push(`<div><b>called by</b>${d.called_by.map(fnLink).join("")}</div>`);
     $("fnXref").innerHTML = xr.join("");
     $("fnXref").querySelectorAll(".fn").forEach((x) => { x.onclick = () => openFn(x.dataset.fn.split("+")[0]); });
-    $("fnNotes").innerHTML = d.notes.length ? `<p class="col-title">Notes from agents</p>` + d.notes.map((n) => `<div class="note"><small>${esc(n.agent)} · ${clock(n.created_at)}</small>${esc(n.text)}</div>`).join("") : "";
+    // your own notes (written here, as "you") apart from the agents': they aren't notes from an agent
+    const noteRow = (n) => `<div class="note"><small>${esc(n.agent)} · ${clock(n.created_at)}</small>${esc(n.text)}</div>`;
+    const notesOf = (mine, title) => { const ns = d.notes.filter((n) => (n.agent === "you") === mine); return ns.length ? `<p class="col-title">${title}</p>` + ns.map(noteRow).join("") : ""; };
+    $("fnNotes").innerHTML = notesOf(true, "Your notes") + notesOf(false, "Notes from agents");
     const tab = S.ftab || (d.status === "matched" || !d.scores.length ? "code" : "diff");
     showFnTab(tab);
   } catch (e) {
@@ -274,19 +277,36 @@ $("fnPrev").onclick = () => stepFn(-1);
 $("fnNext").onclick = () => stepFn(1);
 
 /* ------------------------------------------------------------------ function list */
-const L = { q: "", filter: "all", sort: "i", dir: 1, limit: 200, rows: [] };
-const FILTERS = [["all", "All"], ["open", "To do"], ["working", "Working"], ["tried", "Tried"], ["matched", "Matched"]];
+const FUNCTION_ROWS = 200, MORE_ROWS = 500;  // rows the list shows at first, and "Show more" adds: a big game has tens of thousands
+const L = { q: "", filter: "all", sort: "i", dir: 1, limit: FUNCTION_ROWS, rows: [] };
+const FILTERS = [["all", "All"], ["open", "To do"], ["working", "Working"], ["tried", "Tried"], ["matched", "Matched"], ["first", "★ First"]];
+// ★: the functions agents take before the others (it was "Next in line", which nobody could place); ROM projects only
+const starred = (f) => !!(S.ov && (S.ov.priority || []).includes(f.name));
+const canStar = () => !!(S.ov && S.ov.kind !== "fork");
 const fnState = (f) => (f.status === "matched" ? "matched" : f.status === "asm" ? "asm" : f.status === "working" ? "working" : f.best != null ? "tried" : "open");
 const STATE_RANK = { working: 0, tried: 1, open: 2, matched: 3, asm: 4 };
 
+/* The functions a search (lowercase) finds: by name or address. A fork's list shows each function's source file, so
+   the file counts there too; a ROM's segment only when no name or address has the text ("ma" found every function of
+   the segment "main"). */
+function searchFunctions(fns, q, fork) {
+  if (!q) return fns;
+  const inUnit = (f) => (f.unit || "").toLowerCase().includes(q);
+  const found = fns.filter((f) => f.name.toLowerCase().includes(q) || hex8(f.vram).toLowerCase().includes(q) || (fork && inUnit(f)));
+  return found.length || fork ? found : fns.filter(inUnit);
+}
+
 function renderList() {
   if (!S.map.length || S.tab !== "functions") return;
-  const counts = { all: S.map.length, open: 0, working: 0, tried: 0, matched: 0, asm: 0 };
-  for (const f of S.map) counts[fnState(f)]++;
-  $("fnFilter").innerHTML = FILTERS.map(([k, label]) => `<button type="button" role="radio" aria-checked="${L.filter === k}" class="${L.filter === k ? "on" : ""}" data-filter="${k}">${label}<span>${counts[k].toLocaleString()}</span></button>`).join("");
+  const counts = { all: S.map.length, open: 0, working: 0, tried: 0, matched: 0, asm: 0, first: 0 };
+  for (const f of S.map) { counts[fnState(f)]++; if (starred(f)) counts.first++; }
+  const star = canStar();
+  if (!star && L.filter === "first") L.filter = "all";
+  $("fnFilter").innerHTML = FILTERS.filter(([k]) => star || k !== "first").map(([k, label]) => `<button type="button" role="radio" aria-checked="${L.filter === k}" class="${L.filter === k ? "on" : ""}" data-filter="${k}"${k === "first" ? ` title="Agents take starred functions before the others"` : ""}>${label}<span>${counts[k].toLocaleString()}</span></button>`).join("");
+  $("starHint").hidden = $("thStar").hidden = !star;
   const q = L.q.trim().toLowerCase();
-  let rows = S.map.filter((f) => (L.filter === "all" || fnState(f) === L.filter)
-    && (!q || f.name.toLowerCase().includes(q) || hex8(f.vram).toLowerCase().includes(q) || (f.unit || "").toLowerCase().includes(q)));
+  let rows = searchFunctions(S.map.filter((f) => L.filter === "all" || (L.filter === "first" ? starred(f) : fnState(f) === L.filter)),
+    q, S.ov && S.ov.kind === "fork");
   const key = {
     i: (f) => f.i, name: (f) => f.name.toLowerCase(), insns: (f) => f.insns, attempts: (f) => f.attempts || 0,
     best: (f) => (f.status === "matched" ? 2 : f.best == null ? -1 : pctOf(f.best, f.insns)), status: (f) => STATE_RANK[fnState(f)],
@@ -299,10 +319,12 @@ function renderList() {
     const best = st === "matched" ? `<span class="ok">100%</span>` : p == null ? `<span class="dim">–</span>` : pctText(p);
     const status = st === "matched" ? `<span class="st matched" title="${esc(f.matched_by ? "by " + f.matched_by : "")}">matched</span>` : st === "asm" ? `<span class="st" title="hand-written assembly: no C compiles to it">assembly</span>` : st === "working" ? `<span class="st working">${esc(f.agent || "working")}</span>`
       : st === "tried" ? `<span class="st tried">tried</span>` : `<span class="st">to do</span>`;
-    return `<tr data-fn="${esc(f.name)}" class="${S.fn === f.name ? "sel" : ""}" tabindex="0"><td class="mono dim">${fork ? esc(f.unit || "") : hex8(f.vram)}</td>
-      <td class="mono name">${(S.ov && (S.ov.priority || []).includes(f.name)) ? `<span class="star" title="agents take it next">★</span>` : ""}${esc(f.name)}</td><td class="r mono">${f.insns.toLocaleString()}</td><td class="r mono">${best}</td>
+    const on = starred(f), open = st !== "matched" && st !== "asm";
+    const starCell = !star ? "" : `<td class="star-col">${open || on ? `<button type="button" class="star-btn${on ? " on" : ""}" data-star="${esc(f.name)}" aria-pressed="${on}" aria-label="${on ? "Agents take it first: click to stop" : "Agents take it first"}" title="${on ? "Agents take it first (click to stop)" : "Agents take it first"}">${on ? "★" : "☆"}</button>` : ""}</td>`;
+    return `<tr data-fn="${esc(f.name)}" class="${S.fn === f.name ? "sel" : ""}" tabindex="0">${starCell}<td class="mono dim">${fork ? esc(f.unit || "") : hex8(f.vram)}</td>
+      <td class="mono name">${esc(f.name)}</td><td class="r mono">${f.insns.toLocaleString()}</td><td class="r mono">${best}</td>
       <td class="r mono">${f.attempts || `<span class="dim">0</span>`}</td><td>${status}</td></tr>`;
-  }).join("") || `<tr class="none"><td colspan="6">No function matches${q ? ` “${esc(L.q)}”` : ""}.</td></tr>`;
+  }).join("") || `<tr class="none"><td colspan="7">${L.filter === "first" && !q ? "No function is starred. ☆ one and agents take it before the others." : `No function matches${q ? ` “${esc(L.q)}”` : ""}.`}</td></tr>`;
   $("fnShown").textContent = rows.length > L.limit ? `${L.limit.toLocaleString()} of ${rows.length.toLocaleString()} shown` : plural(rows.length, "function");
   $("fnMore").hidden = rows.length <= L.limit;
   document.querySelectorAll(".fn-table th").forEach((th) => {
@@ -310,11 +332,16 @@ function renderList() {
     th.classList.toggle("desc", (th.dataset.sort === L.sort || (th.dataset.sort === "vram" && L.sort === "i")) && L.dir < 0);
   });
 }
-$("fnFilter").addEventListener("click", (e) => { const b = e.target.closest("[data-filter]"); if (b) { L.filter = b.dataset.filter; L.limit = 200; renderList(); } });
-$("fnSearch").addEventListener("input", () => { L.q = $("fnSearch").value; L.limit = 200; renderList(); });
-$("fnMore").onclick = () => { L.limit += 500; renderList(); };
-$("fnRows").addEventListener("click", (e) => { const tr = e.target.closest("tr[data-fn]"); if (tr) openFn(tr.dataset.fn); });
-$("fnRows").addEventListener("keydown", (e) => { const tr = e.target.closest("tr[data-fn]"); if (tr && e.key === "Enter") openFn(tr.dataset.fn); });
+$("fnFilter").addEventListener("click", (e) => { const b = e.target.closest("[data-filter]"); if (b) { L.filter = b.dataset.filter; L.limit = FUNCTION_ROWS; renderList(); } });
+$("fnSearch").addEventListener("input", () => { L.q = $("fnSearch").value; L.limit = FUNCTION_ROWS; renderList(); });
+$("fnMore").onclick = () => { L.limit += MORE_ROWS; renderList(); };
+$("fnRows").addEventListener("click", (e) => {
+  const star = e.target.closest("[data-star]");
+  if (star) { togglePrio(star.dataset.star, star.getAttribute("aria-pressed") !== "true"); return; }
+  const tr = e.target.closest("tr[data-fn]");
+  if (tr) openFn(tr.dataset.fn);
+});
+$("fnRows").addEventListener("keydown", (e) => { const tr = e.target.closest("tr[data-fn]"); if (tr && e.key === "Enter" && e.target === tr) openFn(tr.dataset.fn); });
 document.querySelectorAll(".fn-table th[data-sort]").forEach((th) => {
   th.onclick = () => {
     const k = th.dataset.sort === "vram" ? "i" : th.dataset.sort;

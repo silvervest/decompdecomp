@@ -11,42 +11,27 @@ import anyio
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from .. import __version__
+from .. import __version__, agents, consoles
 from ..network import Agent, NetworkError
 from .engine import RomNetwork
 
+# The guides every console shares (app/guide/); each console's own are in its package (consoles/<id>/guides/)
 GUIDES = {
     "workflow": "the matching loop, reading diffs, priorities",
     "mips": "MIPS registers, calling convention, delay slots, types from instructions",
-    "gcc-kmc": "matching KMC GCC 2.7.2 code",
-    "ido": "matching IDO 5.3/7.1 code",
     "m2c": "reading the machine-generated draft",
     "data": "globals, strings, tables, floats, data you define",
     "structs": "working out struct layouts from offsets",
-    "n64": "N64 memory map, OS library, graphics/audio data",
     "naming": "naming functions and data",
     "fork": "working in a fork of a public decomp: the loop, conventions, what's allowed",
     "objdiff": "reading objdiff's diffs and match percentages",
     "ppc": "PowerPC (GameCube, Wii): registers, calling convention, common patterns",
-    "mwcc": "matching Metrowerks CodeWarrior code (GameCube, Wii, DS)",
     "cpp": "decompiling C++: classes, vtables, constructors, inlines, name mangling",
-    "psx": "matching PlayStation (PSY-Q GCC + maspsx) code",
-    "ps2": "matching PlayStation 2 (EE-GCC, MWCC PS2) code",
     "arm": "ARM and Thumb (GBA, DS, 3DS): registers, conditional code, literal pools",
-    "agbcc": "matching Game Boy Advance code built with agbcc",
-    "x86": "x86 and MSVC (PC, Xbox): calling conventions, SEH, matching MSVC output",
-    "xbox": "original Xbox: the XDK, kernel calls, Visual C++ 7.1 with /arch:SSE, library code set aside, LTCG",
     "aarch64": "AArch64 and Clang (Switch): registers, matching Clang output",
     "similarity": "finding similar functions and reusing matched code",
 }
 
-# Guides worth reading first on each platform.
-PLATFORM_GUIDES = {
-    "n64": ["mips"], "ps": ["mips", "psx"], "ps2": ["mips", "ps2"], "psp": ["mips"],
-    "gc": ["ppc", "mwcc", "cpp"], "wii": ["ppc", "mwcc", "cpp"], "nds": ["arm", "mwcc"], "3ds": ["arm", "cpp"],
-    "gba": ["arm", "agbcc"], "switch": ["aarch64", "cpp"], "win32": ["x86", "cpp"], "xbox": ["x86", "xbox", "cpp"],
-    "xbox360": ["ppc", "cpp"],
-}
 
 INSTRUCTIONS = """\
 decompdecomp: you are decompiling a game ROM that the user owns into C that compiles to exactly the same
@@ -68,26 +53,50 @@ request", just take them. (claim_function's count is something else: how many sm
 one claim; one function back is normal.)
 
 1. claim_function(count=4) gives you the next function, and when it's small, its neighbours with it (small
-   functions mostly match on the first try): assembly, location, calls, data it uses, the best previous
-   attempt and notes (start from those!), a machine-generated draft, and identical matched code if any.
-2. get_context() shows the shared header every compile includes.
+   functions mostly match on the first try): assembly, location, calls, data it uses, the likely layouts of the
+   structs it's handed (guess_struct shows one as C), the best previous attempt and notes (start from those!), a
+   machine draft (m2c), and identical matched code if any. The machine draft's control flow and arithmetic are
+   usually right, its types and names usually wrong: start from it and fix those. redraft(function, context)
+   makes it again with a struct or prototype you worked out.
+2. get_context() shows the shared header every compile includes (when it's big, the brief has the
+   declarations the function uses).
 3. Write the C functions (same names as the assembly) and judge them: compile_and_diff(function="a, b, c",
    source=all the definitions) for a batch, one name for one. Read the diff: '<' '>' missing/extra
    instructions, 'i' operands, 'o' order, 'r' registers, 's' stack. Fix structure first, registers last.
    The workflow and {compiler_guide} guides are below. find_similar(function) shows look-alike functions;
    a matched one is the best starting point.
 4. Score 0 = matched and saved. Before moving on, share what you learned: edit_context for prototypes and
-   structs you worked out, rename_symbol for functions/data whose purpose is now clear, and add_note (no
-   function) for a compiler quirk or convention every agent here should know: the next sessions start with it.
-   Right C that can't match because the project's compiler or flags look wrong? try_compiler(...) others, then
-   suggest(...) the one that matches to the user. The function runs on past its end into padding, linker
+   structs you worked out, rename_symbol for functions/data whose purpose is now clear, and share_knowledge
+   for a convention every agent on this game should know (it reaches them once a model other than yours agrees).
+   Right C that can't match because the project's compiler or flags look wrong? search_flags(function) tries
+   its compiler's flags at once, try_compiler(...) other compilers; then suggest(...) what matches to the user. The function runs on past its end into padding, linker
    leftovers or data? report_boundary(...) where it really ends, then work on as it is.
-5. compile_and_diff says when to move on (no better after 4 compiles in a row; up to 10 for big functions):
-   then release_function with precise notes (what you tried, what is left) and claim the next one. Before
+5. compile_and_diff says when to move on ({budget}): then
+   release_function with precise notes (what you tried, what is left) and claim the next one. Before
    that, compile the next step instead of releasing. Needs another function done first (a callee, an inlined
    helper)? release_function(needs=that one) hands it to you.
 
 Write plausible original code, pure C (no inline asm). Be brief in your messages: work, don't narrate.
+"""
+
+# A helper started on "make matched code readable" (options task=readable): ROM projects (app/readable.py)
+READABLE_PROMPT = """\
+You are a decompilation agent in decompdecomp, working on {title}. The functions you get already match the game
+byte for byte. Your job: make their C readable for people who will port or mod the game, without changing what
+the compiler makes of it. Other agents may work on other functions at the same time. Repeat for up to {count}
+functions, then stop:
+
+1. claim_readable() gives you the next matched function that isn't readable yet, with its matching C.
+2. get_context() shows the shared header. Read the function, and get_function on the functions it calls, until
+   you understand what it does.
+3. rename_symbol the function, and the globals and functions it uses, once their purpose is clear. Describe
+   structs, enums and constants in the header with edit_context, and use those names.
+4. make_readable(function, source): the same function with meaningful parameter and local names, the header's
+   types and names, and one comment saying what it does. Keep the statements' shape (order, casts, temporaries):
+   it's judged again and must still match byte for byte, or it's refused and the matching C stays. Refused? Undo
+   your last change and try a smaller one.
+
+Write C people would write. Be brief in your messages: work, don't narrate.
 """
 
 FORK_PROMPT = """\
@@ -115,13 +124,13 @@ neighbours may come along in one claim; one function back is normal.)
    diffed. Fix structure first (control flow, calls), then types and expressions, registers last.
 4. 100% = matched, committed to git. Structs, prototypes, globals or helpers you need go in with
    edit_file (a header or the top of the source file); an edit that breaks any match is undone. Found a
-   compiler quirk or project convention others should know? add_note with no function: every new session
-   starts with those notes.
+   project convention every agent should know? share_knowledge(text): it reaches them once a model other
+   than yours agrees.
 5. The goal is linked files: the game built from the C, byte for byte. When a match finishes a file's
    functions, you're shown its data next to the original's: fix what differs (order, const, statics,
    values) with edit_file until file_status says it matches; decompdecomp then links the file.
-6. compile_and_diff says when to move on (no better after 4 compiles in a row; up to 10 for big functions):
-   then release_function with precise notes (what you tried, what is left) and claim the next. Before that,
+6. compile_and_diff says when to move on ({budget}): then
+   release_function with precise notes (what you tried, what is left) and claim the next. Before that,
    compile the next step instead of releasing. Very large functions: get the structure right first; a near miss
    is worth the extra compiles. What the function needs in harness/ (a stand-in, a driver call) you write
    yourself with edit_file in the same claim; another function of the game it needs done first (a callee, an
@@ -133,10 +142,20 @@ Guides: {guides}. Be brief in your messages: work, don't narrate.
 """
 
 
-def _guide(topic: str = "") -> str:
+def _console_guides() -> dict:
+    """topic -> file of the guides consoles keep in their packages (consoles/<id>/guides/<topic>.md)."""
+    return {path.stem: path for folder in consoles.guide_dirs() for path in sorted(folder.glob("*.md"))}
+
+
+def guide_text(topic: str = "") -> str:
     topic = topic.strip().lower()
+    own = _console_guides()
+    if topic in own:
+        return own[topic].read_text(encoding="utf-8")
     if topic not in GUIDES:
-        listing = "\n".join(f"- {k}: {v}" for k, v in GUIDES.items())
+        # a console's guide is described by its title, the first line of its file
+        about = GUIDES | {k: p.read_text(encoding="utf-8").split("\n", 1)[0].lstrip("# ") for k, p in own.items()}
+        listing = "\n".join(f"- {k}: {v}" for k, v in about.items())
         return f"Guides (call guide with one of these topics):\n{listing}"
     return resources.files("decompnet.app").joinpath("guide", f"{topic}.md").read_text(encoding="utf-8")
 
@@ -156,6 +175,8 @@ def project_info(net: RomNetwork, slug: str) -> str:
             f"- {s['toolchain'] or '(setup)'} {' '.join(s['flags'])}"
             + "".join(f" 0x{a:X}-0x{b:X}" for a, b in s.get("ranges", [])) + f": {s['text'][:200]} [{len(s['agents'])} agree"
             + (f"; {s['check']}" if s["check"] else "") + "]" for s in open_)
+    if not net.fork_slug(slug) and (known := net.knowledge.for_prompt(slug)):
+        text += "\n" + known + "\n"
     return text + (f"\nThe user's instructions for this project (they come first):\n{wish}" if wish else "")
 
 
@@ -218,17 +239,26 @@ HANDLERS: dict[str, Callable[..., str]] = {
                                                             if net.fork_slug(slug) else net.read_data(slug, what, length)),
     "get_class": lambda net, agent, slug, what="": (net.forks.get_class(slug, what) if net.fork_slug(slug)
                                                     else net.get_class(slug, what)),
+    "guess_struct": lambda net, agent, slug, function, argument="arg0": net.guess_struct(slug, function, argument),
+    "redraft": lambda net, agent, slug, function, context: net.redraft(slug, function, context),
     "compiler_map": lambda net, agent, slug, survey=False, check_ranges=False:
         net.compiler_map_text(slug, bool(survey), bool(check_ranges)),
     "list_functions": lambda net, agent, slug, status="open", limit=40: net.list_functions(slug, status, limit),
-    "add_note": lambda net, agent, slug, text, function="": net.add_note(agent, slug, text, function or None),
+    # a note on no function is knowledge for every agent: it goes through share_knowledge's agreement
+    "add_note": lambda net, agent, slug, text, function="": (net.add_note(agent, slug, text, function) if function
+                                                             else net.knowledge.share(agent, slug, text)),
+    "share_knowledge": lambda net, agent, slug, text="", supports=0: net.knowledge.share(agent, slug, text, supports),
+    "search_flags": lambda net, agent, slug, function, compiler="", source="":
+        net.search_flags(agent, slug, function, compiler, source),
+    "claim_readable": lambda net, agent, slug: net.readability.claim(agent, slug),
+    "make_readable": lambda net, agent, slug, function, source: net.readability.submit(agent, slug, function, source),
     "suggest": lambda net, agent, slug, text, compiler="", flags="", function="", ranges="", source="":
         net.suggest(agent, slug, text, compiler, flags, function or None, ranges, source),
     "try_compiler": lambda net, agent, slug, function, compiler, flags="", source="":
         net.try_compiler(agent, slug, function, compiler, flags, source),
     "search_notes": lambda net, agent, slug, query: net.search_notes(slug, query),
     "find_similar": lambda net, agent, slug, function, limit=5: net.find_similar(slug, function, limit),
-    "guide": lambda net, agent, slug, topic="": _guide(topic),
+    "guide": lambda net, agent, slug, topic="": guide_text(topic),
     "read_file": lambda net, agent, slug, path, start=1, count=200:
         net.forks.read_file(_fork(net, slug, "read_file"), path, start, count),
     "search_code": lambda net, agent, slug, pattern, glob="": net.forks.search(_fork(net, slug, "search_code"), pattern, glob),
@@ -240,7 +270,10 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "standins_for": lambda net, agent, slug, what: net.forks.standins_for(agent, _fork(net, slug, "standins_for"), what),
 }
 
-ROM_ONLY = {"get_context", "edit_context", "rename_symbol", "split_function", "report_boundary", "compiler_map"}
+# get_class is for both: MIPS ROM projects, and PC and Xbox projects made from scratch (consoles/pc/methods.py)
+ROM_ONLY = {"get_context", "edit_context", "rename_symbol", "split_function", "report_boundary",
+            "guess_struct", "redraft",
+            "compiler_map", "claim_readable", "make_readable", "search_flags"}
 FORK_ONLY = {"read_file", "search_code", "edit_file", "file_status", "split_file", "standins_for"}
 
 
@@ -270,9 +303,9 @@ def call(net: RomNetwork, agent: Agent, slug: str, name: str, args: dict) -> str
         return f"error: bad arguments for {name}: {e}"
 
 
-# Antigravity CLI otherwise finds MCP tools on demand (an extra step each, through its generic dispatcher):
-# decompdecomp's tools are all there is to the job, so they are loaded up front.
-ALWAYS_LOAD = {"antigravity/alwaysLoad": True}
+# What agents read on each tool's definition (Agent.tool_meta): Antigravity CLI otherwise finds MCP tools on demand,
+# an extra step each, and decompdecomp's tools are all there is to the job, so they are loaded up front.
+ALWAYS_LOAD = agents.TOOL_META
 
 
 def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]]) -> MCPServer:
@@ -380,6 +413,13 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
         return await run(ctx, "read_data", what=what, length=length)
 
     @mcp.tool(meta=ALWAYS_LOAD)
+    async def redraft(ctx: Context, function: str, context: str) -> str:
+        """m2c's machine draft of a function made again with your declarations (a struct, a prototype, an extern
+        you worked out) added to the shared header's; yours replace the header's where they declare the same
+        names. Returns the new draft, recorded nowhere: try it with compile_and_diff, and edit_context what helped."""
+        return await run(ctx, "redraft", function=function, context=context)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
     async def get_class(ctx: Context, what: str = "") -> str:
         """C++ classes found in the game's code (MIPS ROM projects; PC and Xbox projects made from scratch, where it
         also finds structs with member functions): give a vtable address or a virtual function, constructor or
@@ -387,6 +427,15 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
         use them), its functions, virtual functions by slot and (PC/Xbox) a declaration to start from; nothing
         lists them all. A layout to write the class from: the judge still decides."""
         return await run(ctx, "get_class", what=what)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def guess_struct(ctx: Context, function: str, argument: str = "arg0") -> str:
+        """The likely struct behind a function's pointer (ROM projects, MIPS), as C with offsets: from the loads and
+        stores of every function the same pointer reaches, with how many agree on each field, where else the type
+        flows, and the type matched code already uses for it. argument: arg0-arg3, return, or a global; add +0x14
+        to follow the pointer at 0x14. The game's own type when its debug information has one. Put what you confirm
+        into context.h with edit_context."""
+        return await run(ctx, "guess_struct", function=function, argument=argument)
 
     @mcp.tool(meta=ALWAYS_LOAD)
     async def compiler_map(ctx: Context, survey: bool = False, check_ranges: bool = False) -> str:
@@ -405,8 +454,34 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
 
     @mcp.tool(meta=ALWAYS_LOAD)
     async def add_note(ctx: Context, text: str, function: str = "") -> str:
-        """Leave a note for other agents, on a function or the whole project."""
+        """Leave a note on a function for the next agent on it (a note on no function is share_knowledge)."""
         return await run(ctx, "add_note", text=text, function=function)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def search_flags(ctx: Context, function: str, compiler: str = "", source: str = "") -> str:
+        """The function's C (its best attempt, or source) built with each of its compiler's flag variants
+        (optimisation levels, small data, code-shape options), judged and ranked. For C that looks right but won't
+        match: the flags may be what's wrong. compiler: another one to try instead of the project's."""
+        return await run(ctx, "search_flags", function=function, compiler=compiler, source=source)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def claim_readable(ctx: Context) -> str:
+        """Take the next matched function that isn't readable yet: rename, type and comment it so people understand
+        it, while it still matches byte for byte."""
+        return await run(ctx, "claim_readable")
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def make_readable(ctx: Context, function: str, source: str) -> str:
+        """A readable rewrite of a matched function (names, types, a comment). Kept only if it still matches byte
+        for byte; otherwise the matching C stays."""
+        return await run(ctx, "make_readable", function=function, source=source)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def share_knowledge(ctx: Context, text: str = "", supports: int = 0) -> str:
+        """Propose something every agent on this game should know (a convention, what a struct is, how the code
+        is organised), or back an open proposal with supports=its number. It reaches every agent once helpers
+        running two different models agree. Not for which compiler built what: that's the compiler map's job."""
+        return await run(ctx, "share_knowledge", text=text, supports=supports)
 
     @mcp.tool(meta=ALWAYS_LOAD)
     async def suggest(ctx: Context, text: str, compiler: str = "", flags: str = "", function: str = "",

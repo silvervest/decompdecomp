@@ -27,47 +27,91 @@ function renderNow(claims) {
     const sc = S.scores.get(c.name) || [];
     const p = pctOf(c.best_score, c.n_insns);
     const [sym, unit] = c.name.split(/@(.*)/s);  // a fork's symbol@file: the symbol first, the file after it
-    return `<div class="job" data-fn="${esc(c.name)}"><div class="job-top"><span class="job-name" title="${esc(c.name)}">${esc(sym)}${unit ? `<small>@${esc(unit)}</small>` : ""}</span><span class="job-who" title="${esc(c.agent)}">${esc(c.agent)}</span></div>
+    return `<div class="job" data-fn="${esc(c.name)}" role="button" tabindex="0" aria-label="${esc(c.name)}, ${esc(c.agent)} works on it"><div class="job-top"><span class="job-name" title="${esc(c.name)}">${esc(sym)}${unit ? `<small>@${esc(unit)}</small>` : ""}</span><span class="job-who" title="${esc(c.agent)}">${esc(c.agent)}</span></div>
       ${spark(sc)}<div class="job-foot"><span>${c.n_insns} insns · ${c.attempts} tries</span><b>${p == null ? reading(c) : pctText(p)}</b></div></div>`;
   }).join("");
   box.querySelectorAll(".job").forEach((j) => { j.onclick = () => openFn(j.dataset.fn); });
 }
 
 /* ------------------------------------------------------------------ agents on this project */
-const STATE_TEXT = { starting: "starting…", working: "working", waiting: "next session in a moment", stopped: "stopped", error: "stopped with an error" };
+/* Every agent here is a helper this app runs (nobody connects from outside), each in one state: working on a function,
+   waiting (why, until when), stopped (by whom) or paused on an error it can't get past (what to do). Its own last words
+   are on its row; everything it said and did is one click in. */
+const LIVE = ["starting", "working", "waiting"];
+const STATE_ORDER = { working: 0, starting: 1, waiting: 2, paused: 3, stopped: 4 };
+const FEED_KEEP = 400;  // lines of each helper's log kept here (the app keeps as many)
+const ACTIVITY_ROWS = 300;  // lines "What's happening" keeps: older ones scroll away
+const SAID_SHOWN = 1600, THOUGHT_SHOWN = 1200;  // characters of a helper's message and thought its log shows
+const MAX_PER_SESSION = 20;  // functions a helper takes in one session, at most
+const hhmm = (t) => clock(t).slice(0, 5);
+const sentence = (text) => (text ? text[0].toUpperCase() + text.slice(1) : "");
+
+function helperState(s, claim) {
+  if (s.state === "working") return claim ? `Working on ${fnLink(claim.name)} · ${claim.attempts ? plural(claim.attempts, "compile") : reading(claim)}` : "Working: picking its next function";
+  if (s.state === "starting") return s.why ? `Starting: ${esc(s.why)}` : "Starting…";
+  if (s.state === "waiting") return `Waiting: ${esc(s.why || "a moment")}${s.until ? ` · carries on at ${hhmm(s.until)}` : ""}`;
+  if (s.state === "paused") return `Paused: ${esc(s.why)}`;
+  return s.stopped_by === "you" || !s.why ? "Stopped by you" : `Stopped: ${esc(s.why)}`;
+}
+
+/* What each model cost on this game (helper_sessions), now and then: which models to run more of. */
+const COSTS_EVERY_MS = 30000;
+async function renderCosts(force = false) {
+  if (!force && S.costsAt && Date.now() - S.costsAt < COSTS_EVERY_MS && S.costsSlug === S.slug) return;
+  S.costsAt = Date.now(); S.costsSlug = S.slug;
+  let rows;
+  try { rows = await api(`/api/modelcosts?slug=${encodeURIComponent(S.slug)}`); } catch { return; }
+  const box = $("modelCosts");
+  box.hidden = !rows.length;
+  const per = (r) => r.matches ? (r.usd ? `${money(r.usd / r.matches)} a match` : `${Math.round(r.tokens / r.matches / 1000)}k tokens a match`) : "no match yet";
+  setHtml(box, `<p class="col-title">What each model cost here</p>
+    <p class="muted small">Cheapest per match first: run more of the models at the top.</p>
+    <ul class="mini-list">${rows.map((r) => `<li><b>${esc(r.model || r.kind)}</b> <span class="muted small">${esc(r.kind)}</span>
+      <span class="small">${r.matches.toLocaleString()} ${r.matches === 1 ? "match" : "matches"} · ${per(r)}${r.usd ? ` · ${money(r.usd)} in all` : ""}</span></li>`).join("")}</ul>`);
+}
 
 function renderSessions(sessions) {
+  renderCosts();
   const box = $("sessions");
   const board = new Map((S.stats?.agents || []).map((r) => [r.agent, r]));
-  const running = sessions.filter((s) => ["starting", "working", "waiting"].includes(s.state));
+  const running = sessions.filter((s) => LIVE.includes(s.state));
   $("stopAll").hidden = running.length < 2;
-  const html = sessions.map((s) => {
+  const sorted = [...sessions].sort((a, b) => STATE_ORDER[a.state] - STATE_ORDER[b.state] || a.label.localeCompare(b.label));
+  const html = sorted.map((s) => {
     const claim = S.claims.find((c) => c.agent === s.agent);
-    const dot = s.state === "error" ? "err" : s.state === "working" ? "on" : s.state === "stopped" ? "" : "work";
-    const live = ["starting", "working", "waiting"].includes(s.state);
-    const b = board.get(s.agent);
-    const facts = [s.model ? esc(s.model) : "default model", s.runs ? `session ${s.runs}` : "", b && b.matched ? `<b class="ok">${b.matched} matched</b>` : "", b ? plural(b.compiles, "compile") : "",
-      s.usd ? money(s.usd) : s.tokens ? `${(s.tokens / 1000).toFixed(0)}k tokens` : "", s.started_at ? `since ${clock(s.started_at).slice(0, 5)}` : ""].filter(Boolean);
-    return `<div class="session"><div class="session-top"><span class="dot ${dot}"></span><b>${esc(s.label)}</b>
-        <span class="state ${s.state === "error" ? "err" : ""}">${esc(STATE_TEXT[s.state] || s.state)}</span>
-        <button class="ghost" data-stop="${esc(s.id)}" data-remove="${live ? "" : "1"}" type="button">${live ? "Stop" : "Remove"}</button></div>
+    const dot = s.state === "paused" ? "err" : s.state === "working" ? "on" : s.state === "stopped" ? "" : "work";
+    const live = LIVE.includes(s.state), id = esc(s.id), b = board.get(s.agent);
+    const facts = [esc(s.kind_name), s.model ? esc(s.model) : "its default model", b && b.matched ? `<b class="ok">${b.matched} matched</b>` : "", b ? plural(b.compiles, "compile") : "",
+      s.usd ? money(s.usd) : s.tokens ? `${(s.tokens / 1000).toFixed(0)}k tokens` : "", s.runs ? plural(s.runs, "session") : "",
+      s.restarts ? `started again ${plural(s.restarts, "time")}` : "", live && s.started_at ? `since ${hhmm(s.started_at)}` : ""].filter(Boolean);
+    const todo = s.todo ? `${sentence(s.todo.replace(/\.$/, ""))}.${s.state === "paused" ? " Then press Start again." : ""}` : "";
+    return `<div class="session" data-state="${esc(s.state)}"><div class="session-top"><span class="dot ${dot}"></span><b title="${esc(s.agent)}">${esc(s.label)}</b>
+        ${live ? `<button class="ghost" data-stop="${id}" type="button">Stop</button>`
+          : `<button class="ghost" data-again="${id}" type="button">Start again</button><button class="ghost" data-remove="${id}" type="button">Remove</button>`}</div>
+      <span class="state ${s.state === "paused" ? "err" : ""}">${helperState(s, claim)}</span>
+      ${todo ? `<span class="todo-line">${esc(todo)}</span>` : ""}
+      ${s.last_message ? `<q class="said" title="${esc(s.last_message)}">${esc(s.last_message)}</q>` : ""}
       <span class="facts-line">${facts.join(" · ")}</span>
-      ${s.state === "error" ? `<span class="state err">${esc(s.error)}</span>` : ""}
-      ${claim ? `<span class="last">on ${fnLink(claim.name)}</span>` : ""}</div>`;
+      <button class="link-btn" data-log="${id}" type="button" aria-pressed="${S.logFor === s.id}">${S.logFor === s.id ? "Back to everything" : "What it said and did"}</button></div>`;
   }).join("");
-  const own = new Set(sessions.map((s) => s.agent));
-  const outside = [...new Set(S.claims.filter((c) => !own.has(c.agent) && c.agent !== AUTO).map((c) => c.agent))];
-  setHtml(box, html + outside.map((a) => `<div class="session ext"><div class="session-top"><span class="dot on"></span><b>${esc(a)}</b><span class="tag">${a.startsWith("@") ? "in the room" : "connected agent"}</span></div>
-      <span class="last">on ${S.claims.filter((c) => c.agent === a).map((c) => fnLink(c.name)).join(", ")}</span></div>`).join(""));
+  setHtml(box, html);
   box.querySelectorAll(".fn").forEach((x) => { x.onclick = () => openFn(x.dataset.fn); });
-  $("noSessions").hidden = sessions.length + outside.length > 0;
-  box.querySelectorAll("[data-stop]").forEach((b) => {
+  $("noSessions").hidden = sessions.length > 0;
+  const act = (sel, path, body) => box.querySelectorAll(sel).forEach((b) => {
     b.onclick = async () => {
-      await api("/api/agents/stop", { method: "POST", body: { id: b.dataset.stop, remove: !!b.dataset.remove } }).catch((e) => toast(esc(e.message), "err"));
+      b.disabled = true;
+      await api(path, { method: "POST", body: body(b) }).catch((e) => toast(esc(e.message), "err"));
       poll(false);
     };
   });
+  act("[data-stop]", "/api/agents/stop", (b) => ({ id: b.dataset.stop }));
+  act("[data-remove]", "/api/agents/stop", (b) => ({ id: b.dataset.remove, remove: true }));
+  act("[data-again]", "/api/agents/restart", (b) => ({ id: b.dataset.again }));
+  box.querySelectorAll("[data-log]").forEach((b) => {
+    b.onclick = () => { S.logFor = S.logFor === b.dataset.log ? null : b.dataset.log; renderLog(); renderSessions(S.sessions || []); };
+  });
 }
+$("helperLogClose").onclick = () => { S.logFor = null; renderLog(); renderSessions(S.sessions || []); $("feedTitle").focus(); };
 $("stopAll").onclick = async () => {
   await api("/api/agents/stop", { method: "POST", body: { slug: S.slug } }).catch((e) => toast(esc(e.message), "err"));
   toast("Stopping every agent on this project.");
@@ -75,15 +119,17 @@ $("stopAll").onclick = async () => {
 };
 
 /* ------------------------------------------------------------------ the launcher: agent, model, how many */
-const LZ = { kind: null, model: "", count: 1, per: null, effort: "" };
-// opencode 2 picks a model's reasoning effort as a variant of it: provider/model#high
-const withEffort = (a, model) => (a.id === "opencode" && LZ.effort && model ? `${model.split("#")[0]}#${LZ.effort}` : model);
+const LZ = { kind: null, model: "", count: 1, per: null, effort: "", task: "" };
+// an agent that takes an effort (opencode 2) picks it as a variant of the model: provider/model#high
+const withEffort = (a, model) => (a.takes_effort && LZ.effort && model ? `${model.split("#")[0]}#${LZ.effort}` : model);
 function launcherInit() {
   if (LZ.kind || !S.st) return;
   const l = S.st.settings.launcher || {};
-  const ready = S.st.agents.filter((a) => a.installed && a.id !== "api");
-  const known = S.st.agents.find((a) => a.id === l.kind && (a.installed || a.id === "api"));
-  LZ.kind = known ? known.id : (ready[0] ? ready[0].id : "api");
+  const known = S.st.agents.find((a) => a.id === l.kind && (a.installed || a.uses_endpoints));
+  // the recommended agent first (the API helper: decompdecomp runs its whole loop, and no other program's update
+  // can break it)
+  const first = S.st.agents.find((a) => a.recommended) || S.st.agents[0];
+  LZ.kind = known ? known.id : first ? first.id : null;
   LZ.model = known ? (l.model || "") : "";
   LZ.count = l.count || 1;
   const eps = S.st.settings.endpoints || [];
@@ -103,76 +149,90 @@ function modelName(a, model) {
   return m ? m.name : model;
 }
 function launchLabel(a, model, count) {
-  if (a.id === "api") {
+  if (a.uses_endpoints) {
     const picked = (S.st.settings.endpoints || []).filter((e) => (LZ.eps || []).includes(e.id));
     if (picked.length > 1) return `Start ${count} across ${picked.length} endpoints`;
     return `Start ${picked[0] ? picked[0].name : "API model"}${count > 1 ? ` × ${count}` : ""}`;
   }
-  return `Start ${a.name}${model ? ` · ${modelName(a, model)}` : ""}${a.id === "opencode" && LZ.effort && model ? ` · ${LZ.effort}` : ""}${count > 1 ? ` × ${count}` : ""}`;
+  return `Start ${a.name}${model ? ` · ${modelName(a, model)}` : ""}${a.takes_effort && LZ.effort && model ? ` · ${LZ.effort}` : ""}${count > 1 ? ` × ${count}` : ""}`;
 }
 
 async function startAgents(a, model, count, btn, extra = {}) {
   if (btn) btn.disabled = true;
   try {
     const options = { ...extra };
-    if (model && a.id !== "api") options.model = withEffort(a, model);
-    if (a.id === "opencode" && LZ.effort && !model) throw new Error("pick a model to set its effort");
+    if (model && !a.uses_endpoints) options.model = withEffort(a, model);
+    if (a.takes_effort && LZ.effort && !model) throw new Error("pick a model to set its effort");
     if (LZ.per) options.per_session = LZ.per;
+    if (LZ.task) options.task = LZ.task;
     await api("/api/agents/start", { method: "POST", body: { kind: a.id, slug: S.slug, count, options } });
     S.st.settings.launcher = { kind: a.id, model: model || "", count };
-    if (model && a.id !== "api") {
+    if (model && !a.uses_endpoints) {
       const rec = (S.st.settings.recent_models ||= {});
       rec[a.id] = [model, ...(rec[a.id] || []).filter((m) => m !== model)].slice(0, 8);
     }
     hideLaunch();
-    toast(`${esc(a.id === "api" ? "Your API model" : a.name)} ${count > 1 ? `× ${count} are` : "is"} starting. Watch it on the map and in Activity.`, "match");
+    toast(`${esc(a.uses_endpoints ? "Your API model" : a.name)} ${count > 1 ? `× ${count} are` : "is"} starting. ${LZ.task === "readable" ? "Matched functions get real names, types and a comment, one by one" : "Watch the map fill in"}; Agents says what each one does.`, "match");
     poll(false);
     loadNav();
   } catch (e) { toast(esc(e.message), "err"); } finally { if (btn) btn.disabled = false; }
 }
 
-function renderLauncher(box, compact = false) {
+/* The launcher, in the header's Start agents popover: the one place agents start from. `compact`: an API endpoint
+   typed in here asks only what starting needs (the rest is on Agents & models). */
+const TASKS = [["", "Decompile", "match functions the game has, byte for byte"],
+  ["readable", "Polish matched code", "give matched functions real names, types and a comment; they still match"]];
+const POLISH_FROM_SHARE = 0.5;  // polishing comes once most of the work is matching: before that, agents decompile
+function renderLauncher(box, compact = true) {
   if (!box || !S.st) return;
   launcherInit();
-  const list = S.st.agents;
+  const list = [...S.st.agents].sort((x, y) => y.recommended - x.recommended);
   const a = list.find((x) => x.id === LZ.kind) || list[0];
   const kinds = list.map((x) => `<button type="button" class="lz-kind ${x.id === a.id ? "on" : ""}" data-k="${esc(x.id)}">
-      <b>${esc(x.name)}</b><span>${x.id === "api" ? "DeepSeek, OpenRouter, Ollama…" : x.installed ? esc(x.version ? x.version.replace(/\s*\(.*\)/, "") : x.vendor) : "not installed"}</span>
-      ${x.installed || x.id === "api" ? "" : `<em>install</em>`}</button>`).join("");
+      <b>${esc(x.name)}</b><span>${x.uses_endpoints ? `${x.recommended ? "Recommended · " : ""}any model with an API key` : x.installed ? esc(x.version ? x.version.replace(/\s*\(.*\)/, "") : x.vendor) : "not installed"}</span>
+      ${x.installed || x.uses_endpoints ? "" : `<em>install</em>`}</button>`).join("");
   let body = "";
   if (!a.installed) {
     body = `<p class="small"><b>${esc(a.name)}</b> isn't installed on this computer.${a.needs ? ` It needs ${esc(a.needs)} first.` : ""}</p>
       ${a.install ? cmdBox(a.install) : ""}
-      <div class="row"><button class="primary" data-act="install" type="button" ${a.needs ? "disabled" : ""}>Install it for me</button><a class="link small" href="${esc(a.docs)}" target="_blank" rel="noopener">About ${esc(a.name)}</a></div>
+      <div class="row"><button class="primary" data-act="install" type="button" ${a.needs ? "disabled" : ""}>Install it for me</button><button class="link-btn" data-act="detect" type="button">Installed it already? Look again</button><a class="link small" href="${esc(a.docs)}" target="_blank" rel="noopener">About ${esc(a.name)}</a></div>
       <p class="muted small">${esc(a.signin)}</p><pre class="joblog" data-log hidden></pre>`;
-  } else if (a.id === "api") {
+  } else if (a.uses_endpoints) {
     const eps = S.st.settings.endpoints || [];
+    const why = `<p class="muted small">The app talks to the model itself: nothing else to install, and no other program's update can break it. Any OpenAI-compatible provider works (OpenAI, DeepSeek, OpenRouter) or a model on this computer; you pay your provider for what it uses.</p>`;
     LZ.eps = (LZ.eps || []).filter((id) => eps.some((e) => e.id === id));
     if (!LZ.eps.length && eps.length) LZ.eps = [eps[0].id];
     body = eps.length && !LZ.adding ? `<div class="ep-pick">${eps.map((e) => `<label class="check inline"><input type="checkbox" data-ep="${esc(e.id)}" ${LZ.eps.includes(e.id) ? "checked" : ""}>
         <span><b>${esc(e.name)}</b> <span class="mono small">${esc(e.model)}</span><br><span class="muted small mono">${esc(hostOf(e.base_url))}${e.max_sessions ? ` · at most ${e.max_sessions} at once` : ""}</span></span></label>`).join("")}</div>
       <p class="muted small">${eps.length > 1 ? "Tick several to spread the sessions across them. " : ""}<a class="link" href="#/agents">Manage endpoints</a> · <button type="button" class="link-btn" data-act="add-ep">Add one</button></p>`
       : `<div class="lz-fields">${endpointFields({ provider: "deepseek" }, compact)}</div>${eps.length ? `<p class="muted small"><button type="button" class="link-btn" data-act="pick-ep">Back to your endpoints</button></p>` : ""}`;
+    body = why + body;
   } else {
     const opts = modelOptions(a);
     const known = opts.some((o) => o.id === LZ.model);
     body = `<label class="field"><span>Model</span><select data-f="model">${opts.map((o) => `<option value="${esc(o.id)}" ${known && o.id === LZ.model ? "selected" : ""}>${esc(o.name)}${o.note ? ` — ${esc(o.note)}` : ""}</option>`).join("")}
         <option value="__other" ${known ? "" : "selected"}>Another model…</option></select></label>
       <input data-f="custom" class="mono lz-custom" placeholder="model name, as ${esc(a.name)} calls it" value="${known ? "" : esc(LZ.model)}" ${known ? "hidden" : ""}>
-      ${a.id === "opencode" ? `<label class="field"><span>Effort (how hard the model thinks; opencode 2, for models that offer it)</span><select data-f="effort">${[["", "Model's default"], ["low", "Low"], ["medium", "Medium"], ["high", "High"], ["max", "Max"]].map(([v, l]) => `<option value="${v}" ${LZ.effort === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>` : ""}`;
+      ${a.takes_effort ? `<label class="field"><span>Effort (how hard the model thinks, for models that offer it)</span><select data-f="effort">${[["", "Model's default"], ["low", "Low"], ["medium", "Medium"], ["high", "High"], ["max", "Max"]].map(([v, l]) => `<option value="${v}" ${LZ.effort === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>` : ""}`;
   }
   const ready = a.installed;
-  box.innerHTML = `<div class="lz-kinds">${kinds}</div>
+  // a ROM project's helpers can also polish matched C (app/readable.py), once half the game matches
+  const tasks = S.ov && S.ov.kind !== "fork" && S.ov.functions && S.ov.matched >= S.ov.functions * POLISH_FROM_SHARE ? `<div class="field"><span>What they do</span><div class="seg" role="radiogroup" aria-label="What they do">${
+    TASKS.map(([k, label, what]) => `<button type="button" role="radio" aria-checked="${LZ.task === k}" class="${LZ.task === k ? "on" : ""}" data-task="${k}" title="${what}">${label}</button>`).join("")}</div>
+    <span class="muted small">${esc(TASKS.find(([k]) => k === LZ.task)[2])}</span></div>` : "";
+  if (!tasks) LZ.task = "";
+  box.innerHTML = `${tasks}<div class="lz-kinds">${kinds}</div>
     <div class="lz-body">${body}
       ${ready ? `<div class="lz-row">
         <div class="field"><span>How many</span><span class="stepper"><button type="button" data-step="-1">−</button><output>${LZ.count}</output><button type="button" data-step="1">+</button></span></div>
-        ${compact ? "" : `<label class="field"><span>Functions per session</span><input data-f="per" type="number" min="1" max="20" value="${LZ.per || S.st.settings.per_session || 2}"></label>`}
+        <label class="field"><span>Functions per session</span><input data-f="per" type="number" min="1" max="${MAX_PER_SESSION}" value="${LZ.per || S.st.settings.per_session}"></label>
         <span class="grow"></span>
         <button class="primary" data-act="start" type="button">${esc(launchLabel(a, LZ.model, LZ.count))}</button></div>
-        <p class="muted small">${a.id === "api" ? "A built-in agent loop drives the model through the decomp tools." : esc(a.signin)} Each agent takes a different function; a fresh session every few functions keeps its context small.</p>` : ""}
+        <p class="muted small">${a.uses_endpoints ? "A built-in agent loop drives the model through the decomp tools." : esc(a.signin)} Each agent takes a different function; a fresh session every few functions keeps its context small.</p>` : ""}
     </div>`;
   wireCopies(box);
-  const rerender = () => { renderLauncher(box, compact); if (box !== $("launcher") && S.tab === "agents") renderLauncher($("launcher")); };
+  const rerender = () => renderLauncher(box, compact);
+  box.querySelectorAll("[data-task]").forEach((b) => { b.onclick = () => { LZ.task = b.dataset.task; rerender(); }; });
   box.querySelectorAll(".lz-kind").forEach((b) => { b.onclick = () => { LZ.kind = b.dataset.k; LZ.model = (S.st.settings.launcher || {}).kind === LZ.kind ? S.st.settings.launcher.model || "" : ""; rerender(); }; });
   const sel = box.querySelector('select[data-f="model"]'), custom = box.querySelector('[data-f="custom"]');
   const label = () => { const btn = box.querySelector('[data-act="start"]'); if (btn) btn.textContent = launchLabel(a, LZ.model, LZ.count); };
@@ -182,7 +242,7 @@ function renderLauncher(box, compact = false) {
   if (eff) eff.onchange = () => { LZ.effort = eff.value; label(); };
   box.querySelectorAll("[data-step]").forEach((b) => { b.onclick = () => { LZ.count = Math.max(1, Math.min(8, LZ.count + Number(b.dataset.step))); box.querySelector(".stepper output").textContent = LZ.count; label(); }; });
   const per = box.querySelector('[data-f="per"]');
-  if (per) per.onchange = () => { LZ.per = Math.max(1, Math.min(20, Number(per.value) || 4)); };
+  if (per) per.onchange = () => { LZ.per = Math.max(1, Math.min(MAX_PER_SESSION, Number(per.value) || S.st.settings.per_session)); };
   wireEndpointFields(box);
   box.querySelectorAll("[data-ep]").forEach((c) => { c.onchange = () => { LZ.eps = [...box.querySelectorAll("[data-ep]:checked")].map((x) => x.dataset.ep); label(); }; });
   const addEp = box.querySelector('[data-act="add-ep"]'), pickEp = box.querySelector('[data-act="pick-ep"]');
@@ -191,18 +251,24 @@ function renderLauncher(box, compact = false) {
   const inst = box.querySelector('[data-act="install"]');
   if (inst) inst.onclick = async () => {
     const log = box.querySelector("[data-log]");
-    log.hidden = false; inst.disabled = true;
+    showJobError(log, ""); inst.disabled = true;
     try {
       const { job } = await api("/api/agents/install", { method: "POST", body: { kind: a.id } });
       await followJob(job, log);
       toast(`${esc(a.name)} installed. ${esc(a.signin)}`, "match");
       await loadState();
       rerender();
-    } catch (e) { toast(esc(e.message), "err"); inst.disabled = false; }
+    } catch (e) { showJobError(log, e.message); inst.disabled = false; }
+  };
+  const again = box.querySelector('[data-act="detect"]');
+  if (again) again.onclick = async () => {
+    again.disabled = true;
+    await api("/api/agents/detect", { method: "POST" }).catch((e) => toast(esc(e.message), "err"));
+    await loadState();  // (it asks again by itself until the look is done)
   };
   const go = box.querySelector('[data-act="start"]');
   if (go) go.onclick = async () => {
-    if (a.id === "api") {
+    if (a.uses_endpoints) {
       if (box.querySelector('[data-f="prov"]')) {  // a new endpoint, typed in here: saved, then started on
         const before = new Set((S.st.settings.endpoints || []).map((e) => e.id));
         try { S.st.settings = await api("/api/settings", { method: "POST", body: { endpoint: endpointData(box) } }); } catch (e) { return toast(esc(e.message), "err"); }
@@ -250,9 +316,16 @@ function endpointData(scope, id = "") {
 function showLaunch() {
   if (!S.st || !S.slug) return;
   $("launchPop").hidden = false;
-  renderLauncher($("launchPopBody"), true);
+  $("phStart").setAttribute("aria-expanded", "true");
+  renderLauncher($("launchPopBody"));
+  $("launchPopBody").querySelector("button, input, select")?.focus();
 }
-function hideLaunch() { $("launchPop").hidden = true; }
+function hideLaunch(back = false) {
+  if ($("launchPop").hidden) return;
+  $("launchPop").hidden = true;
+  $("phStart").setAttribute("aria-expanded", "false");
+  if (back) $("phStart").focus();
+}
 $("phStart").onclick = (e) => { e.stopPropagation(); if ($("launchPop").hidden) showLaunch(); else hideLaunch(); };
 // (the path as clicked: choosing an agent re-renders the popover, so the clicked tile isn't in the page any more)
 document.addEventListener("click", (e) => {
@@ -260,7 +333,8 @@ document.addEventListener("click", (e) => {
 });
 
 /* ------------------------------------------------------------------ feeds */
-function fnLink(name) { return `<span class="fn" data-fn="${esc(name)}">${esc(name)}</span>`; }
+// a button, so the keyboard reaches every function named on the page
+function fnLink(name) { return `<button type="button" class="fn" data-fn="${esc(name)}">${esc(name)}</button>`; }
 function eventHtml(ev) {
   const who = `<span class="who">${esc(ev.agent || "")}</span>`;
   const d = ev.detail || "";
@@ -278,6 +352,11 @@ function eventHtml(ev) {
     case "import": return `ROM analysed: ${esc(d)}`;
     case "compiler": return `compiler set to ${esc(d)}`;
     case "collab": return esc(d);
+    case "paused": return `<span class="bad">${who} paused: ${esc(d)}</span>`;
+    case "stopped": return `${who} stopped: ${esc(d)}`;
+    case "autopilot": return `<span class="who">autopilot</span> ${esc(d)}`;
+    case "reopen": return esc(d);
+    case "knowledge": return `${who} and another model agree on something every agent should know (${esc(d)}): What agents learned, below`;
     default: return `${who} ${esc(ev.kind)} ${esc(d)}`;
   }
 }
@@ -287,6 +366,7 @@ function groupHtml(g) {
   const who = `<span class="who">${esc(g.agent || "")}</span>`;
   const p = pctOf(g.best, g.insns);
   if (g.matched) return `<span class="ok">✓</span> ${who} matched ${fnLink(g.fn)}${g.tries ? ` <span class="score">after ${plural(g.tries, "compile")}</span>` : ""}`;
+  if (g.overtaken) return `${who} worked on ${fnLink(g.fn)}${g.tries ? ` <span class="score">${plural(g.tries, "compile")}</span>` : ""} · <span class="ok">matched by ${esc(g.overtaken)}</span>`;
   if (g.released) return `${who} set ${fnLink(g.fn)} aside, with notes for the next agent${g.tries ? ` <span class="score">${plural(g.tries, "compile")}${p != null ? ` · best ${pctText(p)}` : ""}</span>` : ""}`;
   if (!g.tries) return `${who} started ${fnLink(g.fn)}`;
   const last = g.lastScore === undefined ? "" : g.lastScore === null ? ` · <span class="bad">last one didn't compile</span>` : "";
@@ -314,17 +394,30 @@ function touchGroup(agent, fn, t, change, first) {
   } else g.li = addLine(t, groupHtml(g), first);
   if (g.matched || g.released) groups.delete(key);
 }
+/* A match ends every other agent's line about that function too: they stopped "working on" it. */
+function matchedBy(agent, fn) {
+  for (const [key, g] of groups) {
+    if (g.fn !== fn || g.agent === agent) continue;
+    g.overtaken = agent;
+    if (g.li && g.li.isConnected) g.li.querySelector("span").innerHTML = groupHtml(g);
+    groups.delete(key);
+  }
+}
 
 const AUTO = "autopilot";
 function autopilotLine(t, first, done) {
   const a = S.apFeed || (S.apFeed = { tried: 0, matched: 0, li: null });
   const html = `<span class="who">autopilot</span> ${done ? esc(done) : `tried ${plural(a.tried, "machine draft")}${a.matched ? ` · <span class="ok">${a.matched} matched</span>` : ""}`}`;
-  if (a.li && a.li.isConnected) { a.li.querySelector("time").textContent = clock(t); a.li.querySelector("span").innerHTML = html; }
-  else a.li = addLine(t, html, first);
+  if (a.li && a.li.isConnected) {
+    a.li.querySelector("time").textContent = clock(t);
+    a.li.querySelector("span").innerHTML = html;
+    if (a.li !== $("activity").firstElementChild) $("activity").prepend(a.li);  // newest first, like every line
+  } else a.li = addLine(t, html, first);
 }
 function addActivity(events, attempts, first) {
   const items = [...events.map((e) => ({ t: e.created_at, ev: e })), ...attempts.map((a) => ({ t: a.created_at, at: a }))];
-  items.sort((a, b) => a.t - b.t);
+  // in the same second, the attempt before its match: else the match closed the line and the attempt opened a new one
+  items.sort((a, b) => a.t - b.t || (a.at ? 0 : 1) - (b.at ? 0 : 1));
   for (const it of items) {
     const auto = (who) => who === AUTO || who === "@" + AUTO;  // ours, or the room host's
     if ((it.at && auto(it.at.agent)) || (it.ev && auto(it.ev.agent) && ["match", "claim", "autopilot"].includes(it.ev.kind))) {
@@ -341,12 +434,12 @@ function addActivity(events, attempts, first) {
         if (at.score != null) g.best = g.best == null ? at.score : Math.min(g.best, at.score);
       }, first);
     } else if (it.ev.kind === "claim") touchGroup(it.ev.agent, it.ev.detail, it.t, () => {}, first);
-    else if (it.ev.kind === "match") touchGroup(it.ev.agent, it.ev.detail, it.t, (g) => { g.matched = true; }, first);
+    else if (it.ev.kind === "match") { matchedBy(it.ev.agent, it.ev.detail); touchGroup(it.ev.agent, it.ev.detail, it.t, (g) => { g.matched = true; }, first); }
     else if (it.ev.kind === "release") touchGroup(it.ev.agent, it.ev.detail, it.t, (g) => { g.released = true; }, first);
     else addLine(it.t, eventHtml(it.ev), first);
   }
   const list = $("activity");
-  while (list.children.length > 300) list.lastChild.remove();
+  while (list.children.length > ACTIVITY_ROWS) list.lastChild.remove();
   list.querySelectorAll(".fn").forEach((x) => { x.onclick = () => openFn(x.dataset.fn); });
   if (!list.children.length) list.innerHTML = `<li class="placeholder"><time></time><span class="muted">Nothing yet. Start an agent and its work shows up here.</span></li>`;
 }
@@ -360,24 +453,43 @@ function miniMarkdown(text) {
     .replace(/^- /gm, "• ");
 }
 
-function addThoughts(sessions, first) {
+/* One helper's log: what it said, thought and called, newest first. It takes the place of everything that happens
+   ("What's happening") while it's open: what each agent does and what it said belong together. */
+function logLine(f, fresh) {
+  const li = document.createElement("li");
+  if (fresh) li.className = "fresh";
+  const time = document.createElement("time"); time.textContent = clock(f.t);
+  const body = document.createElement("span"); body.className = "t-" + f.type;
+  if (f.type === "text") body.innerHTML = miniMarkdown(f.text.slice(0, SAID_SHOWN));
+  else body.textContent = f.type === "think" ? f.text.slice(0, THOUGHT_SHOWN) : f.text;
+  li.append(time, body);
+  return li;
+}
+function renderLog() {
+  const s = (S.sessions || []).find((x) => x.id === S.logFor);
+  $("activity").hidden = !!s; $("thoughts").hidden = !s; $("helperLogClose").hidden = !s;
+  $("feedTitle").textContent = s ? `What ${s.label} said and did` : "What's happening";
+  $("feedHint").textContent = s ? "its own words, its thinking and the tools it called, newest first" : "every agent's work on this game, newest first";
+  if (!s) return;
   const list = $("thoughts");
-  const items = [];
-  for (const s of sessions) for (const f of s.feed) items.push({ ...f, label: s.label });
-  items.sort((a, b) => a.t - b.t);
-  for (const it of items) {
-    const li = document.createElement("li");
-    if (!first) li.className = "fresh";
-    const time = document.createElement("time"); time.textContent = clock(it.t);
-    const src = document.createElement("span"); src.className = "src"; src.textContent = it.label;
-    const body = document.createElement("span"); body.className = "t-" + it.type;
-    if (it.type === "text") body.innerHTML = miniMarkdown(it.text.slice(0, 1600));
-    else body.textContent = it.type === "think" ? it.text.slice(0, 1200) : it.text;
-    li.append(time, src, body);
-    list.prepend(li);
+  list.innerHTML = "";
+  for (const f of S.feeds[s.id] || []) list.prepend(logLine(f, false));
+  if (!list.children.length) list.innerHTML = `<li class="placeholder"><time></time><span class="muted">Nothing since decompdecomp started. What it says and does shows here as it works.</span></li>`;
+}
+/* The live poll's new lines of every helper's log (the name is from when they all went into one list). */
+function addThoughts(sessions, first) {
+  if (first) S.feeds = {};  // a project opened again: the app sends each helper's whole log once more
+  for (const s of sessions) {
+    if (!s.feed.length) continue;
+    const kept = (S.feeds[s.id] ||= []);
+    kept.push(...s.feed);
+    kept.splice(0, Math.max(0, kept.length - FEED_KEEP));
+    if (s.id !== S.logFor || first) continue;
+    const list = $("thoughts");
+    list.querySelector(".placeholder")?.remove();
+    for (const f of s.feed) list.prepend(logLine(f, true));
+    while (list.children.length > FEED_KEEP) list.lastChild.remove();
   }
-  while (list.children.length > 400) list.lastChild.remove();
-  if (!list.children.length) list.innerHTML = `<li class="placeholder"><time></time><span class="muted">Helper agents you start from decompdecomp think out loud here.</span></li>`;
-  else list.querySelector(".placeholder")?.remove();
+  if (first) renderLog();
 }
 

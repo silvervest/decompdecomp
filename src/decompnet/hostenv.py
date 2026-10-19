@@ -1,204 +1,51 @@
-"""Where decompdecomp runs, and how it reaches the computer around it.
+"""How decompdecomp reaches the Linux desktop around it: file paths the user types, opening a folder in the file
+manager. (Links to other sites open in the user's browser from the window itself: gtkwindow.py.)
 
-decompdecomp is a Linux program everywhere: on Linux it runs on the computer itself ("native"); on Windows inside
-its own WSL 2 distribution ("wsl", made by install.ps1); on servers, if wanted, in a Docker container ("docker",
-site/public/Dockerfile). Everything inside is the same Linux; only a few things cross to the computer the
-user sits at: opening the browser or a folder, and file paths the user types (C:\\Users\\..., ~/Downloads/...).
+decompdecomp runs on Linux only. Windows (through WSL 2) and Docker were supported until 1.0.2 and removed in the
+rewrite: nobody tested them, and most of their code served the agent bridge that went with it.
 """
 
 from __future__ import annotations
 
-import functools
-import os
-import shutil
 import subprocess
-import sys
-import webbrowser
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 
-RUNTIME_FILE = Path("/etc/decomp-wtf-runtime")  # written by linux-base.sh: "wsl" or "docker"
+KERNEL_RELEASE = Path("/proc/sys/kernel/osrelease")  # "...-microsoft-standard-WSL2" inside WSL
+# 1.0.2 on Windows lived in a WSL distribution of its own; it updates itself into this version, which doesn't run there
+WSL_DISTRO, WSL_USER = "decomp-wtf", "decomp"
+OLD_VERSION_SPEC = "decompnet @ https://github.com/n-delic/decompdecomp/archive/refs/tags/v1.0.2-alpha.tar.gz"
+# (the last line turns off 1.0.2's tray icon: with the system packages this version's window uses, loading it put
+# the system's old websockets ahead of uvicorn's, and 1.0.2 quit at start: GitHub #11)
+WSL_GO_BACK = (f"wsl --terminate {WSL_DISTRO}\n"
+               f"wsl -d {WSL_DISTRO} -u {WSL_USER} --exec /home/{WSL_USER}/.local/bin/uv tool install --force "
+               f'--python 3.12 "{OLD_VERSION_SPEC}"\n'
+               f"wsl -d {WSL_DISTRO} -u root --exec sh -c \"echo 'export DECOMP_TRAY=0' >> /etc/profile.d/{WSL_DISTRO}.sh\"")
 
 
-@functools.cache
-def runtime() -> str:
-    """native, wsl or docker."""
-    if (env := os.environ.get("DECOMP_RUNTIME", "").strip()) in ("native", "wsl", "docker"):
-        return env
+def in_wsl() -> bool:
+    """Running inside Windows' WSL, where this version isn't supported (1.0.4 brings Windows back)."""
     try:
-        made = RUNTIME_FILE.read_text(encoding="utf-8").strip()
-        if made in ("wsl", "docker"):
-            return made
+        return "microsoft" in KERNEL_RELEASE.read_text(encoding="utf-8").lower()
     except OSError:
-        pass
-    if sys.platform.startswith("linux"):
-        if os.environ.get("WSL_DISTRO_NAME") or Path("/proc/sys/fs/binfmt_misc/WSLInterop").exists():
-            return "wsl"
-        if Path("/.dockerenv").exists():
-            return "docker"
-    return "native"
+        return False
 
-
-def host_os() -> str:
-    """The system the user sits at: linux, windows or macos."""
-    if runtime() == "wsl":
-        return "windows"
-    if runtime() == "docker":
-        return os.environ.get("DECOMP_HOST_OS") or "linux"
-    return {"win32": "windows", "darwin": "macos"}.get(sys.platform, "linux")
-
-
-def distro() -> str:
-    return os.environ.get("WSL_DISTRO_NAME") or "decomp-wtf"
-
-
-# ---------------------------------------------------------------------------------- Windows, from inside WSL
-
-@functools.cache
-def _windows_tool(name: str) -> str | None:
-    """A program in Windows' System32, reachable through WSL's interop (Windows' PATH isn't on ours)."""
-    found = shutil.which(name)
-    if found:
-        return found
-    for root in sorted(Path("/mnt").glob("[a-z]")):
-        exe = root / "Windows" / "System32" / name
-        if exe.exists():
-            return str(exe)
-    return None
-
-
-def windows_path(path: Path | str) -> str:
-    """How Windows reaches a file of this WSL system: \\\\wsl.localhost\\decomp-wtf\\home\\..."""
-    try:
-        res = subprocess.run(["wslpath", "-w", str(path)], capture_output=True, text=True, timeout=10)
-        if res.returncode == 0 and res.stdout.strip():
-            return res.stdout.strip()
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    p = str(path)
-    if p.startswith("/mnt/") and len(p) > 6 and p[6:7] in ("/", ""):
-        return f"{p[5].upper()}:\\" + p[7:].replace("/", "\\")
-    return f"\\\\wsl.localhost\\{distro()}" + p.replace("/", "\\")
-
-
-def _from_windows(text: str) -> Path | None:
-    """C:\\Users\\me\\game.iso (or C:/Users/...) and \\\\wsl.localhost\\<distro>\\... as paths here."""
-    if text.startswith(("\\\\wsl.localhost\\", "\\\\wsl$\\")):
-        parts = PureWindowsPath(text).parts  # ('\\\\wsl.localhost\\decomp-wtf\\', 'home', ...)
-        return Path("/", *parts[1:])
-    if len(text) >= 3 and text[0].isalpha() and text[1] == ":" and text[2] in "\\/":
-        try:
-            res = subprocess.run(["wslpath", "-u", text], capture_output=True, text=True, timeout=10)
-            if res.returncode == 0 and res.stdout.strip():
-                return Path(res.stdout.strip())
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        return Path("/mnt", text[0].lower(), *PureWindowsPath(text).parts[1:])
-    return None
-
-
-def _from_unix_on_windows(text: str) -> Path | None:
-    """decompdecomp run natively on Windows, given a path as WSL (/mnt/c/XDK) or Git Bash (/c/XDK) writes it, or
-    with forward slashes: the Windows path (C:\\XDK). People copy paths from whichever shell they work in."""
-    import re
-
-    m = re.fullmatch(r"/(?:mnt/)?([A-Za-z])(/.*)?", text.replace("\\", "/"))
-    if m is None:
-        return None
-    return Path(str(PureWindowsPath(f"{m.group(1).upper()}:/", *(m.group(2) or "/").split("/"))))
-
-
-# ---------------------------------------------------------------------------------- crossing over
 
 def local_path(text: str) -> Path:
-    """A file path the user (or their agent, on their own computer) gave, as decompdecomp sees it.
-
-    WSL: Windows paths become /mnt/c/...; Docker: the host's home is mounted at the same path inside, and ~ means
-    the user's home there, not the container's."""
-    text = text.strip().strip('"').strip("'")
-    if runtime() == "wsl" and (p := _from_windows(text)) is not None:
-        return p
-    if runtime() == "native" and sys.platform == "win32" and (p := _from_unix_on_windows(text)) is not None:
-        return p
-    if runtime() == "docker" and (host_home := os.environ.get("DECOMP_HOST_HOME")):
-        if text == "~" or text.startswith("~/"):
-            return Path(host_home + text[1:])
-    return Path(text).expanduser()
+    """A file path the user gave (in a form, or pasted with quotes around it), as a path."""
+    return Path(text.strip().strip('"').strip("'")).expanduser()
 
 
 def shown_path(path: Path | str) -> str:
-    """A path of decompdecomp's, as the user can open it on their own computer."""
-    if runtime() == "wsl":
-        return windows_path(path)
-    return str(path)
-
-
-def open_url(url: str) -> bool:
-    """Open a page in the user's browser. False when that can't be done from here (Docker: the host opens it)."""
-    rt = runtime()
-    if rt == "docker":
-        return False
-    from .app import window  # the app's own window (Edge on Windows), when this is the server: window.WINDOW is set
-    if window.open_app(url):
-        return True
-    if rt == "wsl":
-        exe = _windows_tool("rundll32.exe")
-        if not exe:
-            return False
-        try:  # no cmd.exe in between: it would read & and ^ in the address as its own
-            subprocess.Popen([exe, "url.dll,FileProtocolHandler", url], stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-            return True
-        except OSError:
-            return False
-    try:
-        return webbrowser.open(url)
-    except Exception:  # no browser at all (a server)
-        return False
+    """A path of decompdecomp's as the user reads it: the home folder as ~."""
+    shown, home = str(path), str(Path.home())
+    return "~" + shown[len(home):] if shown == home or shown.startswith(home + "/") else shown
 
 
 def open_folder(path: Path) -> str | None:
     """Show a folder in the user's file manager. Returns why it couldn't, or None."""
-    rt = runtime()
-    if rt == "docker":
-        return (f"Your projects are inside decompdecomp's Docker volume ({path}). Open a terminal there with "
-                f"`decomp shell`, or copy this one out with: docker cp decomp-wtf:{path} ~/Desktop/")
-    if rt == "wsl":
-        exe = _windows_tool("explorer.exe")
-        if not exe:
-            return f"Open this in Windows' file explorer: {windows_path(path)}"
-        subprocess.Popen([exe, windows_path(path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)  # explorer.exe always exits with 1
-        return None
-    if sys.platform == "win32":
-        os.startfile(str(path))  # noqa: S606 (opening the user's own folder)
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", str(path)])
-    else:
-        subprocess.Popen(["xdg-open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.Popen(["xdg-open", str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        return f"Open this folder in your file manager: {path}"
     return None
-
-
-def host_bridge() -> list[str] | None:
-    """How an agent on the user's own computer starts `decomp mcp` when decompdecomp runs in WSL or Docker (None:
-    decompdecomp runs on that computer itself)."""
-    rt = runtime()
-    if rt == "wsl":  # WSL doesn't pass Windows' environment through: the agent's name goes in as --name
-        return ["wsl.exe", "-d", distro(), "--cd", "~", "--exec", "/usr/local/bin/decomp", "mcp"]
-    if rt == "docker":
-        home = os.environ.get("DECOMP_HOST_HOME")
-        return [f"{home}/.local/bin/decomp", "mcp"] if home else ["docker", "exec", "-i", "decomp-wtf", "decomp", "mcp"]
-    return None
-
-
-def terminal_hint() -> str:
-    """How the user opens a terminal where decompdecomp's helper agents live (to sign them in)."""
-    rt = runtime()
-    if rt == "wsl":
-        return "Open decompdecomp's terminal (run `decomp shell` in PowerShell, or `wsl -d decomp-wtf`)"
-    if rt == "docker":
-        return "Open decompdecomp's terminal (run `decomp shell` in your terminal)"
-    return "Open a terminal"
-
-
-def info() -> dict:
-    return {"runtime": runtime(), "host_os": host_os()}

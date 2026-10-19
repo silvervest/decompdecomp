@@ -1,22 +1,45 @@
 "use strict";  // each script is strict on its own (see base.js)
 /* ------------------------------------------------------------------ drawers, keys */
+/* A drawer (the function, a dialog) takes the keyboard while it's open and gives it back where it was when it closes:
+   whoever works with the keyboard isn't left at the top of the page. */
+function showDrawer(id) {
+  const d = $(id);
+  if (d.hidden) S[id + "From"] = document.activeElement;
+  d.hidden = false;
+  document.body.classList.add("locked");
+  const field = id === "dialog" && [...d.querySelectorAll(".drawer-body input, .drawer-body textarea, .drawer-body select")].find((x) => x.offsetParent);
+  if (!d.contains(document.activeElement)) (field || d.querySelector("[data-close]")).focus();
+}
+function hideDrawer(id) {
+  const d = $(id);
+  if (d.hidden) return;
+  if (id === "drawer") { giveBack(null); S.fn = null; if (S.map.length) drawMap(); }
+  if (id === "dialog") S.dialogKind = "";
+  d.hidden = true;
+  if ($("drawer").hidden && $("dialog").hidden) document.body.classList.remove("locked");
+  const back = S[id + "From"];
+  if (back && back.isConnected && !back.closest("[hidden]")) back.focus();
+}
 function closeAll() {
-  if (!$("drawer").hidden) giveBack(null);
-  for (const id of ["drawer", "dialog"]) $(id).hidden = true;
-  document.body.classList.remove("locked");
+  hideDrawer("dialog");
+  hideDrawer("drawer");
   S.fn = null;
-  if (S.map.length) drawMap();
 }
 document.querySelectorAll(".drawer").forEach((d) => {
   d.addEventListener("click", (e) => {
-    if (e.target !== d && !e.target.closest("[data-close]")) return;
-    if (d.id === "drawer") { giveBack(null); S.fn = null; drawMap(); }
-    d.hidden = true;
-    if ($("drawer").hidden && $("dialog").hidden) document.body.classList.remove("locked");
+    if (e.target === d || e.target.closest("[data-close]")) hideDrawer(d.id);
   });
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { if (!$("launchPop").hidden) { hideLaunch(); return; } closeAll(); return; }
+  if (e.key === "Escape") {
+    if (!$("launchPop").hidden) hideLaunch(true);
+    else if (!$("notifPanel").hidden) closeNotes();
+    else if (!$("dialog").hidden) hideDrawer("dialog");
+    else hideDrawer("drawer");
+    return;
+  }
+  // what looks like a button and isn't one (a function's card on the overview) works like one from the keyboard
+  if ((e.key === "Enter" || e.key === " ") && e.target.matches("[role=button]:not(button)")) { e.preventDefault(); e.target.click(); return; }
   if (e.target.closest("input, textarea, select") || e.metaKey || e.ctrlKey || e.altKey) return;  // typing
   if (!$("drawer").hidden && (e.key === "j" || e.key === "k")) { e.preventDefault(); stepFn(e.key === "j" ? 1 : -1); return; }
   if (e.key === "/" && S.slug && $("drawer").hidden) {
@@ -33,91 +56,67 @@ function wireCopies(root) {
   root.querySelectorAll("[data-copy]").forEach((b) => { b.onclick = () => navigator.clipboard.writeText(b.dataset.copy).then(() => { b.textContent = "Copied"; setTimeout(() => (b.textContent = "Copy"), 1500); }); });
 }
 
-function dialog(title, html) {
+/* The side panel for one task (decompiling together, the export, a rename...). `kind` says which, for what keeps it
+   up to date while it's open. */
+function dialog(title, html, kind = "") {
   $("dialogTitle").textContent = title;
   $("dialogBody").innerHTML = html;
-  $("dialog").hidden = false;
-  document.body.classList.add("locked");
+  $("dialogBody")._html = null;  // (setHtml's memory of what another panel showed here)
+  S.dialogKind = kind;
+  showDrawer("dialog");
   wireCopies($("dialogBody"));
   return $("dialogBody");
 }
+const closeDialog = () => hideDrawer("dialog");
 
 $("joinBtn").onclick = openJoin;
-$("askBtn").onclick = openConnect;
-$("talkBtn").onclick = openConnect;
-$("connectBtn").onclick = openConnect;
 
-/* Your own agent with decompdecomp's tools: registered once, then you just ask it. */
-async function connectRows(box) {
-  const render = (rows) => {
-    box.innerHTML = rows.map((a) => `<div class="line-item"><div class="txt"><b>${esc(a.name)}</b><span class="mono">${esc(a.command)}</span></div>
-      ${!a.installed ? `<span class="muted small">not installed</span>` : a.connected ? `<span class="ok-mark">connected</span>` : `<button class="primary small-btn" data-connect="${esc(a.id)}" type="button">Connect</button>`}</div>`).join("");
-    box.querySelectorAll("[data-connect]").forEach((b) => {
-      b.onclick = async () => {
-        b.disabled = true; b.textContent = "Connecting…";
-        try {
-          await api("/api/connect", { method: "POST", body: { id: b.dataset.connect } });
-          toast(`Connected. Ask it to decompile your game.`, "match");
-          render((await api("/api/connect")).agents);
-        } catch (e) { toast(esc(e.message), "err"); b.disabled = false; b.textContent = "Connect"; }
-      };
-    });
-  };
-  try {
-    const r = await api("/api/connect");
-    render(r.agents);
-    return r;
-  } catch (e) { box.innerHTML = `<p class="bad">${esc(e.message)}</p>`; return null; }
-}
-const HOST_NAMES = { windows: "Windows", macos: "your Mac", linux: "this computer" };
-async function openConnect() {
-  if (S.st && S.st.runtime && S.st.runtime !== "native") return openHostConnect();
-  const body = dialog("Use decompdecomp from your AI agent", `<p>Connect the agent you already use, once. Then ask it in your terminal, for example:</p>
-    ${cmdBox("decompile my game at ~/roms/game.z64")}
-    <p class="muted small">It confirms the game is your own copy, imports it, opens this live view and works with every tool here: the byte-for-byte judge, the autopilot, helper agents, export. Anything it does shows up here as it happens.</p>
-    <div class="setup-group" id="connectRows"><p class="muted small">Looking for your agents…</p></div>
-    <div class="setup-group"><h3>Any other MCP client (Cursor, Claude Desktop, Windsurf, your own)</h3><pre class="code" id="bridgeJson"></pre>
-      <p class="muted small">It starts decompdecomp when needed; no token, nothing to update when the app restarts.</p></div>`);
-  const r = await connectRows(body.querySelector("#connectRows"));
-  if (r) body.querySelector("#bridgeJson").textContent = JSON.stringify({ mcpServers: { decomp: { command: r.bridge[0], args: r.bridge.slice(1) } } }, null, 2);
+/* The window asks the page before it closes (app/gtkwindow.py). Nothing working: quit. Helpers or a job working:
+   the user chooses between stopping them and quitting, and keeping them working without the window. The answer
+   "wait" tells the window the page takes it from here; if this throws, the window closes by itself. */
+function decompClose() {
+  api("/api/close").then((st) => {
+    if (!st.busy) return api("/api/close", { method: "POST", body: {} });
+    const what = st.helpers ? `${plural(st.helpers, "helper")} ${st.helpers === 1 ? "is" : "are"} still working on your games.`
+      : "A job is still running.";
+    const back = st.tray ? "The decompdecomp icon in the tray brings the window back." : "Open decompdecomp again to come back to them.";
+    const body = dialog("Close decompdecomp?", `<p>${what}</p>
+      <p class="muted small">They can keep working without the window. ${back}</p>
+      <div class="row"><button class="primary" id="closeKeep" type="button">Keep them working</button>
+        <button class="ghost" id="closeQuit" type="button">Stop them and quit</button>
+        <button class="ghost" data-close type="button">Cancel</button></div>`);
+    body.querySelector("#closeKeep").onclick = () => api("/api/close", { method: "POST", body: { keep: true } }).catch((e) => toast(esc(e.message), "err"));
+    body.querySelector("#closeQuit").onclick = () => api("/api/close", { method: "POST", body: {} }).catch((e) => toast(esc(e.message), "err"));
+  }).catch(() => api("/api/close", { method: "POST", body: {} }));
+  return "wait";
 }
 
-/* decompdecomp in WSL (Windows) or in Docker: the agents you talk to run on the computer itself, so they're
-   connected from there, by the `decomp` command the installer put on it. */
-async function openHostConnect() {
-  const host = HOST_NAMES[S.st.host_os] || "your computer";
-  const shell = S.st.host_os === "windows" ? "PowerShell" : "a terminal";
-  const body = dialog("Use decompdecomp from your AI agent", `<p>Run this once in ${esc(shell)} on ${esc(host)}: it connects Claude Code, Codex, Antigravity CLI and opencode there.</p>
-    ${cmdBox("decomp connect")}
-    <p>Then ask your agent, for example:</p>
-    ${cmdBox(S.st.host_os === "windows" ? "decompile my game at C:\\Games\\game.z64" : "decompile my game at ~/roms/game.z64")}
-    <p class="muted small">decompdecomp runs in ${S.st.runtime === "wsl" ? "its own WSL 2 Linux on Windows" : "Docker"}; your agent reaches it through the command below. Anything it does shows up here as it happens.</p>
-    <div class="setup-group"><h3>Any other MCP client (Cursor, Claude Desktop, Windsurf, your own)</h3><pre class="code" id="bridgeJson"></pre></div>`);
-  try {
-    const r = await api("/api/connect");
-    body.querySelector("#bridgeJson").textContent = JSON.stringify({ mcpServers: { decomp: { command: r.bridge[0], args: r.bridge.slice(1) } } }, null, 2);
-  } catch (e) { body.querySelector("#bridgeJson").textContent = e.message; }
-}
-
-/* ------------------------------------------------------------------ steering: instructions, next in line */
+/* ------------------------------------------------------------------ steering: instructions, what waits for you */
 function renderSteering(ov) {
   const sp = ov.spend;
   const n = ov.helper_matches || 0;
   $("spendLine").textContent = sp && sp.usd ? `· ${money(sp.usd)} spent${n ? ` · ${money(sp.usd / n)}/match` : ""}`
     : sp && sp.tokens ? `· ${(sp.tokens / 1000).toFixed(0)}k tokens` : "";
   $("instrState").textContent = ov.instructions ? "agents get these" : "none yet";
-  const sg = ov.suggestions || [];
-  const tcName = (id) => (S.st?.toolchains || []).find((t) => t.id === id)?.name || id;
-  const bd = ov.boundaries || [];
+  $("savePanel").hidden = ov.kind === "fork";  // a project-mode game's work is the files of its own git project
+  renderKnowledge();
+  // what agents can't change themselves: where a function ends, and suggestions; a compiler's are in Settings → Compiler
+  const sg = (ov.suggestions || []).filter((s) => !s.toolchain), bd = ov.boundaries || [];
   $("suggestPanel").hidden = !sg.length && !bd.length;
   setHtml($("suggestList"), bd.map((r) => `<div class="note"><small>${esc(r.agent)} · ${clock(r.t)} · where a function ends</small>
     <b class="mono">${esc(r.function)}</b> ends at <span class="mono">${hex8(r.end)}</span>: the ${r.cut} bytes after it aren't code. ${esc(r.reason)}
     <p class="small muted mono">after ${hex8(r.end)}: ${esc(r.rest)}</p>
-    <div class="row"><button class="primary small-btn" type="button" data-bapply="${r.id}">Cut it there</button><button class="ghost small-btn" type="button" data-bdismiss="${r.id}">Dismiss</button></div></div>`).join("") + sg.map((s) => `<div class="note"><small>${esc(s.agents.join(", "))}${s.agents.length > 1 ? ` · ${s.agents.length} agents agree` : ""} · ${clock(s.t)}</small>${esc(s.text)}
-    ${s.check ? `<p class="small ${s.check.includes("matches the game") ? "" : "muted"}">${s.check.includes("matches the game") ? "✓ " : ""}${esc(s.check)}</p>` : ""}
-    <div class="row">${s.toolchain ? `<button class="primary small-btn" type="button" data-apply="${s.id}">Use ${esc(tcName(s.toolchain))} ${esc(s.flags.join(" "))}${(s.ranges || []).length ? ` for ${s.ranges.length} range${s.ranges.length > 1 ? "s" : ""}` : ""}</button>` : ""}<button class="ghost small-btn" type="button" data-dismiss="${s.id}">Dismiss</button></div></div>`).join(""));
+    <div class="row"><button class="primary small-btn" type="button" data-bapply="${r.id}">Cut it there</button><button class="ghost small-btn" type="button" data-bdismiss="${r.id}">Dismiss</button></div></div>`).join("") + sg.map(suggestionHtml).join(""));
+  if (S.tab === "settings") renderCompilerWaiting(ov);
 }
-$("suggestList").onclick = async (e) => {
+const tcName = (id) => (S.st?.toolchains || []).find((t) => t.id === id)?.name || id;
+function suggestionHtml(s) {
+  const ok = s.check && s.check.includes("matches the game");
+  return `<div class="note"><small>${esc(s.agents.join(", "))}${s.agents.length > 1 ? ` · ${s.agents.length} agents agree` : ""} · ${clock(s.t)}</small>${esc(s.text)}
+    ${s.check ? `<p class="small ${ok ? "" : "muted"}">${ok ? "✓ " : ""}${esc(s.check)}</p>` : ""}
+    <div class="row">${s.toolchain ? `<button class="primary small-btn" type="button" data-apply="${s.id}">Use ${esc(tcName(s.toolchain))} ${esc(s.flags.join(" "))}${(s.ranges || []).length ? ` for ${plural(s.ranges.length, "part")}` : ""}</button>` : ""}<button class="ghost small-btn" type="button" data-dismiss="${s.id}">${s.toolchain ? "Not now" : "Dismiss"}</button></div></div>`;
+}
+$("suggestList").onclick = $("compilerWaiting").onclick = async (e) => {
   const cut = e.target.closest("button[data-bapply], button[data-bdismiss]");
   if (cut) {
     const apply = cut.dataset.bapply != null;
@@ -149,13 +148,48 @@ $("phRename").onclick = () => {
     try {
       S.ov = await api("/api/title", { method: "POST", body: { slug: S.slug, title: input.value } });
       renderHeader(S.ov);
-      $("dialog").hidden = true;
-      document.body.classList.remove("locked");
+      closeDialog();
       loadNav();
     } catch (e) { toast(esc(e.message), "err"); }
   };
   body.querySelector("#renameGo").onclick = go;
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+};
+/* What agents learned (app/knowledge.py): fetched now and then, not on every poll. */
+const KNOWLEDGE_EVERY_MS = 30000;
+async function renderKnowledge(force = false) {
+  if (!force && S.knowAt && Date.now() - S.knowAt < KNOWLEDGE_EVERY_MS && S.knowSlug === S.slug) return;
+  S.knowAt = Date.now(); S.knowSlug = S.slug;
+  let k;
+  try { k = await api(`/api/knowledge?slug=${encodeURIComponent(S.slug)}`); } catch { return; }
+  $("knowAuto").checked = k.auto;
+  const by = (it) => it.models.map(esc).join(", ");
+  const row = (it) => {
+    if (it.status === "agreed") return `<div class="note"><small>agreed by ${by(it)} · waiting for you</small>${esc(it.text)}
+      <div class="row"><button class="primary small-btn" data-know="${it.id}" data-accept="1" type="button">Give it to agents</button>
+      <button class="ghost small-btn" data-know="${it.id}" type="button">Reject</button></div></div>`;
+    if (it.status === "accepted") return `<div class="note"><small>agents get this · agreed by ${by(it)}</small>${esc(it.text)}
+      <div class="row"><button class="ghost small-btn" data-know="${it.id}" type="button">Take it back</button></div></div>`;
+    return `<div class="note muted"><small>waiting for a second model · proposed by ${by(it)}</small>${esc(it.text)}</div>`;
+  };
+  const waiting = k.items.filter((it) => it.status === "agreed").length;
+  $("knowState").textContent = waiting ? `${waiting} waiting for you` : k.items.length ? "" : "nothing yet";
+  setHtml($("knowList"), k.items.map(row).join(""));
+}
+$("knowList").onclick = async (e) => {
+  const b = e.target.closest("[data-know]");
+  if (!b) return;
+  try {
+    await api("/api/knowledge", { method: "POST", body: { slug: S.slug, id: Number(b.dataset.know), accept: !!b.dataset.accept } });
+    renderKnowledge(true);
+  } catch (err) { toast(esc(err.message), "err"); }
+};
+$("knowAuto").onchange = async (e) => {
+  try {
+    await api("/api/knowledge", { method: "POST", body: { slug: S.slug, auto: e.target.checked } });
+    toast(e.target.checked ? "What two models agree on goes to agents by itself now." : "You decide what agents get.");
+    renderKnowledge(true);
+  } catch (err) { toast(esc(err.message), "err"); }
 };
 $("instrSave").onclick = async () => {
   try {
@@ -164,22 +198,14 @@ $("instrSave").onclick = async () => {
     toast("Saved. Agents get them from their next task on.");
   } catch (e) { toast(esc(e.message), "err"); }
 };
+/* ★: agents take a starred function before the others. */
 async function togglePrio(name, on) {
   try {
     const r = await api("/api/priority", { method: "POST", body: { slug: S.slug, name, on } });
     S.ov.priority = r.priority;
-    toast(on ? `Agents take <code>${esc(name)}</code> next.` : "No longer first in line.");
-    renderList(); renderPrio();
+    toast(on ? `Agents take <code>${esc(name)}</code> before the others.` : `<code>${esc(name)}</code> waits its turn again.`);
+    renderList();
   } catch (e) { toast(esc(e.message), "err"); }
-}
-function renderPrio() {
-  const list = (S.ov && S.ov.priority) || [];
-  const box = $("prioList");
-  if (S.ov && S.ov.kind === "fork") { setHtml(box, `<li class="muted small">Agents pick the easiest open functions first.</li>`); return; }
-  setHtml(box, list.length ? list.map((n) => `<li><span class="star">★</span>${fnLink(n)}<span class="grow"></span><button class="link-btn" data-unpin="${esc(n)}" type="button">remove</button></li>`).join("")
-    : `<li class="muted small">Nothing pinned: agents take the easiest open functions first. Open a function and click ★ Next to put it first.</li>`);
-  box.querySelectorAll(".fn").forEach((x) => { x.onclick = () => openFn(x.dataset.fn); });
-  box.querySelectorAll("[data-unpin]").forEach((b) => { b.onclick = () => togglePrio(b.dataset.unpin, false); });
 }
 
 /* Autopilot: free matches before any agent spends a token: identical code (twins) of what's matched, then every
@@ -231,10 +257,20 @@ function renderAutopilot(ov) {
   };
 }
 
-const LAYOUT = { gc: "dtk-template", wii: "dtk-template", nds: "ds-decomp", win32: "Ghidra + objdiff" };
 const cwName = (c) => (c.startsWith("DS/") ? `CodeWarrior for DS ${c.slice(3)}` : `CodeWarrior ${c}`);
 
-/* ------------------------------------------------------------------ source: the base for ports and mods */
+/* ------------------------------------------------------------------ export: the base for ports and mods
+   The header's Export button opens it in the side panel (it was a Source tab). */
+function openExport() {
+  const fork = S.ov.kind === "fork";
+  dialog(fork ? "The source code" : "Export the source code", `<p id="srcText"></p><p class="muted small" id="srcWhen"></p><div class="src-state" id="srcState"></div>
+    <div class="row"><button class="primary" id="srcExport" type="button">Export project</button><button class="ghost" id="srcOpen" type="button">Open folder</button></div>
+    <pre class="joblog tall" id="expLog" hidden></pre><div id="expResult"></div>`, "export");
+  $("srcOpen").onclick = () => openFolder();
+  $("srcExport").onclick = exportNow;
+  renderSource(S.ov);
+}
+const exportOpen = () => S.dialogKind === "export" && !$("dialog").hidden;
 function renderSource(ov) {
   const ex = ov.export, fork = ov.kind === "fork";
   $("srcExport").hidden = fork || !ov.exportable;
@@ -242,9 +278,14 @@ function renderSource(ov) {
   if (fork) {
     const rb = ov.rebuild;
     $("srcText").innerHTML = ov.origin === "scratch"
+<<<<<<< HEAD
       ? `This project <b>is</b> the source tree: a ${LAYOUT[ov.platform] || "decomp"} project that rebuilds your game on every build. Every match is committed to git in the project folder.`
         + (rb && rb.identical === null ? `<p class="small muted">Not rebuilt yet: the button rebuilds your game with its own linker and compares it with your copy.</p>` : "")
         + (rb && rb.identical !== null ? `<p class="small ${rb.identical ? "ok" : "warn-text"}">${rb.identical ?"✓ The rebuilt game is your copy, byte for byte" + (/padding/.test(rb.detail) ? " (up to the padding at its end: your copy is trimmed)." : ".")
+=======
+      ? `This project <b>is</b> the source tree: a ${ov.layout || "decomp"} project that rebuilds your game on every build. Every match is committed to git in the project folder.`
+        + (rb ? `<p class="small ${rb.identical ? "ok" : "warn-text"}">${rb.identical ? "✓ The rebuilt game is your copy, byte for byte" + (/padding/.test(rb.detail) ? " (up to the padding at its end: your copy is trimmed)." : ".")
+>>>>>>> upstream/main
           : `The rebuilt game isn't your copy byte for byte yet: ${esc(rb.detail)}. Decompiling works anyway: every function is compared with your copy's own code.`}</p>` : "")
       : `This project <b>is</b> the source tree${ov.repo_url ? ` (a fork of <a class="link" href="${esc(ov.repo_url)}" target="_blank" rel="noopener">${esc(ov.repo_url.replace(/^https?:\/\//, ""))}</a>)` : ""}. Every match is committed to the <code>decomp-wtf</code> branch, ready to send upstream.`;
     $("srcState").innerHTML = `<div class="row"><button class="ghost small-btn" id="forkMeasure" type="button">Re-measure with objdiff</button>${rb ? `<button class="ghost small-btn" id="romCheck" type="button">Rebuild the game and compare</button>` : ""}</div>`;
@@ -279,22 +320,22 @@ function renderSource(ov) {
        ${ex.path ? `<div class="src-line">${esc(ex.path)}</div>` : ""}`;
   $("srcExport").textContent = ex ? "Export again" : "Export project";
 }
-$("srcOpen").onclick = () => openFolder();
-$("srcExport").onclick = async () => {
+async function exportNow() {
   $("srcExport").disabled = true;
-  $("expLog").hidden = false;
+  showJobError($("expLog"), "");
   $("expResult").innerHTML = "";
   try {
     const { job } = await api("/api/export", { method: "POST", body: { slug: S.slug } });
     const r = await followJob(job, $("expLog"));
+    if (!exportOpen()) return toast(r.identical === false ? "Exported, but the rebuild differs: Export says why." : "Exported: it rebuilds your game byte for byte.", r.identical === false ? "err" : "match");
     $("expResult").innerHTML = r.identical === false
       ? `<div class="notice bad"><span><b>Exported, but the rebuild differs.</b> ${esc(r.log.split("\n").filter(Boolean).pop() || "")}</span></div>`
       : `<div class="notice room"><span><b>Rebuilds byte for byte.</b> ${r.matched != null ? `${r.matched} of ${r.functions} functions are C.` : ""}</span></div>${cmdBox(`cd "${r.path}" && python build.py`)}`;
     wireCopies($("expResult"));
     S.ov = await api(`/api/project?slug=${S.slug}`);
     renderSource(S.ov);
-  } catch (e) { toast(esc(e.message), "err"); } finally { $("srcExport").disabled = false; }
-};
+  } catch (e) { if (exportOpen()) showJobError($("expLog"), e.message); else toast(esc(e.message), "err"); } finally { if ($("srcExport")) $("srcExport").disabled = false; }
+}
 
 /* ------------------------------------------------------------------ project settings */
 async function renderProjectSettings() {
@@ -304,16 +345,15 @@ async function renderProjectSettings() {
   $("compilerPanel").hidden = fork;
   if (!fork) {
     if (!S.st) await loadState();
-    fillCompilers($("setTc"), ov.compiler.toolchain, { n64: "N64", psx: "PS1", ps2: "PS2", gba: "GBA" }[ov.platform]);
+    fillCompilers($("setTc"), ov.compiler.toolchain, ov.platform);
     $("setFlags").value = ov.compiler.flags.join(" ");
     $("autoAdjust").checked = !!ov.auto_compiler;
     $("setRanges").value = "";
-    const hex = (n) => "0x" + n.toString(16).toUpperCase();
-    $("rangeList").innerHTML = (ov.compiler_ranges || []).length ? `<p class="col-title">Built with another compiler</p>` + ov.compiler_ranges.map((r) =>
-      `<div class="row"><code class="grow">${hex(r.start)}-${hex8(r.end)}</code><span class="small">${esc(r.name)} ${esc(r.flags.join(" "))}${r.check ? `<br><span class="muted">checked: ${esc(r.check)}</span>` : ""}</span><button class="ghost small-btn" type="button" data-unrange="${hex(r.start)}-${hex8(r.end)}">Remove</button></div>`).join("") : "";
+    renderCompilerWaiting(ov);
+    loadCompilerAnswer();
   }
   const facts = [["Platform", ov.platform_name], ["Game", ov.rom?.title || ov.title], [fork ? "Version" : "Game code", ov.rom?.game_code || ov.version],
-    !fork && ov.rom?.region ? ["Region", ov.rom.region] : null, fork ? ["Layout", ov.origin === "scratch" ? (LAYOUT[ov.platform] || "decomp") + " (from scratch)" : ov.fork_kind] : ["Compiler", `${ov.compiler.name} ${ov.compiler.flags.join(" ")}`],
+    !fork && ov.rom?.region ? ["Region", ov.rom.region] : null, fork ? ["Layout", ov.origin === "scratch" ? (ov.layout || "decomp") + " (from scratch)" : ov.fork_kind] : ["Compiler", `${ov.compiler.name} ${ov.compiler.flags.join(" ")}`],
     fork && ov.repo_url ? ["Repository", ov.repo_url.replace(/^https?:\/\//, "")] : null,
     ["Functions", `${ov.functions.toLocaleString()} (${bytes(ov.bytes || 0)} of code)`], ["Folder", ov.folder]].filter(Boolean);
   $("projFacts").innerHTML = facts.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v || "—")}</dd></div>`).join("");
@@ -326,7 +366,7 @@ $("autoAdjust").onchange = async () => {
     toast(on ? "This game's proven compiler suggestions now apply by themselves." : "This game's compiler suggestions wait for you.");
   } catch (err) { $("autoAdjust").checked = !on; toast(esc(err.message), "err"); }
 };
-$("rangeList").onclick = async (e) => {
+$("compilerParts").onclick = async (e) => {
   const b = e.target.closest("button[data-unrange]");
   if (!b) return;
   const remove = (reopen) => api("/api/compiler", { method: "POST", body: { slug: S.slug, ranges: b.dataset.unrange, remove: true, reopen } });
@@ -353,6 +393,71 @@ $("setTcSave").onclick = async () => {
   } catch (e) { toast(esc(e.message), "err"); }
 };
 $("folderBtn").onclick = () => openFolder();
+
+/* Save your progress (app/saves.py): the app saves by itself every few minutes into the project's progress folder;
+   this saves now, or to a folder of the user's choice (a USB stick, a git checkout). */
+$("saveGo").onclick = async () => {
+  $("saveGo").disabled = true;
+  try {
+    const r = await api("/api/save", { method: "POST", body: { slug: S.slug, folder: $("saveFolder").value.trim() || undefined } });
+    $("saveState").textContent = `saved ${clock(Date.now() / 1000).slice(0, 5)}`;
+    $("saveLog").hidden = false;
+    $("saveLog").textContent = `Saved to ${r.folder}: ${plural(r.matched || 0, "matched function")}, ${plural(r.best || 0, "best attempt")}.`;
+  } catch (e) { toast(esc(e.message), "err"); } finally { $("saveGo").disabled = false; }
+};
+
+/* ------------------------------------------------------------------ the compiler, as one answer
+   "This game was built with X; these parts with another compiler." The app checks by itself (the judge's survey,
+   each applied part against its neighbours: /api/compilermap starts them when they're old); the details are one
+   click in, for whoever wants to look. It was a panel of Survey again, Check applied ranges, suggestions, range
+   checks and auto-adjust side by side that nobody could explain, the owner and its author included. */
+const COMPILER_ANSWER_EVERY_MS = 5000;  // while the app checks, the answer is asked again this often
+const PART_STATE = {
+  confirmed: ["checked", "its neighbours agree"],
+  quirk: ["doubtful", "its neighbours don't agree: it may be one function's quirk"],
+  checking: ["being checked", "the app tries its neighbours with that compiler"],
+  waiting: ["waiting", "agents try its neighbours when they take them"],
+  "": ["not checked yet", ""],
+};
+const hexShort = (n) => "0x" + n.toString(16).toUpperCase();
+async function loadCompilerAnswer() {
+  clearTimeout(S.answerTimer);
+  const slug = S.slug;
+  let a;
+  try { a = await api(`/api/compilermap?slug=${encodeURIComponent(slug)}`); } catch (e) { $("compilerAnswer").textContent = e.message; return; }
+  if (slug !== S.slug || S.tab !== "settings") return;
+  renderCompilerAnswer(a);
+  if (a.checking) S.answerTimer = setTimeout(loadCompilerAnswer, COMPILER_ANSWER_EVERY_MS);
+}
+function renderCompilerAnswer(a) {
+  const parts = a.parts || [];
+  setHtml($("compilerAnswer"), `This game was built with <b>${esc(a.compiler)}</b>${a.flags ? ` <span class="flags mono" title="the flags it was given">${esc(a.flags)}</span>` : ""}.${parts.length ? ` ${parts.length === 1 ? "One part" : `${parts.length} parts`} of it with another compiler: below.` : ""}`
+    + (a.elsewhere_count ? ` <span class="muted">${a.elsewhere_count === 1 ? "One more stretch of code looks" : `${a.elsewhere_count.toLocaleString()} more stretches of code look`} like another compiler's work; the app suggests a change once agents' C proves it.</span>` : ""));
+  $("compilerState").textContent = a.checking ? "checking…" : "";
+  setHtml($("compilerParts"), parts.length ? `<ol class="parts">${parts.map((p) => {
+    const [word, why] = PART_STATE[p.check] || PART_STATE[""];
+    return `<li><code>${hexShort(p.start)}–${hexShort(p.end)}</code><span class="grow">${esc(p.compiler)} <span class="flags mono">${esc(p.flags)}</span></span>
+      <span class="part-state ${esc(p.check || "none")}" title="${esc(p.said || why)}">${word}</span>
+      <button class="ghost small-btn" type="button" data-unrange="${hexShort(p.start)}-${hex8(p.end)}" aria-label="Build ${hexShort(p.start)} to ${hexShort(p.end)} with ${esc(a.compiler)} again" title="Build this part with ${esc(a.compiler)} again">Remove</button></li>`;
+  }).join("")}</ol>` : "");
+  const sv = a.survey || {};
+  const checks = (a.checks || []).slice(-20).reverse();
+  setHtml($("compilerEvidence"), `<p class="small">The app works out which compiler built each part by itself: it tries agents' C for functions that don't match yet with the other compilers the game uses (${
+      sv.state === "running" ? `running now: ${plural(sv.running_tried || 0, "function")} tried` : sv.t ? `last run ${since(sv.t)}: ${plural(sv.tried || 0, "function")} tried, ${sv.confirmed || 0} matched with another compiler` : a.mips ? "not run yet: it runs once the game uses two compilers" : "it reads MIPS code only"}),
+      and it tests each part on the functions next to it before a part counts. A part applies by itself only when you let proven changes apply.</p>
+    ${a.elsewhere.length ? `<p class="col-title">Code that looks like another compiler's</p><ol class="parts">${a.elsewhere.map((r) => `<li><code>${hexShort(r.start)}–${hexShort(r.end)}</code><span class="grow">${esc(r.compiler)}</span><span class="muted small">${plural(r.functions, "function")}${r.confirmed ? `, ${r.confirmed} proven` : ""}</span></li>`).join("")}</ol>` : ""}
+    ${checks.length ? `<p class="col-title">Checks</p><ol class="parts">${checks.map((c) => `<li><span class="part-state ${esc(c.status)}">${(PART_STATE[c.status] || PART_STATE[""])[0]}</span><span class="grow small">${c.audit ? "part" : "suggested"} ${c.ranges.map(([s, e]) => `${hexShort(s)}–${hexShort(e)}`).join(", ")} · ${esc(c.compiler)}${c.said ? `<br><span class="muted">${esc(c.said)}</span>` : ""}</span></li>`).join("")}</ol>` : ""}
+    <div class="row"><button class="ghost small-btn" type="button" id="checkNow"${a.checking ? " disabled" : ""}>${a.checking ? "Checking…" : "Check again now"}</button></div>`);
+  $("checkNow").onclick = async () => {
+    try { renderCompilerAnswer(await api("/api/compilermap", { method: "POST", body: { slug: S.slug } })); } catch (e) { return toast(esc(e.message), "err"); }
+    clearTimeout(S.answerTimer);
+    S.answerTimer = setTimeout(loadCompilerAnswer, COMPILER_ANSWER_EVERY_MS);
+  };
+}
+function renderCompilerWaiting(ov) {
+  const sg = compilerSuggestions(ov);
+  setHtml($("compilerWaiting"), sg.length ? `<p class="col-title">Waiting for you</p>${sg.map(suggestionHtml).join("")}` : "");
+}
 $("deleteBtn").onclick = () => {
   dialog("Remove project", `<p>Remove <b>${esc(S.ov.title)}</b> from decompdecomp? Matched functions and notes are deleted.</p>
     <label class="check"><input type="checkbox" id="delFiles"><span>Also delete the project folder (your ROM copy and exported sources in it)</span></label>
@@ -360,8 +465,7 @@ $("deleteBtn").onclick = () => {
   $("delGo").onclick = async () => {
     try {
       await api("/api/delete", { method: "POST", body: { slug: S.slug, files: $("delFiles").checked } });
-      $("dialog").hidden = true;
-      document.body.classList.remove("locked");
+      closeDialog();
       loadNav();
       location.hash = "#/";
     } catch (e) { toast(esc(e.message), "err"); }

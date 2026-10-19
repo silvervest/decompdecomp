@@ -32,7 +32,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from .. import toolchains
-from ..network import Agent, NetworkError, _hash_token
+from ..network import Agent, NetworkError, hash_token
 from ..rom.symbols import AUTO_NAME
 from . import forkroom
 
@@ -184,7 +184,7 @@ class Room:
         waiting = self.settings["approve"]
         with self.net.store.tx() as db:
             db.execute("INSERT INTO agents(name,owner,token_hash,created_at,trusted,origin) VALUES(?,?,?,?,1,?)",
-                       (name, None, _hash_token(token), time.time(), self.origin + (":pending" if waiting else "")))
+                       (name, None, hash_token(token), time.time(), self.origin + (":pending" if waiting else "")))
             if waiting:
                 self.net._event(db, self.proj["id"], None, "collab", f"{name} asks to join")
             else:
@@ -388,8 +388,12 @@ def host_app(net, rooms: dict[str, Room]) -> Starlette:
                                            str(d.get("new_name", "")))}
 
     def note(room, member, d):
+        """A note on a function; one on no function is knowledge for every agent, so it needs two models' agreement
+        like any agent's (knowledge.py), a member's agents included."""
         agent = room.agent_for(member, d.get("agent"))
-        return {"text": net.add_note(agent, room.slug, str(d.get("text", "")), d.get("function") or None)}
+        if not d.get("function"):
+            return {"text": net.knowledge.share(agent, room.slug, str(d.get("text", "")))}
+        return {"text": net.add_note(agent, room.slug, str(d.get("text", "")), d["function"])}
 
     def edit(room, member, d):
         """A member's edit of a git project's file (a header, a new or shared source file): made and checked here."""
@@ -466,7 +470,7 @@ class Tunnel:
     def start(self, log=print, timeout: float = 45) -> str:
         if toolchains.installed("cloudflared") is None:
             toolchains.install("cloudflared", log=log)
-        exe = toolchains.path("cloudflared") / ("cloudflared.exe" if (toolchains.path("cloudflared") / "cloudflared.exe").exists() else "cloudflared")
+        exe = toolchains.path("cloudflared") / "cloudflared"
         self.proc = subprocess.Popen([str(exe), "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{self.port}"],
                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8",
                                      errors="replace")
@@ -500,7 +504,8 @@ def parse_invite(link: str) -> tuple[str, str]:
         return link, "open"
     m = re.match(r"^(https?://[^/\s]+(?::\d+)?)/join/([A-Za-z0-9_-]{4,})(?:#room=([\w-]+))?$", link)
     if not m:
-        raise NetworkError("that doesn't look like a decompdecomp invite link")
+        raise NetworkError("That isn't an invite link. Ask the room's host for theirs: it looks like "
+                           "https://….trycloudflare.com/join/….")
     return m.group(1), m.group(2) + (f"#{m.group(3)}" if m.group(3) else "")
 
 
@@ -712,7 +717,7 @@ def join_room(net, link: str, name: str, rom: bytes | Path, log=print, client: h
     """Guest: check the invite, check the ROM is the same game, join, import it locally, link. Returns the slug.
     If this game is already linked to that room here, reconnect instead (no ROM needed). `rom`: the game's bytes or
     the file (a GameCube or Wii disc is gigabytes: never read whole)."""
-    from ..rom import detect
+    from .. import consoles
 
     http = client or httpx.Client(timeout=httpx.Timeout(60, connect=15))
     url, code, hello = _hello(http, link)
@@ -725,7 +730,7 @@ def join_room(net, link: str, name: str, rom: bytes | Path, log=print, client: h
         return _join_fork(net, http, url, code, hello, name, rom, log, client, start)
     if isinstance(rom, Path):
         rom = rom.read_bytes()
-    picked = detect.identify(rom)
+    picked = consoles.identify(rom).read_game(rom)
     if picked.info["sha1"] != hello["sha1"]:
         raise NetworkError(f"this ROM isn't the same as the host's: the room is for {hello['title']} "
                            f"({hello['game_code']}, {hello['region']}), and every member needs their own copy of exactly that version")
@@ -748,7 +753,7 @@ def _join_fork(net, http: httpx.Client, url: str, code: str, hello: dict, name: 
     the project wants it and built with the member's own tools, then linked."""
     import tempfile
 
-    from ..forks.catalog import PLATFORMS
+    from .. import consoles
 
     tmp = None
     if not isinstance(game, Path):
@@ -759,7 +764,7 @@ def _join_fork(net, http: httpx.Client, url: str, code: str, hello: dict, name: 
     try:
         if hello.get("sha1") and forkroom.game_identity(game) != hello["sha1"]:
             raise NetworkError(f"this isn't the same game as the host's: the room is for {hello['title']} "
-                               f"({PLATFORMS.get(hello.get('platform'), hello.get('platform') or '')}, "
+                               f"({consoles.name(hello.get('platform'))}, "
                                f"{hello.get('version') or 'the same version'}), and every member needs their own copy of "
                                "exactly that version")
         log(f"joining {hello['title']} ({hello['functions']} functions, {hello['matched']} matched)")

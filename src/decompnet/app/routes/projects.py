@@ -6,7 +6,6 @@ Each is fn(slug, request, data) wrapped by with_project, which checks the reques
 from __future__ import annotations
 
 import json
-import secrets
 import shutil
 from pathlib import Path
 
@@ -15,12 +14,13 @@ from starlette.responses import JSONResponse, Response
 
 from ... import hostenv, toolchains
 from ...network import NetworkError
+from .. import saves
 from ..engine import parse_ranges
 from . import App
 
 
 def register(app: App) -> None:
-    net, mcp, mcp_url, manager, jobs = app.net, app.mcp, app.mcp_url, app.manager, app.jobs
+    net, mcp, manager, jobs = app.net, app.mcp, app.manager, app.jobs
     settings, guard, body, call, fail = app.settings, app.guard, app.body, app.call, app.fail
 
     def with_project(fn):
@@ -38,7 +38,9 @@ def register(app: App) -> None:
     def p_overview(slug, request, data):
         settings.data["last_project"] = slug
         settings.save()
-        return net.overview(slug)
+        overview = net.overview(slug)
+        net.warm_briefs_soon(slug)  # the project is open: agents' first briefs come next
+        return overview
 
     def p_live(slug, request, data):
         q = request.query_params
@@ -68,27 +70,18 @@ def register(app: App) -> None:
         return {"job": jobs.start("export", work)}
 
     def p_compilermap(slug, request, data):
-        """The judge's compiler survey: start it (POST), or check the applied ranges again (POST audit), or how they
-        go (GET), with the range checks."""
-        if request.method == "POST" and data.get("audit"):
-            net.rangechecks.audit(net._project(slug))
-        elif request.method == "POST":
-            net.start_survey(slug)
-        cfg = net.cfg(net._project(slug))
-        last = cfg.get("compiler_survey") or {}
-        checks = [{"id": c["id"], "audit": bool(c.get("audit")), "status": c["status"], "said": c.get("said") or "",
-                   "ranges": c["spans"], "compiler": net._short((c["toolchain"], tuple(c["flags"])))}
-                  for c in cfg.get("range_checks", [])]
-        return {"survey": net.surveys.get(slug), "confirmed": len(last.get("confirmed", {})),
-                "tried": len(last.get("tried", {})), "t": last.get("t"), "checks": checks}
+        """The compiler answer (GET): which compiler built the game, and its parts; the app checks by itself when the
+        answer is old. POST: check again now (the survey and the applied ranges)."""
+        return net.compiler_answer(slug, check_now=request.method == "POST")
 
     def p_open(slug, request, data):
         why = hostenv.open_folder(Path(net.project_row(slug)["root"]))
         return {"ok": why is None, "message": why}
 
     def p_delete(slug, request, data):
-        manager.stop()
+        manager.forget_project(slug)  # (it stopped every project's helpers)
         proj = net.project_row(slug)
+        net.knowledge.forget(slug)
         net.remove_project(slug)
         if data.get("files"):
             shutil.rmtree(proj["root"], ignore_errors=True)
@@ -96,17 +89,6 @@ def register(app: App) -> None:
             settings.data["last_project"] = None
             settings.save()
         return {"ok": True}
-
-    def p_manual(slug, request, data):
-        name = f"manual-{secrets.token_hex(2)}"
-        agent, token = net.local_agent(name)
-        manager.assignments[agent.id] = slug
-        settings.data.setdefault("agent_projects", {})[str(agent.id)] = slug
-        settings.save()
-        return {"agent": name, "url": mcp_url, "token": token,
-                "claude": f'claude mcp add --transport http decomp {mcp_url} --header "Authorization: Bearer {token}"',
-                "json": json.dumps({"mcpServers": {"decomp": {"type": "http", "url": mcp_url,
-                                                              "headers": {"Authorization": f"Bearer {token}"}}}}, indent=2)}
 
     def p_try(slug, request, data):
         """You, editing a function in the GUI: judged like an agent's attempt (and credited to "you")."""
@@ -156,14 +138,31 @@ def register(app: App) -> None:
             net.start_autopilot(slug)
         return net.overview(slug)
 
+    def p_save(slug, request, data):
+        """Save the project's work as plain files (app/saves.py): to its progress/ folder, or one the user picks."""
+        return saves.save(net, slug, hostenv.local_path(data["folder"]) if data.get("folder") else None)
+
+    def p_knowledge(slug, request, data):
+        """What agents learned: GET lists it; POST accepts or rejects one ({id, accept}), or sets whether agreed
+        knowledge is added by itself ({auto})."""
+        if request.method == "POST":
+            if "auto" in data:
+                net.knowledge.set_auto(slug, bool(data["auto"]))
+            else:
+                net.knowledge.decide(slug, int(data.get("id") or 0), bool(data.get("accept")))
+        return net.knowledge.listing(slug)
+
     routes = {
         "/api/project": (p_overview, ["GET"]),
+        "/api/knowledge": (p_knowledge, ["GET", "POST"]),
+        "/api/modelcosts": (lambda s, r, d: manager.costs(s), ["GET"]),
+        "/api/save": (p_save, ["POST"]),
         "/api/live": (p_live, ["GET"]),
         "/api/function": (lambda s, r, d: net.function_detail(s, r.query_params.get("name", "")), ["GET"]),
         "/api/diff": (lambda s, r, d: net.function_diff(s, r.query_params.get("name", ""),
                                                         r.query_params.get("which", "latest")), ["GET"]),
         "/api/compiler": (p_compiler, ["POST"]), "/api/export": (p_export, ["POST"]), "/api/open": (p_open, ["POST"]),
-        "/api/delete": (p_delete, ["POST"]), "/api/agents/manual": (p_manual, ["POST"]),
+        "/api/delete": (p_delete, ["POST"]),
         "/api/try": (p_try, ["POST"]), "/api/release": (p_release, ["POST"]),
         "/api/autopilot": (p_autopilot, ["POST"]), "/api/instructions": (p_instructions, ["POST"]), "/api/title": (p_title, ["POST"]),
         "/api/priority": (p_priority, ["POST"]), "/api/note": (p_note, ["POST"]),

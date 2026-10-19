@@ -4,16 +4,18 @@ opens the window again or quits.
 It speaks the freedesktop StatusNotifierItem protocol (and the dbusmenu one for its menu) over D-Bus with Gio, which
 every desktop that shows tray icons this way already has: KDE, COSMIC, GNOME with the AppIndicator extension, Xfce,
 Cinnamon. No new dependency: Gio comes with the system's PyGObject. Without a tray host, or without PyGObject, start()
-says so and the app quits when its window closes, as before. (Windows: decompdecomp runs in WSL there; a tray needs
-a Windows program, not done yet.)
+says so, and helpers kept working without the window are reached again by running `decomp`.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import threading
 from typing import Callable
+
+from . import edition
 
 _ITEM = "org.kde.StatusNotifierItem"
 _WATCHER = "org.kde.StatusNotifierWatcher"
@@ -63,29 +65,37 @@ _XML = """<node>
 </node>"""
 
 # the menu: id -> properties (dbusmenu)
-_MENU = {1: {"label": "Open decompdecomp"}, 2: {"type": "separator"}, 3: {"label": "Quit decompdecomp"}}
+OPEN_ITEM, SEPARATOR, QUIT_ITEM = 1, 2, 3
+_MENU = {OPEN_ITEM: {"label": f"Open {edition.NAME}"}, SEPARATOR: {"type": "separator"},
+         QUIT_ITEM: {"label": f"Quit {edition.NAME}"}}
+ROOT_ITEM = 0  # dbusmenu's id for the menu itself
+DBUSMENU_VERSION = 3
+ICON_PIXELS = 32
+BUS_CALL_MS = 2000  # asking D-Bus whether a tray host is there
+REGISTER_MS = 3000  # registering the icon with the tray host
+START_SECONDS = 5  # how long start() waits for the icon to show
 _D = ["..X", "XXX", "X.X", "X.X", "XXX"]  # the mark's "d", as on the website's logo
 
 
 def icon(size: int = 32) -> bytes:
     """The dd mark as ARGB32 (big-endian, as StatusNotifierItem wants): a light d, then a black d on the
-    highlighter's yellow block, scaled into `size` pixels."""
-    light, ink, yellow = (0xFF, 0xED, 0xEB, 0xE5), (0xFF, 0x1D, 0x1B, 0x14), (0xFF, 0xF6, 0xD4, 0x3A)
+    highlighter's block (yellow; a development copy's is blue), scaled into `size` pixels."""
+    light, ink, yellow = (0xFF, 0xED, 0xEB, 0xE5), (0xFF, 0x1D, 0x1B, 0x14), (0xFF, *edition.HIGHLIGHT)
     unit = size // 8
     top = (size - 5 * unit) // 2
     px = [[(0, 0, 0, 0)] * size for _ in range(size)]
     for y in range(max(0, top - unit // 2), min(size, top + 5 * unit + unit // 2)):  # the yellow block, with room
         for x in range(int(3.4 * unit), size):
             px[y][x] = yellow
-    for d, (x0, colour) in enumerate(((0, light), (4 * unit, ink))):
-        for r, row in enumerate(_D):
-            for c, cell in enumerate(row):
+    for left, colour in ((0, light), (4 * unit, ink)):
+        for line, row in enumerate(_D):
+            for column, cell in enumerate(row):
                 if cell == "X":
-                    for y in range(top + r * unit, top + (r + 1) * unit):
-                        for x in range(x0 + c * unit, x0 + (c + 1) * unit):
+                    for y in range(top + line * unit, top + (line + 1) * unit):
+                        for x in range(left + column * unit, left + (column + 1) * unit):
                             if x < size:
                                 px[y][x] = colour
-    return bytes(v for row in px for p in row for v in p)
+    return bytes(channel for row in px for pixel in row for channel in pixel)
 
 
 def _gi():
@@ -96,11 +106,17 @@ def _gi():
         system = "/usr/lib/python3/dist-packages"
         if sys.platform != "linux" or not os.path.isdir(system):
             return None
+        # only for gi: left on the path, it served the system's other packages too, and uvicorn picked up the
+        # system's old `websockets` instead of going without it, so the app quit at start whenever a tray showed
         sys.path.append(system)
         try:
             import gi  # noqa: F401
+            from gi.repository import Gio, GLib
         except ImportError:
             return None
+        finally:
+            sys.path.remove(system)
+        return Gio, GLib
     from gi.repository import Gio, GLib
     return Gio, GLib
 
@@ -116,14 +132,15 @@ def start(on_open: Callable[[], None], on_quit: Callable[[], None]) -> bool:
     try:
         bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         has = bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner",
-                            GLib.Variant("(s)", (_WATCHER,)), GLib.VariantType("(b)"), Gio.DBusCallFlags.NONE, 2000, None)
+                            GLib.Variant("(s)", (_WATCHER,)), GLib.VariantType("(b)"), Gio.DBusCallFlags.NONE, BUS_CALL_MS,
+                            None)
         if not has.unpack()[0]:
             return False
     except Exception:  # no session bus (a server, a container)
         return False
     ready, ok = threading.Event(), []
     threading.Thread(target=_run, args=(Gio, GLib, on_open, on_quit, ready, ok), daemon=True, name="tray").start()
-    ready.wait(5)
+    ready.wait(START_SECONDS)
     return bool(ok)
 
 
@@ -133,22 +150,30 @@ def _run(Gio, GLib, on_open, on_quit, ready: threading.Event, ok: list) -> None:
     loop = GLib.MainLoop.new(ctx, False)
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     node = Gio.DBusNodeInfo.new_for_xml(_XML)
-    size = 32
+    size = ICON_PIXELS
     props = {
-        "Category": GLib.Variant("s", "ApplicationStatus"), "Id": GLib.Variant("s", "decompdecomp"),
-        "Title": GLib.Variant("s", "decompdecomp"), "Status": GLib.Variant("s", "Active"),
+        "Category": GLib.Variant("s", "ApplicationStatus"), "Id": GLib.Variant("s", edition.WINDOW_CLASS),
+        "Title": GLib.Variant("s", edition.NAME), "Status": GLib.Variant("s", "Active"),
         "IconName": GLib.Variant("s", ""), "IconPixmap": GLib.Variant("a(iiay)", [(size, size, icon(size))]),
-        "ToolTip": GLib.Variant("(sa(iiay)ss)", ("", [], "decompdecomp", "Running. Click to open; the menu quits it.")),
+        "ToolTip": GLib.Variant("(sa(iiay)ss)", ("", [], edition.NAME, "Running. Click to open; the menu quits it.")),
         "ItemIsMenu": GLib.Variant("b", False), "Menu": GLib.Variant("o", "/MenuBar"),
-        "Version": GLib.Variant("u", 3), "TextDirection": GLib.Variant("s", "ltr"),
+        "Version": GLib.Variant("u", DBUSMENU_VERSION), "TextDirection": GLib.Variant("s", "ltr"),
     }
 
-    def item(i: int) -> GLib.Variant:
-        p = {k: GLib.Variant("s", v) for k, v in _MENU[i].items()}
-        return GLib.Variant("(ia{sv}av)", (i, p, []))
+    def properties(menu_id: int) -> dict:
+        return {key: GLib.Variant("s", value) for key, value in _MENU[menu_id].items()}
+
+    def item(menu_id: int) -> GLib.Variant:
+        return GLib.Variant("(ia{sv}av)", (menu_id, properties(menu_id), []))
 
     def act(what):  # the app's own work runs off the D-Bus thread
         threading.Thread(target=what, daemon=True).start()
+
+    def clicked(menu_id: int) -> None:
+        if menu_id == OPEN_ITEM:
+            act(on_open)
+        elif menu_id == QUIT_ITEM:
+            act(on_quit)
 
     def method(conn, sender, path, iface, name, params, inv):
         if iface == _ITEM:
@@ -157,25 +182,25 @@ def _run(Gio, GLib, on_open, on_quit, ready: threading.Event, ok: list) -> None:
             inv.return_value(None)
             return
         if name == "GetLayout":
-            root = GLib.Variant("(ia{sv}av)", (0, {"children-display": GLib.Variant("s", "submenu")},
-                                                 [item(i) for i in _MENU]))
+            root = GLib.Variant("(ia{sv}av)", (ROOT_ITEM, {"children-display": GLib.Variant("s", "submenu")},
+                                                 [item(menu_id) for menu_id in _MENU]))
             inv.return_value(GLib.Variant.new_tuple(GLib.Variant("u", 1), root))
         elif name == "GetGroupProperties":
             ids = params.unpack()[0] or list(_MENU)
-            inv.return_value(GLib.Variant("(a(ia{sv}))", ([(i, {k: GLib.Variant("s", v) for k, v in _MENU[i].items()})
-                                                            for i in ids if i in _MENU],)))
+            inv.return_value(GLib.Variant("(a(ia{sv}))", ([(menu_id, properties(menu_id))
+                                                            for menu_id in ids if menu_id in _MENU],)))
         elif name == "GetProperty":
-            i, prop = params.unpack()
-            inv.return_value(GLib.Variant("(v)", (GLib.Variant("s", _MENU.get(i, {}).get(prop, "")),)))
+            menu_id, prop = params.unpack()
+            inv.return_value(GLib.Variant("(v)", (GLib.Variant("s", _MENU.get(menu_id, {}).get(prop, "")),)))
         elif name == "Event":
-            i, event = params.unpack()[:2]
+            menu_id, event = params.unpack()[:2]
             if event == "clicked":
-                act(on_open if i == 1 else on_quit if i == 3 else (lambda: None))
+                clicked(menu_id)
             inv.return_value(None)
         elif name == "EventGroup":
-            for i, event, _, _ in params.unpack()[0]:
+            for menu_id, event, _, _ in params.unpack()[0]:
                 if event == "clicked":
-                    act(on_open if i == 1 else on_quit if i == 3 else (lambda: None))
+                    clicked(menu_id)
             inv.return_value(GLib.Variant("(ai)", ([],)))
         elif name == "AboutToShow":
             inv.return_value(GLib.Variant("(b)", (False,)))
@@ -195,9 +220,10 @@ def _run(Gio, GLib, on_open, on_quit, ready: threading.Event, ok: list) -> None:
         name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
         Gio.bus_own_name_on_connection(bus, name, Gio.BusNameOwnerFlags.NONE, None, None)
         bus.call_sync(_WATCHER, "/StatusNotifierWatcher", _WATCHER, "RegisterStatusNotifierItem",
-                      GLib.Variant("(s)", (name,)), None, Gio.DBusCallFlags.NONE, 3000, None)
+                      GLib.Variant("(s)", (name,)), None, Gio.DBusCallFlags.NONE, REGISTER_MS, None)
         ok.append(True)
-    except Exception:
+    except Exception:  # a tray host that refuses the icon: the app goes on without one, as start() says
+        logging.getLogger("decompdecomp").info("the tray icon couldn't be shown", exc_info=True)
         ready.set()
         return
     ready.set()

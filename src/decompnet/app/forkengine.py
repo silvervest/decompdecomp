@@ -25,24 +25,9 @@ from collections import defaultdict
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
-from .. import similarity, toolchains
-from ..forks import (
-    catalog,
-    convention,
-    csource,
-    datadiff,
-    drafts,
-    dtksplits,
-    ghidra,
-    methods,
-    objdiff,
-    scratch_dsd,
-    scratch_dtk,
-    scratch_pe,
-    scratch_xbe,
-    standins,
-    unresolved,
-)
+from .. import consoles, similarity, toolchains
+from ..consoles.pc import convention, methods, standins, unresolved
+from ..forks import csource, datadiff, drafts, dtksplits, ghidra, objdiff
 from ..forks.objdiff import MappingConflict, ObjdiffError
 from ..forks.project import EDITABLE, STATE, ForkError, ForkProject
 from ..network import Agent, Network, NetworkError, stale_note
@@ -157,7 +142,7 @@ def _digest(code: str) -> str:
 
 def _set_aside(fp: ForkProject) -> dict[str, str]:
     """Symbol -> why it's set aside, for functions a project made from scratch says aren't the game's (an Xbox
-    game's XDK library code, found by scratch_xbe): the manifest names the file (`set_aside`)."""
+    game's XDK library code, found by consoles/xbox/scratch.py): the manifest names the file (`set_aside`)."""
     manifest = fp.manifest or {}
     rel = manifest.get("set_aside") or (f"config/{manifest['version']}/set_aside.json" if manifest.get("version") and (
         fp.root / "config" / str(manifest["version"]) / "set_aside.json").is_file() else None)
@@ -412,7 +397,7 @@ class ForkEngine:
         with self._build_locks[proj["id"]]:
             self._fresh_tools(proj, fp)
             ok, log = fp.build_unit(unit)
-            if not ok and "unknown target" in log and scratch_pe.made_here(fp):
+            if not ok and "unknown target" in log and self._console(fp).made_here(fp):
                 # the build has no rule for it: configure stopped (a driver it can't read, say). Say why
                 for cmd in (fp.manifest or {}).get("setup", [])[:1]:
                     done, out = fp.run([sys.executable if cmd[0] == "python" else cmd[0], *cmd[1:]],
@@ -440,13 +425,13 @@ class ForkEngine:
         return f"\n(Your claim on {fn['name']} was released with a note: the unit has to build again first.)"
 
     def _fresh_tools(self, proj, fp: ForkProject) -> None:
-        """A PC or Xbox project's tools/ brought up to the template once per run of the app (scratch_pe.refresh_tools):
-        fixes in the build and the judge reach projects made before them."""
+        """A project's tools/ brought up to the template once per run of the app (Console.refresh_tools, PC and Xbox
+        projects made here): fixes in the build and the judge reach projects made before them."""
         if proj["id"] in self._refreshed:
             return
         self._refreshed.add(proj["id"])
         try:
-            changed = scratch_pe.refresh_tools(fp, log=lambda *_: None)
+            changed = self._console(fp).refresh_tools(fp, log=lambda *_: None)
         except OSError:
             changed = []
         if changed:  # the judge's tools changed: measure every unit with them once, not as agents next touch it
@@ -517,6 +502,11 @@ class ForkEngine:
     def _meta(fn) -> dict:
         return json.loads(fn["meta"]) if fn["meta"] else {}
 
+    @staticmethod
+    def _console(fp: ForkProject) -> consoles.Console:
+        """The console of a project, from what its manifest says (a project made from scratch names its platform)."""
+        return consoles.get((fp.manifest or {}).get("platform"))
+
     # ------------------------------------------------------------------ creating a fork
 
     def policy(self, repo: str) -> dict:
@@ -545,10 +535,12 @@ class ForkEngine:
         dest = self.net.workspace / slug
         log(f"cloning {url}")
         res = subprocess.run(["git", "clone", "--depth", "1", "--recurse-submodules", "--shallow-submodules", url, str(dest)],
-                             capture_output=True, text=True, encoding="utf-8", errors="replace")
+                             capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             stdin=subprocess.DEVNULL, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
         if res.returncode != 0:
+            from ..forks import policy
             shutil.rmtree(dest, ignore_errors=True)
-            raise NetworkError(f"git clone failed: {res.stderr.strip()[-400:]}")
+            raise NetworkError(policy.git_trouble(res.stderr))
         fp = ForkProject(dest)
         fp.git("checkout", "-q", "-b", "decomp-wtf")
         kind = fp.kind()
@@ -574,16 +566,13 @@ class ForkEngine:
                        "VALUES(?,?,?,?,?,?,?)", (pid, 1, "", None, "projects keep their headers in the tree", time.time(), ""))
             self.net._event(db, pid, None, "fork", event)
 
-    def create_scratch(self, game: Path, *, compiler: str | None = None, log=print, ltcg: bool | None = None) -> str:
-        """A GameCube, Wii, DS or PC game, from scratch: generate the community's project layout for it (dtk-template,
-        ds-decomp; for PC, decompdecomp's own from Ghidra's analysis) and open it like a fork. An Xbox program or disc
-        is read, then refused until Xbox projects are finished (scratch_xbe)."""
-        with open(game, "rb") as f:
-            head = f.read(0x1000)
-        maker = scratch_dsd if scratch_dsd.is_nds(head) else scratch_pe if scratch_pe.is_pe(head) \
-            else scratch_xbe if scratch_xbe.is_xbox(game) else scratch_dtk
-        info = maker.game_info(game)
-        sha1 = info["sha1"] if maker is not scratch_dtk else hashlib.sha1(info["dol"]).hexdigest()
+    def create_scratch(self, game: Path, console: consoles.Console, *, compiler: str | None = None, log=print,
+                       options: dict | None = None) -> str:
+        """A game of a PROJECT-mode console (GameCube, Wii, PC, Xbox), from scratch: the console generates the
+        community's kind of project for it (Console.create_project: dtk-template; for PC and Xbox, decompdecomp's own
+        from Ghidra's analysis), opened like a fork. `options`: the user's answers to the console's import_options."""
+        info = console.game_info(game)
+        sha1 = info["sha1"]
         for p in self.net.store.all("SELECT slug, config FROM projects"):
             if json.loads(p["config"]).get("program_sha1") == sha1:
                 log(f"already set up as {p['slug']}")
@@ -591,8 +580,7 @@ class ForkEngine:
         slug = self._free_slug(_slug(f"{info['title']} {info['id']}" if info.get("kind") != "dol" else info["title"]))
         dest = self.net.workspace / slug
         try:
-            facts = maker.create(dest, game, compiler=compiler, log=log,
-                                 **({"ltcg": ltcg} if maker is scratch_xbe else {}))
+            facts = console.create_project(dest, game, compiler=compiler, log=log, **(options or {}))
         except BaseException:
             shutil.rmtree(dest, ignore_errors=True)
             raise
@@ -602,7 +590,7 @@ class ForkEngine:
                "legal": {"basis": "personal-copy", "license": "personal use only",
                          "statement": "imported by the owner of this copy of the game, who confirmed it was legally obtained",
                          "confirmed_at": time.time()}}
-        self._register(slug, facts["title"], f"{catalog.PLATFORMS[facts['platform']]} game {facts['id']}, from scratch",
+        self._register(slug, facts["title"], f"{consoles.name(facts['platform'])} game {facts['id']}, from scratch",
                        dest, cfg, f"started {facts['id']} from scratch")
         self.check(slug, log=log)
         return slug
@@ -642,7 +630,9 @@ class ForkEngine:
         if fp.kind() != "dtk":
             return
         versions = fp.versions()
-        gid = scratch_dtk.disc_id(game)
+        from ..consoles.gc_wii import scratch as dtk  # dtk projects are GameCube and Wii ones
+
+        gid = dtk.disc_id(game)
         if not gid or not versions or gid == cfg.get("version"):
             return
         if gid in versions:
@@ -654,23 +644,16 @@ class ForkEngine:
                                "pick your copy of one of those versions")
 
     def check_rom(self, slug: str, log=print) -> dict:
-        """A game started from scratch: rebuild its ROM or program and compare it with the user's copy
-        (scratch_dsd.check_rom for DS, the project's `ninja export` for PC and Xbox: scratch_pe.check_program); what
-        it says is kept in the project's .decomp.wtf.json and shown on the project."""
+        """A game started from scratch: rebuild its program and compare it with the user's copy (its console's
+        check_rebuild: PC and Xbox run the project's `ninja export`); what it says is kept in the project's
+        .decomp.wtf.json and shown on the project."""
         proj, fp, cfg = self.get(slug)
         manifest = fp.manifest or {}
-        if cfg.get("origin") != "scratch" or manifest.get("platform") not in ("nds", "gc", "wii", "win32", "xbox"):
-            raise NetworkError("only games started from scratch rebuild here")
+        console = consoles.get(manifest.get("platform"))
+        if cfg.get("origin") != "scratch" or consoles.REBUILD_CHECK not in console.features:
+            raise NetworkError(f"{console.name or 'this'} projects started from scratch don't rebuild here")
         with self._build_locks[proj["id"]]:  # not while an agent's compile builds in the same tree
-            if manifest.get("platform") == "nds":
-                result = scratch_dsd.check_rom(fp.root, manifest["version"], log=log)
-            elif manifest.get("platform") in ("win32", "xbox"):
-                result = scratch_pe.check_program(fp, manifest["version"], log=log)
-            else:
-                ok, tail = fp.verify(log=log)
-                diff = scratch_dtk._differing(fp.root, manifest["version"], tail) or []
-                result = {"identical": ok, "detail": "identical" if ok else
-                          f"{len(diff)} files differ: {', '.join(diff[:8])}" if diff else (tail.strip().splitlines() or ["the build failed"])[-1][-300:]}
+            result = console.check_rebuild(fp, manifest["version"], log=log)
         manifest["rebuild"] = result | {"t": time.time()}
         (fp.root / ".decomp.wtf.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         return result
@@ -1232,7 +1215,7 @@ class ForkEngine:
                 old_entry = ctext[entry[0]:entry[1]]
                 new_entry = re.sub(r'^(Object\(\s*)\w+(\s*,\s*)"[^"]+"', lambda mm: f'{mm.group(1)}NonMatching{mm.group(2)}"{new}"',
                                    old_entry, count=1)
-                indent = dtksplits._indent_of(ctext, entry[0])
+                indent = dtksplits.indent_of(ctext, entry[0])
                 conf.write_text(ctext[:entry[1]] + f",\n{indent}{new_entry}" + ctext[entry[1]:], encoding="utf-8")
                 new_path.parent.mkdir(parents=True, exist_ok=True)
                 new_path.write_text(preamble + ("\n" if preamble else "") + "\n\n".join(moved_code) + ("\n" if moved_code else ""),
@@ -1583,7 +1566,7 @@ class ForkEngine:
 
     def mark_asm(self, fn, twin_name: str | None = None, reason: str | None = None) -> None:
         """fn's code is a matched assembly function's (runtime helpers each module links its own copy of), or code
-        no compiler makes (`reason`: see handwritten.py): agents can't write it in C, so it's out of their way."""
+        no compiler makes (`reason`: Console.asm_reason, arch/): agents can't write it in C, so it's out of their way."""
         meta = self._meta(fn)
         if twin_name:
             meta["asm_twin"] = twin_name
@@ -1599,7 +1582,7 @@ class ForkEngine:
         m = cfg.get("measures") or {}
         units = fp.units() if cfg.get("ready") else []
         scratch = next((u.scratch for u in units if u.scratch), None) or {}
-        platform = catalog.PLATFORMS.get(cfg.get("platform"), cfg.get("platform") or "unknown platform")
+        platform = consoles.name(cfg.get("platform")) or "unknown platform"
         return (f"{proj['name']}: a fork of {cfg['repo_url']} ({platform}{', ' + cfg['version'] if cfg.get('version') else ''})\n"
                 f"progress: {m.get('matched_functions', '?')}/{m.get('total_functions', '?')} functions, "
                 f"{float(m.get('matched_code_percent', 0) or 0):.2f}% of code, in {len(units)} source files\n"
@@ -1799,19 +1782,19 @@ class ForkEngine:
     def _unresolved_lines(self, fp: ForkProject, meta: dict, fn, unit, code: str | None,
                           only_mattering: bool = False) -> list[str]:
         """For a brief, a compile result or a release: the names the unit's last harness link left unresolved that
-        this function's code uses, which of them can change its code (forks/unresolved.py) and which are harmless.
-        Agents read the bare list as a to-do and released functions for data references that change nothing."""
+        this function's code uses, which of them can change its code (consoles/pc/unresolved.py) and which are
+        harmless. Agents read the bare list as a to-do and released functions for data references that change
+        nothing."""
         if unit.base is None or not (missing := _unresolved(unit.base)):
             return []
         prog, caller, library = None, None, set()
-        manifest = fp.manifest or {}
-        if manifest.get("platform") in ("win32", "xbox"):
-            try:
-                prog = convention.load(fp.root, manifest)
+        try:
+            prog = self._console(fp).program(fp)
+            if prog is not None:
                 caller = prog.find(meta.get("symbol") or fn["name"])
                 library = {prog.by_name[s] for s in _set_aside(fp) if s in prog.by_name}
-            except (OSError, KeyError, ValueError, ForkError):
-                prog = None
+        except (OSError, KeyError, ValueError, ForkError):
+            prog = None
         used = unresolved.used_by(code, missing) if code else []
         found = [unresolved.classify(prog, caller, s, library) for s in used]
         if only_mattering:
@@ -1820,17 +1803,17 @@ class ForkEngine:
         return unresolved.summary(found, unit.name, len(missing) - len(used))
 
     def standins_for(self, agent: Agent | None, slug: str, what: str) -> str:
-        """Stand-in and driver skeletons for a unit of a PC or Xbox project (forks/standins.py): a unit, its source
-        file or one of its functions. What agents write into harness/ for a game built with link-time code
+        """Stand-in and driver skeletons for a unit of a PC or Xbox project (consoles/pc/standins.py): a unit, its
+        source file or one of its functions. What agents write into harness/ for a game built with link-time code
         generation."""
         _, fp, _ = self.get(slug)
         manifest = fp.manifest or {}
-        if manifest.get("platform") not in ("win32", "xbox"):
-            raise NetworkError("standins_for is for PC and Xbox projects made from scratch (their harness/ files)")
         try:
-            prog = convention.load(fp.root, manifest)
+            prog = self._console(fp).program(fp)
         except (OSError, KeyError, ValueError) as e:
             raise NetworkError(f"the project's functions.json or program can't be read: {e}") from None
+        if prog is None:
+            raise NetworkError("standins_for is for PC and Xbox projects made from scratch (their harness/ files)")
         name = what.strip()
         units = {fn["unit"] for fn in prog.functions.values()}
         unit = next((u for u in (name, name.rsplit("/", 1)[-1], Path(name).stem) if u in units), None)
@@ -1846,15 +1829,17 @@ class ForkEngine:
             unit = prog.functions[addr]["unit"]
         return standins.render(prog, unit)
 
-    @staticmethod
-    def _convention_brief(fp: ForkProject, meta: dict, fn) -> list[str]:
+    @classmethod
+    def _convention_brief(cls, fp: ForkProject, meta: dict, fn) -> list[str]:
         """For a brief, in a project built with link-time code generation: how the original passes the function its
-        arguments (forks/convention.py), which the driver and stand-ins in harness/ must reproduce."""
+        arguments (consoles/pc/convention.py), which the driver and stand-ins in harness/ must reproduce."""
         manifest = fp.manifest or {}
         if not manifest.get("ltcg"):
             return []
         try:
-            prog = convention.load(fp.root, manifest)
+            prog = cls._console(fp).program(fp)
+            if prog is None:
+                return []
             addr = prog.find(meta.get("symbol") or fn["name"])
             if addr is None:
                 return []
@@ -1894,16 +1879,16 @@ class ForkEngine:
                 "its callers; harness/ must call it the same way, standins_for writes a starting point)",
                 *mode, *[f"- {line}" if not line.startswith("  ") else line for line in found]]
 
-    @staticmethod
-    def _objects(fp: ForkProject):
-        """(the program, its member functions and object types (forks/methods.py), whether it's LTCG) for a PC or
-        Xbox project made from scratch, or None."""
+    @classmethod
+    def _objects(cls, fp: ForkProject):
+        """(the program, its member functions and object types (consoles/pc/methods.py), whether it's LTCG) for a PC
+        or Xbox project made from scratch, or None."""
         manifest = fp.manifest or {}
-        if manifest.get("platform") not in ("win32", "xbox"):
-            return None
         try:
-            prog = convention.load(fp.root, manifest)
+            prog = cls._console(fp).program(fp)
         except (OSError, KeyError, ValueError, ForkError):
+            return None
+        if prog is None:
             return None
         ltcg = bool(manifest.get("ltcg"))
         return prog, methods.recover(prog, ltcg), ltcg
@@ -1924,7 +1909,7 @@ class ForkEngine:
             return []
 
     def get_class(self, slug: str, what: str = "") -> str:
-        """The structs and classes found in a PC or Xbox program's code (forks/methods.py): all of them, or the one
+        """The structs and classes found in a PC or Xbox program's code (consoles/pc/methods.py): all of them, or the one
         a function, vtable or global object belongs to."""
         _, fp, _ = self.get(slug)
         found = self._objects(fp)
@@ -2414,8 +2399,8 @@ class ForkEngine:
 
         proj, fp, _ = self.get(slug)
         name = what.strip().strip("`'\"")
-        if (fp.manifest or {}).get("platform") in ("win32", "xbox"):  # the program's data isn't in the target objects
-            return scratch_pe.read_data(fp.root, fp.manifest, name, length)
+        if (text := self._console(fp).read_data(fp, name, length)) is not None:
+            return text  # the console reads it (PC, Xbox: the program's data isn't in the target objects)
         held = agent and self.net.store.one("SELECT f.unit FROM claims c JOIN functions f ON f.id=c.function_id "
                                             "WHERE c.agent_id=?", agent.id)
         units = [held["unit"]] if held else []
@@ -2693,11 +2678,11 @@ class ForkEngine:
         need = fp.needs(cfg.get("version")) if not cfg.get("ready") else None
         return {
             "slug": slug, "title": proj["name"], "description": proj["description"], "kind": "fork",
-            "platform": cfg.get("platform"), "platform_name": catalog.PLATFORMS.get(cfg.get("platform"), cfg.get("platform") or ""),
+            **consoles.get(cfg.get("platform")).project_facts(),
             "repo_url": cfg.get("repo_url"), "fork_kind": cfg.get("fork_kind"), "version": cfg.get("version"),
             "origin": cfg.get("origin"), "compiler_name": cfg.get("compiler"),
             "versions": fp.versions(), "ready": bool(cfg.get("ready")), "needs": need,
-            "rom": {"game_code": cfg.get("version") or "", "region": catalog.PLATFORMS.get(cfg.get("platform"), ""),
+            "rom": {"game_code": cfg.get("version") or "", "region": consoles.name(cfg.get("platform")),
                     "title": proj["name"]},
             "compiler": {"toolchain": "project", "name": "Project's own build", "flags": [], "installed": True,
                          "proprietary": False, "supported": True},
@@ -2708,7 +2693,7 @@ class ForkEngine:
             "measures": m, "uncovered": self.uncovered(slug) if cfg.get("ready") and fp.linkable() else None,
             # (a PC or Xbox game can always be rebuilt: its export runs on the button, so it shows before the first)
             "rebuild": ((fp.manifest or {}).get("rebuild") or ({"identical": None, "detail": "not rebuilt yet"} if
-                        (fp.manifest or {}).get("platform") in ("win32", "xbox") else None))
+                        self._console(fp).made_here(fp) else None))
                        if cfg.get("origin") == "scratch" else None,
         }
 

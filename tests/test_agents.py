@@ -1,12 +1,21 @@
-"""Helper agents: each CLI's output read into the live feed (Antigravity CLI, opencode errors), prompts sent on
-stdin, `decomp connect`, and the compact context agents get (assembly, diffs)."""
+"""Helper agents: each CLI's output read into the feed (Antigravity CLI, opencode errors), prompts sent on stdin,
+helpers as records that survive a restart, starting again by themselves (and waiting out usage limits), quitting
+ending everything they started, what each session spent, and the compact context agents get (assembly, diffs)."""
 
 import json
+import os
+import subprocess
+import sys
+import threading
+import time
 
 import pytest
 
-from decompnet import scoring
-from decompnet.app import agents, connect
+from decompnet import agents as kinds
+from decompnet import network, scoring
+from decompnet.agents import antigravity
+from decompnet.app import agents
+from decompnet.app.engine import RomNetwork
 
 
 def test_antigravity_stream_json_is_read():
@@ -27,34 +36,35 @@ def test_antigravity_stream_json_is_read():
                                                  "tool_name": "call_mcp_tool", "tool_info": {"name": "call_mcp_tool",
                                                  "parameters": {"ServerName": "decomp", "ToolName": "claim_function",
                                                                 "Arguments": {"strategy": "easiest"}}}}},
-        {"event": "result", "result": {"status": "SUCCESS", "num_turns": 3, "usage": {"total_tokens": 1200}}},
+        {"event": "result", "result": {"status": "SUCCESS", "num_turns": 1, "usage": {"total_tokens": 1200}}},
     ]
-    out = [item for line in lines for item in agents.parse_line("antigravity", json.dumps(line), state)]
+    out = [item for line in lines for item in kinds.get("antigravity").parse_line(json.dumps(line), state)]
+    # its result counts the one prompt as one turn ("1 turns" for every session): the model's steps are its turns
     assert out == [("text", "Claiming the next one."), ("tool", "claim_function(easiest)"),
-                   ("usage", json.dumps({"tokens": 1200})), ("info", "session finished (3 turns)")]
+                   ("usage", json.dumps({"tokens": 1200, "turns": 2})), ("info", "session finished (2 turns)")]
 
 
 def test_antigravity_refusing_decomps_tools_says_how_to_allow_them():
     line = json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": "",
                                                      "denied_actions": [{"action": "mcp", "display_name": "CallMcpTool"}]}})
-    errors = [t for k, t in agents.parse_line("antigravity", line, {}) if k == "error"]
-    assert errors and errors[0].startswith("Antigravity refused") and agents.AGY_ALLOW in errors[0]
+    errors = [t for k, t in kinds.get("antigravity").parse_line(line, {}) if k == "error"]
+    assert errors and errors[0].startswith("Antigravity refused") and antigravity.AGY_ALLOW in errors[0]
 
 
 def test_opencode_errors_say_what_failed():
     """Issue #3: opencode's error event nests the message under data; the feed showed "None"."""
     line = json.dumps({"type": "error", "sessionID": "s", "error": {"name": "ProviderAuthError",
                                                                     "data": {"message": "no key for deepseek"}}})
-    assert agents.parse_line("opencode", line) == [("error", "ProviderAuthError: no key for deepseek")]
+    assert kinds.get("opencode").parse_line(line) == [("error", "ProviderAuthError: no key for deepseek")]
     generic = json.dumps({"type": "error", "error": {"name": "UnknownError", "data": {"message": "Unexpected server error."}}})
-    assert agents.parse_line("opencode", generic) == []  # a placeholder: the log line on stderr says what failed
-    assert agents.parse_line("codex", json.dumps({"type": "turn.failed", "error": {"message": "quota"}})) == [("error", "quota")]
+    assert kinds.get("opencode").parse_line(generic) == []  # a placeholder: the log line on stderr says what failed
+    assert kinds.get("codex").parse_line(json.dumps({"type": "turn.failed", "error": {"message": "quota"}})) == [("error", "quota")]
     log = ('timestamp=2026-10-14T14:25:35.946Z level=ERROR run=89d82ac2 message=failed ref=err_ab91f09e '
            'error="ProviderModelNotFoundError: Model not found: nosuch/model." cause="ProviderModelNotFoundError: x\\n at y"')
-    assert agents.clean_stderr("opencode", log) == "ProviderModelNotFoundError: Model not found: nosuch/model."
-    assert agents.clean_stderr("opencode", "timestamp=1 level=WARN message=slow") == ""
+    assert kinds.get("opencode").clean_stderr(log) == "ProviderModelNotFoundError: Model not found: nosuch/model."
+    assert kinds.get("opencode").clean_stderr("timestamp=1 level=WARN message=slow") == ""
     agy = 'AGY_ERROR: {"message": "quota exhausted", "code": 429}'
-    assert agents.clean_stderr("antigravity", agy) == "quota exhausted"
+    assert kinds.get("antigravity").clean_stderr(agy) == "quota exhausted"
 
 
 def test_opencode_2_starts_and_its_quota_error_says_so(tmp_path, monkeypatch):
@@ -64,7 +74,7 @@ def test_opencode_2_starts_and_its_quota_error_says_so(tmp_path, monkeypatch):
     m = _manager(tmp_path, monkeypatch, "opencode")
     cmd, _, _ = m._command(agents.Session("opencode-1", "opencode", "o", "demo", "opencode-1", {}), "t", tmp_path)
     assert "--log-level" not in cmd and "--print-logs" in cmd
-    assert agents.clean_stderr("opencode", 'level=error message=failed error="quota exceeded"') == "quota exceeded"
+    assert kinds.get("opencode").clean_stderr('level=error message=failed error="quota exceeded"') == "quota exceeded"
     assert not agents._SIGNIN.search("quota exceeded") and agents._SIGNIN.search("ProviderAuthError: no key")
 
 
@@ -73,10 +83,10 @@ def test_a_used_up_plan_waits_instead_of_stopping():
     rate limit is still a throttle, and a prepaid account out of credit still stops)."""
     for said in ("Claude AI usage limit reached|1792140000", "You've hit your usage limit. Upgrade or try again later",
                  "RESOURCE_EXHAUSTED: quota exhausted", "provider.quota: quota exceeded"):
-        assert agents._LIMIT.search(said) and not agents.no_credit(said), said
+        assert agents.LIMIT.search(said) and not agents.no_credit(said), said
     for said in ("Rate limit exceeded", "429 Too Many Requests"):
-        assert not agents._LIMIT.search(said) and agents._THROTTLED.search(said), said
-    assert agents.no_credit("Insufficient Balance") and not agents._LIMIT.search("Insufficient Balance")
+        assert not agents.LIMIT.search(said) and agents.THROTTLED.search(said), said
+    assert agents.no_credit("Insufficient Balance") and not agents.LIMIT.search("Insufficient Balance")
 
 
 def _manager(tmp_path, monkeypatch, kind):
@@ -86,7 +96,7 @@ def _manager(tmp_path, monkeypatch, kind):
     exe.chmod(0o755)
     monkeypatch.setattr(agents, "_which", lambda cmd: str(exe))
     m = agents.Manager.__new__(agents.Manager)
-    m.mcp_url = "http://127.0.0.1:6464/mcp"
+    m.mcp_url, m.home = "http://127.0.0.1:6464/mcp", tmp_path
     m.prompt = lambda s: "line one\nline two with \"quotes\" & <ampersands>"
     return m
 
@@ -102,7 +112,7 @@ def test_prompts_go_in_on_stdin_never_the_command_line(tmp_path, monkeypatch):
         cmd, env, stdin = m._command(s, "tok", work)
         assert not any("line one" in a for a in cmd), (kind, cmd)
         assert "line one" in stdin and "some-model" in cmd
-        assert env["DECOMP_SESSION_TOKEN"] == "tok"  # a `decomp mcp` the agent starts works as this session
+        assert env[agents.HELPER_ENV] == str(tmp_path)  # what it starts can be found and ended when the app quits
     # Antigravity: one stream-json user message, the server in the workspace's own MCP config
     m = _manager(tmp_path, monkeypatch, "antigravity")
     s = agents.Session("antigravity-2", "antigravity", "a", "demo", "antigravity-2", {})
@@ -118,7 +128,7 @@ def test_prompts_go_in_on_stdin_never_the_command_line(tmp_path, monkeypatch):
 def test_opencode_free_models_keep_their_tools_but_never_get_to_use_them(tmp_path, monkeypatch):
     """OpenCode Zen's free models refuse requests whose tools were taken out ("deny"); "ask" keeps them listed and
     `opencode run` rejects every ask. Models of other providers get "deny"."""
-    monkeypatch.setattr(agents, "_config_model", lambda kind: None)
+    monkeypatch.setattr(kinds.get("opencode"), "config_model", lambda: None)
     for model, rule in (("opencode/big-pickle", "ask"), ("", "ask"), ("deepseek/deepseek-chat", "deny")):
         m = _manager(tmp_path, monkeypatch, "opencode")
         s = agents.Session("opencode-1", "opencode", "o", "demo", "opencode-1", {"model": model})
@@ -126,27 +136,19 @@ def test_opencode_free_models_keep_their_tools_but_never_get_to_use_them(tmp_pat
         work.mkdir()
         m._command(s, "tok", work)
         assert json.loads((work / "opencode.json").read_text())["permission"] == {"edit": rule, "bash": rule, "webfetch": rule}
-    # its own connection, with its own token; the user's `decomp` (decomp connect) off: opencode 2's shared service ran
-    # that one without the session's token, so every helper worked as the user's one chat agent
+    # its own connection, with its own token, and nothing else: opencode 2's shared service ran the user's own
+    # `decomp` server without the session's token, so every helper worked as the user's one chat agent
     for version, standalone in (("opencode v2.0.28", True), ("0.15.4", False)):  # opencode 2's shared service
-        monkeypatch.setitem(agents._versions, "opencode", (0, version))
+        monkeypatch.setitem(kinds.known_versions, "opencode", (0, version))
         assert ("--standalone" in m._command(s, "tok", work)[0]) is standalone
     mcp = json.loads((work / "opencode.json").read_text())["mcp"]
-    assert mcp["decompdecomp"]["headers"] == {"Authorization": "Bearer tok"} and mcp["decomp"]["enabled"] is False
+    assert list(mcp) == ["decompdecomp"] and mcp["decompdecomp"]["headers"] == {"Authorization": "Bearer tok"}
 
 
 def test_gemini_cli_helpers_carry_on_as_antigravity():
-    assert agents.kind_id("gemini") == "antigravity" and agents.kind_id("agy") == "antigravity"
-    assert "gemini" not in agents.KINDS and agents.KINDS["antigravity"].command == "agy"
-
-
-def test_connect_antigravity(tmp_path, monkeypatch):
-    monkeypatch.setattr(connect, "_which", lambda cmd: f"/bin/{cmd}")
-    monkeypatch.setattr(connect, "bridge_command", lambda: ["/usr/bin/python3", "-m", "decompnet.app.cli", "mcp"])
-    cmd = connect.commands("antigravity")
-    # agy wants flags before the name, and `--` before a command whose arguments start with "-"
-    assert cmd == ["/bin/agy", "mcp", "add", "-e", "DECOMP_AGENT_NAME=antigravity", "decomp", "--",
-                   "/usr/bin/python3", "-m", "decompnet.app.cli", "mcp"]
+    assert kinds.kind_id("gemini") == "antigravity" and kinds.kind_id("agy") == "antigravity"
+    assert "gemini" not in {a.id for a in kinds.AGENTS} and kinds.get("antigravity").command == "agy"
+    assert kinds.get("gemini") is kinds.get("antigravity")
 
 
 def test_assembly_for_agents_is_compact():
@@ -168,6 +170,7 @@ def test_diffs_sum_up_and_shorten_long_runs():
     assert len(text.splitlines()) < 15
 
 
+<<<<<<< HEAD
 def test_helpers_and_the_agent_you_talk_to_never_share_an_identity(tmp_path):
     """8 Antigravity helpers showed as 15 agents: the helpers reached decompdecomp through the user's own `decomp mcp`,
     which signed each in as a new agent of the user's, named like the helpers (antigravity-9...). Chat identities
@@ -212,6 +215,8 @@ def test_stopping_a_helper_frees_its_function_at_once(tmp_path):
     assert net.store.one("SELECT COUNT(*) AS n FROM events WHERE agent_id=? AND kind='stopped'", helper.id)["n"] == 1
 
 
+=======
+>>>>>>> upstream/main
 def test_a_helpers_identity_says_its_model_so_records_never_mix():
     """Helpers were opencode-1, opencode-2... whatever model they ran: re-added with another model, a helper took over
     the old one's matches. The model is part of the identity now; the same model gets its name (and record) back."""
@@ -222,3 +227,322 @@ def test_a_helpers_identity_says_its_model_so_records_never_mix():
     assert name("antigravity", None, set()) == "antigravity-1"
     long = name("antigravity", "Some Provider/A Very Long Model Name: Preview Edition 2026", set())
     assert len(long) <= 40 and all(c.isalnum() or c in "-_." for c in long)
+
+
+def test_claude_offers_each_version_as_well_as_the_latest():
+    """The launcher offered only "Opus", "Sonnet", "Haiku" (always the newest): the owner wanted e.g. Opus 4.6."""
+    offered = {m["id"]: m["name"] for m in kinds.get("claude").models("claude")}
+    assert offered["opus"] == "Opus" and offered["claude-opus-4-6"] == "Opus 4.6"
+    assert offered["claude-sonnet-5-5"] == "Sonnet 5.5" and offered["claude-fable-5"] == "Fable 5"
+    assert agents.helper_name("claude", "claude-opus-4-6", set()) == "claude-opus-4-6-1"
+    assert agents.helper_name("claude", "opus", set()) == "claude-opus-1"  # the alias keeps its old record
+
+
+# ---------------------------------------------------------------------------------- helpers as records
+
+URL = "http://127.0.0.1:1/mcp"
+
+
+def _game(tmp_path, functions: int = 1) -> RomNetwork:
+    """A project with a few open functions, enough for helpers to run their loop on."""
+    net = RomNetwork(tmp_path / "app.db", tmp_path)
+    with net.store.tx() as db:
+        pid = db.execute("INSERT INTO projects(slug,name,description,arch,big_endian,root,config) VALUES(?,?,?,?,?,?,?)",
+                         ("game", "Game", "", "mips", 0, str(tmp_path), json.dumps({"kind": "rom"}))).lastrowid
+        for k in range(functions):
+            db.execute("INSERT INTO functions(project_id,name,size,n_insns,status,unit) VALUES(?,?,?,?,?,?)",
+                       (pid, f"f{k}", 16, 4, "open", ""))
+    return net
+
+
+def _no_agent_settings(monkeypatch) -> None:
+    """No agent's own settings read: the default model of none."""
+    for kind in kinds.AGENTS:
+        monkeypatch.setattr(kind, "config_model", lambda: None)
+
+
+class Quick(threading.Event):
+    """A helper's stop event whose waits end at once, noting how long they'd have been."""
+
+    def __init__(self):
+        super().__init__()
+        self.waits: list[float] = []
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        return self.is_set()
+
+
+@pytest.fixture
+def quiet(monkeypatch):
+    """Helpers that start without their real loop, and no agent's own settings read."""
+    _no_agent_settings(monkeypatch)
+    monkeypatch.setattr(agents.Manager, "_prepare", lambda self, slug: None)
+    monkeypatch.setattr(agents.Manager, "_run", lambda self, s: None)
+
+
+def test_helpers_are_records_that_outlive_the_app(tmp_path, quiet):
+    """After a restart the Agents view showed opencode-20 with only "agents running": helpers lived in the app's memory
+    and their claims in the database, so a dead helper's claim showed as a "connected agent" with no stop button, and
+    its name stayed taken. Now a helper is a record: after a restart it shows as it was, its claim is released at
+    once, it carries on if the app stopped it by closing, and a new helper of the same model takes its name back."""
+    net = _game(tmp_path)
+    m = agents.Manager(net, tmp_path, URL)
+    (sid,) = m.start("claude", "game", 1, {"model": "opus"})
+    (other,) = m.start("codex", "game", 1, {})
+    m.stop(other)  # you stopped this one
+    helper, _ = net.local_agent("claude-opus-1")
+    with net.store.tx() as db:
+        db.execute("INSERT INTO claims VALUES((SELECT id FROM functions WHERE name='f0'),?,?,?)", (helper.id, 0, 1e12))
+    later = agents.Manager(net, tmp_path, URL)  # the app closed without a word (it crashed), and starts again
+    s = later.sessions[sid]
+    assert (s.agent_name, s.state, s.stopped_by) == ("claude-opus-1", "stopped", agents.BY_QUIT)
+    assert net.store.one("SELECT COUNT(*) AS n FROM claims")["n"] == 0
+    assert later.resume() == [sid]  # what the app stopped carries on, what you stopped doesn't
+    assert later.sessions[sid].state == "starting" and later.sessions[other].state == "stopped"
+    later.stop(sid)
+    assert later.sessions[sid].why == "stopped by you"
+    assert later.start("claude", "game", 1, {"model": "opus"}) == [sid]  # its name and record back: no climbing
+    assert net.store.one("SELECT COUNT(*) AS n FROM helpers")["n"] == 2
+    later.remove(other)
+    assert other not in later.sessions and net.store.one("SELECT COUNT(*) AS n FROM helpers")["n"] == 1
+
+
+def test_an_api_helper_starts_again_with_its_endpoints_key(tmp_path, quiet):
+    """An API helper's key is never in its record: started again by hand, it gets it from its saved endpoint, and one
+    whose endpoint is gone says so."""
+    net = _game(tmp_path)
+    m = agents.Manager(net, tmp_path, URL)
+    (sid,) = m.start("api", "game", 1, {"model": "m", "endpoint": "e1", "api_key": "sk-1"})
+    m.stop(sid)
+    later = agents.Manager(net, tmp_path, URL)
+    assert "api_key" not in later.sessions[sid].options
+    later.options_now = lambda kind, options: options | {"api_key": "sk-now"} if options.get("endpoint") == "e1" else None
+    later.restart(sid)
+    assert later.sessions[sid].options["api_key"] == "sk-now" and later.sessions[sid].state == "starting"
+    later.stop(sid)
+    later.options_now = lambda kind, options: None
+    with pytest.raises(ValueError, match="endpoint was removed"):
+        later.restart(sid)
+
+
+def test_the_prompt_gives_the_compile_budget_the_guide_gives(tmp_path, monkeypatch):
+    """The prompt said "no better after 4 compiles in a row" while the guide said "~20"."""
+    net = _game(tmp_path)
+    m = agents.Manager(net, tmp_path, URL)
+    monkeypatch.setattr(net, "overview", lambda slug: {"kind": "rom", "title": "Game", "platform": "n64",
+                                                      "compiler": {"toolchain": "gcc-2.7.2-kmc"}})
+    s = agents.Session("1", "claude", "claude-1", "game", "claude-1", {})
+    assert network.stall_budget_text() in m._prompt(s) and "8 claims" in m._prompt(s)
+
+
+def test_stopping_a_helper_frees_its_function_at_once(tmp_path, quiet):
+    """A stopped helper's claim used to wait for its thread to notice (an API helper waits on its model meanwhile):
+    removed from the list, it showed up as a "connected agent" without a Stop button."""
+    net = _game(tmp_path)
+    m = agents.Manager(net, tmp_path, URL)
+    (sid,) = m.start("api", "game", 1, {"model": "deepseek-chat", "provider_name": "DeepSeek"})
+    helper, _ = net.local_agent(m.sessions[sid].agent_name)
+    with net.store.tx() as db:
+        db.execute("INSERT INTO claims VALUES((SELECT id FROM functions WHERE name='f0'),?,?,?)", (helper.id, 0, 1e12))
+    m.stop(sid)
+    assert net.store.one("SELECT COUNT(*) AS n FROM claims")["n"] == 0
+    assert net.store.one("SELECT stopped_by FROM helpers WHERE id=?", sid)["stopped_by"] == agents.BY_YOU
+
+
+def test_a_failing_helper_starts_again_then_pauses_with_the_error(tmp_path, monkeypatch):
+    """Helpers stopped after an error and stayed stopped ("agent stopped, see the message", in a tab nobody looked
+    at). Now one starts again by itself, waiting longer after each failure; five fast failures in a row pause it, with
+    the error to read."""
+    _no_agent_settings(monkeypatch)
+    net = _game(tmp_path)
+    m = agents.Manager(net, tmp_path, URL)
+    s = m._record("game", "opencode", "opencode-1", "opencode-1", {})
+    s.stop = Quick()
+
+    def fails(s, token, workdir):
+        s.error = "ProviderModelNotFoundError: Model not found: nosuch/model."
+        return False
+    monkeypatch.setattr(m, "_run_cli", fails)
+    m._run(s)
+    assert s.state == "paused" and "Model not found" in s.why and s.runs == agents.FAST_FAILURES_TO_PAUSE
+    assert s.restarts == agents.FAST_FAILURES_TO_PAUSE - 1
+    pauses = [w for w in s.stop.waits if w]
+    assert len(pauses) == agents.FAST_FAILURES_TO_PAUSE - 1 and pauses == sorted(pauses)  # longer each time
+    assert pauses[0] <= agents.BACKOFF_FIRST
+    rows = net.store.all("SELECT outcome FROM helper_sessions WHERE helper_id=?", s.id)
+    assert [r["outcome"] for r in rows] == ["failed"] * agents.FAST_FAILURES_TO_PAUSE
+    assert net.store.one("SELECT state FROM helpers WHERE id=?", s.id)["state"] == "paused"
+
+
+def test_a_usage_limit_waits_until_it_resets_then_carries_on(tmp_path, monkeypatch):
+    """A night's run lost most of its helpers to their plans' usage limits. A helper waits until the time the agent
+    says the limit resets, then carries on by itself; its last words show meanwhile."""
+    _no_agent_settings(monkeypatch)
+    net = _game(tmp_path)
+    m = agents.Manager(net, tmp_path, URL)
+    s = m._record("game", "claude", "claude-1", "claude-1", {})
+    s.stop = Quick()
+    resets = time.time() + 3 * 3600
+    said = "You've hit your limit · resets 3pm"
+    runs = []
+
+    def run(s, token, workdir):
+        runs.append(s.state)
+        if len(runs) == 1:
+            s.push("text", said)
+            s.limited, s.limit_until = True, resets
+            return False
+        m.stop(s.id)
+        return True
+    monkeypatch.setattr(m, "_run_cli", run)
+    m._run(s)
+    assert len(runs) == 2 and s.restarts == 1 and s.state == "stopped" and s.last_message == said
+    assert abs(max(w for w in s.stop.waits if w) - (3 * 3600 + agents.LIMIT_RESET_MARGIN)) < 5
+    assert any("usage limit is reached" in f["text"] for f in s.feed)
+    assert [r["outcome"] for r in net.store.all("SELECT outcome FROM helper_sessions")] == ["limit", "stopped"]
+
+
+def test_when_a_usage_limit_resets_is_read_from_what_the_agent_said():
+    from datetime import datetime, timedelta, timezone
+
+    noon = datetime(2026, 10, 18, 13, 0).astimezone()
+    now = noon.timestamp()
+    reset = agents.limit_reset
+    assert reset(f"Claude AI usage limit reached|{int(now) + 3600}", now) == int(now) + 3600
+    assert reset("You've hit your usage limit. Upgrade to Pro or try again in 2 hours 13 minutes.", now) == now + 7980
+    assert reset("RESOURCE_EXHAUSTED: Quota exceeded. Please retry in 46.6s.", now) == pytest.approx(now + 46.6)
+    assert reset("5-hour limit reached ∙ resets 3pm", now) == (noon + timedelta(hours=2)).timestamp()
+    assert reset("You've hit your usage limit. Try again at 8:05 PM.", now) == (noon + timedelta(hours=7, minutes=5)).timestamp()
+    assert reset("resets 10am", now) == (noon + timedelta(hours=21)).timestamp()  # tomorrow
+    assert datetime.fromtimestamp(reset("You've hit your limit · resets 3pm (UTC)", now), timezone.utc).hour == 15
+    assert reset("quota resets at 2026-10-18T15:30:00Z", now) == datetime.fromisoformat("2026-10-18T15:30:00+00:00").timestamp()
+    for vague in ("quota exhausted", "resets 3", f"usage limit reached|{int(now) + 365 * 86400}"):
+        assert reset(vague, now) is None, vague
+
+
+def test_quitting_ends_everything_a_helper_started(tmp_path):
+    """An `opencode serve --service` outlived its parent (its parent became PID 1): quitting ends a helper's process
+    group, and what it started that left the group."""
+    net = RomNetwork(tmp_path / "app.db", tmp_path)
+    m = agents.Manager(net, tmp_path, URL)
+    pidfile = tmp_path / "service.pid"
+    code = ("import subprocess, sys, time\n"
+            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+            f"open({str(pidfile)!r}, 'w').write(str(p.pid))\n"
+            "time.sleep(60)\n")
+    proc = subprocess.Popen([sys.executable, "-c", code], env=dict(os.environ, **{agents.HELPER_ENV: str(tmp_path)}),
+                            start_new_session=True)
+    for _ in range(100):
+        if pidfile.exists() and pidfile.read_text():
+            break
+        time.sleep(0.1)
+    service = int(pidfile.read_text())
+    s = agents.Session("1", "opencode", "opencode-1", "game", "opencode-1", {}, state="working")
+    s.proc = proc
+    m.sessions[s.id] = s
+    m.shutdown()
+    proc.wait(10)
+
+    def alive(pid: int) -> bool:  # (a process that ended but nobody collected yet counts as ended)
+        try:
+            return open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[0] != "Z"
+        except OSError:
+            return False
+    for _ in range(50):
+        if not alive(service):
+            break
+        time.sleep(0.1)
+    assert not alive(service) and s.state == "stopped" and s.stopped_by == agents.BY_QUIT
+
+
+def test_finding_the_installed_agents_never_holds_up_a_page(tmp_path, monkeypatch):
+    """The first /api/state took 3.7 s: it ran `agy models`, `opencode models` and six `--version`s. That runs in the
+    background from the app's start now; until it's done, the page gets where the agents are, without their models."""
+    gate = threading.Event()
+
+    def detect(quick=False):
+        if quick:
+            return [{"id": "claude", "models": []}]
+        gate.wait(5)
+        return [{"id": "claude", "models": ["opus"]}]
+    monkeypatch.setattr(agents, "detect", detect)
+    m = agents.Manager(RomNetwork(tmp_path / "app.db", tmp_path), tmp_path, URL)
+    began = time.time()
+    assert m.detected() == [{"id": "claude", "models": []}] and m.detecting()
+    assert time.time() - began < 1
+    gate.set()
+    m.refresh_detected(wait=True)
+    assert m.detected() == [{"id": "claude", "models": ["opus"]}] and not m.detecting()
+
+
+def test_the_tests_never_run_an_agent_to_find_it(monkeypatch):
+    """`agy models` starts the MCP servers in Antigravity's settings (the old bridge among them started the user's own
+    app): with DECOMP_DETECT_AGENTS=off nothing is run, only looked for."""
+    assert os.environ.get(agents.DETECT_ENV) == "off"
+
+    def never(*args, **kwargs):
+        raise AssertionError(f"ran {args[0]}")
+    monkeypatch.setattr(agents.subprocess, "run", never)
+    assert {row["id"] for row in agents.detect()} == {a.id for a in kinds.AGENTS}
+
+
+def test_the_api_helper_folds_each_finished_function_into_a_line(tmp_path, monkeypatch):
+    """Ridge Racer V's API helper used 240K tokens per match: it trimmed old tool output wherever the conversation grew,
+    so every request changed near its start and the provider's prompt cache never served it. Now what led up to a
+    finished function folds into one line, nothing before it changes, the turn that finished it stays whole, and each
+    session's tokens (cached ones apart), turns and tool calls are on its row."""
+    import httpx
+
+    _no_agent_settings(monkeypatch)
+    net = _game(tmp_path, functions=2)
+    m = agents.Manager(net, tmp_path, URL)
+    m.prompt = lambda s: "task"
+    s = m._record("game", "api", "api-m-1", "box #1", {"base_url": "http://mock/v1", "model": "m", "per_session": 2,
+                                                       "context_tokens": 32768})
+    s.stop = Quick()
+
+    def call(net, agent, slug, name, args):
+        if name == "claim_function":
+            return f"## CLAIMED: game/{net.claim_row(agent, slug)['name']}\n" + "assembly " * 300
+        with net.store.tx() as db:
+            db.execute("UPDATE functions SET status='matched' WHERE name=?", (args["function"],))
+            db.execute("DELETE FROM claims WHERE agent_id=?", (agent.id,))
+        return f"✅ MATCH! {args['function']} is byte-identical"
+    monkeypatch.setattr(agents.tools, "call", call)
+    steps = iter(["claim_function", "compile_and_diff:f0", "claim_function", "compile_and_diff:f1"])
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content)["messages"])
+        name, _, fn = next(steps).partition(":")
+        msg = {"role": "assistant", "content": None, "tool_calls": [{"id": f"c{len(sent)}", "type": "function", "function": {
+            "name": name, "arguments": json.dumps({"function": fn, "source": "int f;"} if fn else {})}}]}
+        return httpx.Response(200, json={"choices": [{"message": msg}], "usage": {
+            "prompt_tokens": 1000, "completion_tokens": 50, "prompt_tokens_details": {"cached_tokens": 800}}})
+    real = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    m._run(s)
+    assert len(sent) == 4 and s.state == "stopped" and "nothing left" in s.why
+    third = sent[2]  # after f0 matched: its claim folded into a line, the match itself whole
+    assert third[:2] == sent[0][:2] and "folded" in third[3]["content"] and "matched f0" in third[3]["content"]
+    assert "byte-identical" in third[-1]["content"] and not any("assembly" in str(x.get("content")) for x in third)
+    assert sent[3][:len(third)] == third  # what was sent stays as it was
+    row = net.store.one("SELECT * FROM helper_sessions WHERE helper_id=?", s.id)
+    assert (row["input_tokens"], row["cache_read_tokens"], row["output_tokens"]) == (800, 3200, 200)
+    assert (row["turns"], row["tool_calls"], row["outcome"]) == (4, 4, "ok")
+
+
+def test_each_models_cost_per_match_cheapest_first(tmp_path, quiet):
+    """The Agents view says what each model cost on a game, to tell which models to run more of: cheapest per match
+    first, models that matched nothing last."""
+    net = _game(tmp_path)
+    m = agents.Manager(net, tmp_path, URL)
+    with net.store.tx() as db:
+        for model, usd, tokens, matches in (("claude-opus-5.5", 3.0, 0, 10), ("deepseek-v4.1-flash", 0.5, 0, 10),
+                                            ("muse-1.3", 1.0, 0, 0), ("local-qwen", 0.0, 900_000, 9)):
+            db.execute("INSERT INTO helper_sessions(helper_id, project, kind, model, agent, started_at, usd, tokens, "
+                       "matches) VALUES(1, 'game', 'api', ?, 'a', 0, ?, ?, ?)", (model, usd, tokens, matches))
+    # a model counted only in tokens isn't the cheapest: it comes after the priced ones
+    assert [r["model"] for r in m.costs("game")] == ["deepseek-v4.1-flash", "claude-opus-5.5", "local-qwen", "muse-1.3"]
+    assert m.costs("other") == []

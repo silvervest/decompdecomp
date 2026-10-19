@@ -5,16 +5,21 @@ function by any name an agent uses for it, and the identities of the agents that
 from __future__ import annotations
 
 import json
-import re
 import secrets
 import threading
-import time
 from pathlib import Path
 
-from ...network import Agent, Network, NetworkError, _hash_token
+from ... import consoles
+from ...network import Agent, Network, NetworkError, hash_token
 from ...rom import split
 from ...rom.symbols import Symbol, SymbolTable
 from .common import _ADDRESS
+
+# Settings parsed, by their text: GTA San Andreas's are 193 KB, and one request read them 4 to 12 times (a range
+# check after a match, 462 times). A few versions are kept: each change of a project's settings is a new text.
+SETTINGS_KEPT = 8
+_settings: dict[str, dict] = {}
+_settings_lock = threading.Lock()
 
 
 class Core(Network):
@@ -25,14 +30,19 @@ class Core(Network):
         self._sym_override: dict[int, SymbolTable] = {}
         self._roms: dict[int, tuple[bytes, list[split.Segment]]] = {}
         self._xrefs: dict[int, dict] = {}
-        self._seed_lock = threading.Lock()
+        self._draft_locks: dict[int, threading.Lock] = {}  # function id -> held while its machine draft is made
+        self._headers: dict[tuple, object] = {}  # (project id, header version, for m2c) -> its declarations
+        self._asm_names: dict[int, dict] = {}  # project id -> {function id: (size, the names its assembly mentions)}
         self.links: dict = {}  # slug -> collab.Link, for projects joined from a friend's room
         self.rooms: dict = {}  # slug -> collab.Room, for projects this computer shares
         self._remote_ids: dict[str, int] = {}
-        self._ops: dict[int, dict] = {}  # project id -> look-alike index
+        self._ops: dict[int, tuple] = {}  # project id -> (the game's layout, look-alike index)
+        self._warmed: dict[int, tuple] = {}  # project id -> the layout its briefs' caches were built for
+        self._warming: dict[int, threading.Lock] = {}  # project id -> held while they build
         self._diffs: dict[tuple, dict] = {}  # (function, source, context, compiler) -> diff for the GUI
         self.autopilots: dict[str, dict] = {}  # slug -> progress of trying every function's machine draft
         self._cmaps: dict[int, tuple] = {}  # project id -> (what it was built from, compiler map)
+        self._cmap_builds: dict[int, threading.Lock] = {}  # project id -> held while its compiler map builds
         self.surveys: dict[str, dict] = {}  # slug -> the judge's compiler survey, running or last
         from ..forkengine import ForkEngine  # forks build on this class's claims, attempts and live view
         from ..permute import Permuter
@@ -42,13 +52,48 @@ class Core(Network):
         self.permuter = Permuter(self)
         from ..rangecheck import RangeChecks
         self.rangechecks = RangeChecks(self)
+        from ..knowledge import Knowledge
+        self.knowledge = Knowledge(self)
+        from ..readable import Readability
+        self.readability = Readability(self)
+        from ..drafts import Drafter
+        self.drafter = Drafter(self)
+        self.find_moved_projects()
 
     @staticmethod
     def cfg(proj) -> dict:
-        return json.loads(proj["config"])
+        """A project's settings. Shared by everyone who reads the same version of them: read it, never change it
+        (_update_cfg changes settings; code that edits a copy parses its own, json.loads(proj["config"]))."""
+        text = proj["config"]
+        with _settings_lock:
+            parsed = _settings.get(text)
+        if parsed is None:
+            parsed = json.loads(text)
+            with _settings_lock:
+                if len(_settings) >= SETTINGS_KEPT:
+                    _settings.pop(next(iter(_settings)))  # the oldest version
+                _settings[text] = parsed
+        return parsed
+
+    def find_moved_projects(self) -> list[str]:
+        """Projects whose folder isn't where it was, found again in this workspace by their name: a whole Decomp
+        folder copied to another computer, user name or Linux keeps its projects (their folders were stored as
+        absolute paths: /home/decomp/Decomp/... inside the old Windows install's WSL)."""
+        moved = []
+        for row in self.store.all("SELECT id, slug, root FROM projects"):
+            here = self.workspace / row["slug"]
+            if row["root"] and not Path(row["root"]).exists() and here.is_dir():
+                with self.store.tx() as db:
+                    db.execute("UPDATE projects SET root=? WHERE id=?", (str(here), row["id"]))
+                moved.append(row["slug"])
+        return moved
 
     def is_rom(self, proj) -> bool:
         return self.cfg(proj).get("kind") == "rom"
+
+    def console(self, proj) -> consoles.Console:
+        """The project's console (consoles/): what the engine asks, instead of comparing platform names."""
+        return consoles.of(self.cfg(proj))
 
     def project_row(self, slug: str):
         return self._project(slug)
@@ -190,40 +235,14 @@ class Core(Network):
             db.execute("UPDATE projects SET config=? WHERE id=?", (json.dumps(cfg), proj["id"]))
         return cfg
 
-    def chat_agent(self, base: str) -> tuple[Agent, str]:
-        """An identity for an agent the user talks to (Claude Code, Codex, ... connected with `decomp mcp`): `base`,
-        or base_2, base_3... when another session of the same agent is active right now (never base-2: that's the
-        name of a helper session, see local_agent)."""
-        base = re.sub(r"[^A-Za-z0-9_.-]+", "-", base).strip("-")[:30] or "chat"
-        for n in range(1, 100):
-            name = base if n == 1 else f"{base}_{n}"
-            row = self.store.one("SELECT id, origin, last_seen FROM agents WHERE name=?", name)
-            if row is None or (row["origin"] == "chat" and (row["last_seen"] or 0) < time.time() - 600):
-                break
-        else:
-            raise NetworkError("too many chat sessions at once")
-        if row is None:
-            token = self.register_agent(name, "you", trusted=True, origin="chat")
-        else:
-            token = "dn_" + secrets.token_urlsafe(24)
-            with self.store.tx() as db:
-                db.execute("UPDATE agents SET token_hash=?, last_seen=? WHERE id=?", (_hash_token(token), time.time(), row["id"]))
-        return self.authenticate(token), token
-
-    def is_chat(self, agent: Agent) -> bool:
-        row = self.store.one("SELECT origin FROM agents WHERE id=?", agent.id)
-        return bool(row) and row["origin"] == "chat"
-
     def local_agent(self, name: str) -> tuple[Agent, str]:
-        """An agent identity for one runner on this machine (created on first use). A name an agent the user talks
-        to had before 0.10.4 (chat identities were numbered like helper sessions) becomes the runner's: a helper
-        never gets the chat agent's tools, and the chat agent never takes over the runner's identity."""
+        """An agent identity for one runner on this machine (created on first use)."""
         row = self.store.one("SELECT id FROM agents WHERE name=?", name)
         if row is not None:
             token = "dn_" + secrets.token_urlsafe(24)
             with self.store.tx() as db:
-                db.execute("UPDATE agents SET token_hash=?, origin=CASE origin WHEN 'chat' THEN 'local' ELSE origin END "
-                           "WHERE id=?", (_hash_token(token), row["id"]))
+                db.execute("UPDATE agents SET token_hash=?, origin='local' "
+                           "WHERE id=?", (hash_token(token), row["id"]))
         else:
             token = self.register_agent(name, "you", trusted=True, origin="local")
         return self.authenticate(token), token

@@ -4,14 +4,14 @@ async function showAgentsPage() {
   show("agentsPage");
   $("agList").innerHTML = `<p class="muted small">Looking for your agents…</p>`;
   await loadState();
-  renderAgentsPage();
+  renderAgentsPage();  // again when the search for agents ends (base.js agentsFound)
 }
 function renderAgentsPage() {
-  const rows = S.st.agents.filter((a) => a.id !== "api");
+  const rows = S.st.agents.filter((a) => !a.uses_endpoints);
   $("agList").innerHTML = rows.map((a) => `<div class="agent-row">
       <div class="ar-head"><b>${esc(a.name)}</b><span class="muted small">${esc(a.vendor)}</span><span class="grow"></span>
         ${a.installed ? `<span class="ok-mark">installed</span>` : `<button class="primary small-btn" data-inst="${esc(a.id)}" type="button" ${a.needs ? "disabled" : ""}>Install</button>`}</div>
-      ${a.installed ? `<dl class="facts"><div><dt>Version</dt><dd>${esc(a.version || "?")}</dd></div><div><dt>Default model</dt><dd>${esc(a.default_model || "the app's own")}</dd></div><div><dt>Models offered</dt><dd>${(a.models || []).length ? (a.models || []).length : "any you type"}</dd></div></dl>
+      ${a.installed ? `<dl class="facts"><div><dt>Version</dt><dd>${esc(a.version || (S.st.agents_detecting ? "checking…" : "unknown"))}</dd></div><div><dt>Default model</dt><dd>${esc(a.default_model || "the app's own")}</dd></div><div><dt>Models offered</dt><dd>${(a.models || []).length ? (a.models || []).length : "any you type"}</dd></div></dl>
         ${(a.models || []).length ? `<details class="models"><summary>${a.models.length} model${a.models.length === 1 ? "" : "s"}</summary><div class="model-chips">${a.models.map((m) => `<span class="chip-s mono" title="${esc(m.note || "")}">${esc(m.name)}</span>`).join("")}</div></details>` : ""}
         <p class="muted small">${esc(a.signin)}</p>`
       : `<p class="muted small">${a.needs ? `Needs ${esc(a.needs)} first. ` : ""}Or install it yourself:</p>${cmdBox(a.install)}`}
@@ -20,13 +20,13 @@ function renderAgentsPage() {
   $("agList").querySelectorAll("[data-inst]").forEach((b) => {
     b.onclick = async () => {
       const log = $("agList").querySelector(`[data-ilog="${b.dataset.inst}"]`);
-      log.hidden = false; b.disabled = true;
+      showJobError(log, ""); b.disabled = true;
       try {
         const { job } = await api("/api/agents/install", { method: "POST", body: { kind: b.dataset.inst } });
         await followJob(job, log);
         toast("Installed.", "match");
         showAgentsPage();
-      } catch (e) { toast(esc(e.message), "err"); b.disabled = false; }
+      } catch (e) { showJobError(log, e.message); b.disabled = false; }
     };
   });
   const eps = S.st.settings.endpoints || [];
@@ -59,26 +59,11 @@ function renderAgentsPage() {
     if (cancel) cancel.onclick = () => { S.addingEndpoint = false; renderAgentsPage(); };
   });
   if ($("epAdd")) $("epAdd").onclick = () => { S.addingEndpoint = true; renderAgentsPage(); };
-  $("mcpBox").innerHTML = `<p class="muted small">Connect the agent you talk to, once. Then ask it in your terminal: <i>“decompile my game at ~/roms/game.z64”</i>. It imports it, opens this view and works with every tool here.</p>
-    <div class="setup-group" id="mcpRows"><p class="muted small">Looking…</p></div>
-    <p class="col-title">Any other MCP client (Cursor, Claude Desktop, Windsurf…)</p><pre class="code" id="mcpJson"></pre>
-    <p class="col-title">A client that connects by URL (HTTP MCP)</p>
-    <p class="muted small">It needs a token: a password for this app's tools, so keep it to yourself. Making a new one for the same name replaces the old one.</p>
-    <div class="lz-row"><label class="field"><span>Name it goes by</span><input id="mcpName" class="mono" value="http-client"></label><button class="ghost small-btn" id="mcpToken" type="button">Make a token</button></div>
-    <pre class="code" id="mcpHttp" hidden></pre>`;
-  connectRows($("mcpRows")).then((r) => { if (r) $("mcpJson").textContent = JSON.stringify({ mcpServers: { decomp: { command: r.bridge[0], args: r.bridge.slice(1) } } }, null, 2); });
-  $("mcpToken").onclick = async () => {
-    try {
-      const t = await api("/api/agents/token", { method: "POST", body: { name: $("mcpName").value.trim() || "http-client" } });
-      $("mcpHttp").hidden = false;
-      $("mcpHttp").textContent = JSON.stringify({ mcpServers: { decomp: { type: "http", url: t.url, headers: { Authorization: `Bearer ${t.token}` } } } }, null, 2);
-    } catch (e) { toast(esc(e.message), "err"); }
-  };
 }
 $("agRefresh").onclick = showAgentsPage;
 
 /* ------------------------------------------------------------------ compilers & tools page */
-const TOOL_GROUPS = [["", "All"], ["N64", "N64"], ["PS1", "PS1"], ["PS2", "PS2"], ["GBA", "GBA"], ["cw", "GameCube, Wii, DS"], ["tool", "Tools"]];
+const TOOL_GROUPS = [["", "All"], ["N64", "N64"], ["PS2", "PS2"], ["GameCube/Wii", "GameCube, Wii"], ["PC", "PC"], ["tool", "Tools"]];
 let toolFilter = "";
 async function showToolsPage() {
   show("toolsPage");
@@ -87,12 +72,12 @@ async function showToolsPage() {
 }
 function renderTools() {
   const all = S.st.toolchains;
-  const group = (t) => (t.kind === "compiler" ? (t.platform || "") : /^mwcc/.test(t.id) ? "cw" : "tool");
+  const group = (t) => t.platform || "tool";  // a compiler or a pack of them says its platform (toolchains.toml)
   $("toolChips").innerHTML = TOOL_GROUPS.map(([k, label]) => `<button class="chip ${toolFilter === k ? "on" : ""}" data-g="${k}" type="button">${label} <span>${k ? all.filter((t) => group(t) === k).length : all.length}</span></button>`).join("");
   $("toolChips").querySelectorAll("[data-g]").forEach((b) => { b.onclick = () => { toolFilter = b.dataset.g; renderTools(); }; });
   const rows = all.filter((t) => !toolFilter || group(t) === toolFilter);
   $("toolGrid").innerHTML = rows.map((t) => `<div class="tool-card ${t.installed ? "ok" : ""}">
-      <div class="tc-top"><b>${esc(t.name)}</b>${t.license === "proprietary" ? `<span class="chip-s warn">proprietary</span>` : ""}${t.platform ? `<span class="chip-s">${esc(t.platform)}</span>` : ""}${t.wsl ? `<span class="chip-s" title="A Linux program: on Windows it runs inside WSL 2">WSL 2</span>` : ""}</div>
+      <div class="tc-top"><b>${esc(t.name)}</b>${t.license === "proprietary" ? `<span class="chip-s warn">proprietary</span>` : ""}${t.platform ? `<span class="chip-s">${esc(t.platform)}</span>` : ""}</div>
       <p class="muted small">${esc(t.use)}</p>
       <div class="row">${!t.supported ? `<span class="muted small">not available for this computer</span>` : t.local ? `${t.installed ? `<span class="ok-mark grow" title="${esc(t.folder || "")}">✓ your copy</span>` : ""}<button class="ghost small-btn" data-local="${esc(t.id)}" type="button">${t.installed ? "Change folder" : "Choose your folder"}</button>` : t.installed ? `<span class="ok-mark">✓ installed</span>` : `<button class="ghost small-btn" data-tc="${esc(t.id)}" data-prop="${t.license === "proprietary" ? 1 : ""}" type="button">Install</button>`}</div></div>`).join("");
   $("toolGrid").querySelectorAll("[data-tc]").forEach((b) => { b.onclick = () => { b.disabled = true; installToolchain(b.dataset.tc, !!b.dataset.prop).finally(() => { b.disabled = false; }); }; });
@@ -145,17 +130,16 @@ async function showSettingsPage() {
     <label class="check"><input type="checkbox" id="autopilotSet" ${st.settings.autopilot !== false ? "checked" : ""}><span><b>Autopilot after each import</b>: try every function's machine draft first, so free matches cost no agent time.</span></label>`;
   const theme = savedTheme();
   $("setComputer").innerHTML = `
-    <div class="field"><span>Appearance</span><div class="seg" id="themeSeg">${[["", "System"], ["light", "Light"], ["dark", "Dark"]].map(([k, l]) => `<button type="button" data-theme="${k}" class="${theme === k ? "on" : ""}">${l}</button>`).join("")}</div></div>
-    <div class="field"><span>Start with this computer (keeps team rooms open, resumes agents)</span><div class="row" id="svcRow2"><span class="muted small">Checking…</span></div></div>
+    <div class="field"><span>Appearance</span><div class="seg" id="themeSeg">${THEMES.map(([k, l]) => `<button type="button" data-theme="${k}" class="${theme === k ? "on" : ""}">${l}</button>`).join("")}</div></div>
     <div class="field"><span>Projects live in</span>${cmdBox(st.home)}</div>`;
-  const where = { wsl: " (in its own WSL 2 Linux)", docker: " (in Docker)" }[st.runtime] || "";
   const inst = st.install || {};
   const from = inst.channel === "branch" ? `the ${esc(inst.branch)} branch @ <code>${esc((inst.commit || "?").slice(0, 7))}</code>` : "releases on GitHub";
-  $("setAbout").innerHTML = `<p class="small">decompdecomp ${esc(st.version)} on ${esc(st.platform)}${esc(where)}. Free and open source (MIT). Everything runs on this computer: no account, nothing sent to us.</p>
+  $("setAbout").innerHTML = `<p class="small">decompdecomp ${esc(st.version)} on ${esc(st.platform)}. Free and open source (AGPL-3.0): <a class="link" href="https://github.com/n-delic/decompdecomp" target="_blank" rel="noopener">its source</a>. Everything runs on this computer: no account, nothing sent to us.</p>
     <p class="small muted">A continuation of <a class="link" href="https://github.com/i12bp8/decomp.wtf" target="_blank" rel="noopener">decomp.wtf</a> by Sam Wolfs, who built it up to 0.10.6. Thank you, Sam.</p>
+    ${st.dev ? `<div class="field"><span>Updates</span><p class="muted small">A development copy: no updates. Update it with <code>git pull</code>.</p></div>` : `
     <div class="field"><span>Updates come from ${from}</span><div class="row"><span class="muted small grow" id="upText">Checking…</span><button class="ghost small-btn" id="upCheck" type="button">Check now</button></div></div>
     <label class="check"><input type="checkbox" id="checkUpdateSet" ${st.settings.check_updates ? "checked" : ""}><span><b>Look for updates</b> now and then (it only asks ${inst.channel === "branch" ? "GitHub for the branch's newest commit" : "GitHub which version is current"}; nothing about you or your projects is sent).</span></label>
-    <label class="check"><input type="checkbox" id="autoUpdateSet" ${st.settings.auto_update ? "checked" : ""}><span><b>Install updates by itself</b> when no helper agent is working (it restarts in a few seconds; agents carry on).</span></label>
+    <label class="check"><input type="checkbox" id="autoUpdateSet" ${st.settings.auto_update ? "checked" : ""}><span><b>Install updates by itself</b> when no helper agent is working (it restarts in a few seconds; agents carry on).</span></label>`}
     <div class="row"><a class="link small" href="https://github.com/n-delic/decompdecomp" target="_blank" rel="noopener">Source code</a></div>`;
   const showUpdate = (u) => {
     if (!$("upText") || !u) return;
@@ -167,12 +151,13 @@ async function showSettingsPage() {
       $("upCheck").before(b);
     }
   };
-  checkUpdate(false, false).then(showUpdate);
-  $("upCheck").onclick = async () => { $("upText").textContent = "Checking…"; showUpdate(await checkUpdate(true, false)); };
-  $("checkUpdateSet").onchange = () => save({ check_updates: $("checkUpdateSet").checked }, $("checkUpdateSet").checked ? "decompdecomp looks for updates." : "decompdecomp won't look for updates (Check now still does).");
-  $("autoUpdateSet").onchange = () => save({ auto_update: $("autoUpdateSet").checked }, $("autoUpdateSet").checked ? "decompdecomp installs updates by itself." : "decompdecomp asks before updating.");
+  if (!st.dev) {  // (a development copy shows no update controls)
+    checkUpdate(false, false).then(showUpdate);
+    $("upCheck").onclick = async () => { $("upText").textContent = "Checking…"; showUpdate(await checkUpdate(true, false)); };
+    $("checkUpdateSet").onchange = () => save({ check_updates: $("checkUpdateSet").checked }, $("checkUpdateSet").checked ? "decompdecomp looks for updates." : "decompdecomp won't look for updates (Check now still does).");
+    $("autoUpdateSet").onchange = () => save({ auto_update: $("autoUpdateSet").checked }, $("autoUpdateSet").checked ? "decompdecomp installs updates by itself." : "decompdecomp asks before updating.");
+  }
   wireCopies($("setComputer"));
-  serviceRow($("svcRow2"), "decompdecomp runs while you have it open.");
   $("themeSeg").querySelectorAll("[data-theme]").forEach((b) => { b.onclick = () => { setTheme(b.dataset.theme); $("themeSeg").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b)); }; });
   const save = (body, msg) => api("/api/settings", { method: "POST", body }).then((s) => { S.st.settings = s; toast(msg); }).catch((e) => toast(esc(e.message), "err"));
   $("perSession").onchange = () => save({ per_session: Number($("perSession").value) }, "Saved.");
@@ -192,6 +177,7 @@ function updateName(u) {
   return `decompdecomp ${l.version}`;
 }
 async function checkUpdate(refresh = false, ask = true) {
+  if (S.st && S.st.dev) return null;  // a development copy never offers an update (Settings says so)
   try { updateInfo = await api(`/api/update${refresh ? "?refresh=1" : ""}`); } catch { return null; }
   $("navUpdate").hidden = !updateInfo.available;
   const job = updateInfo.job || {};
@@ -255,13 +241,27 @@ async function showUpdating() {
 }
 $("navUpdate").onclick = () => (updateInfo && updateInfo.available ? offerUpdate() : checkUpdate(true, true));
 
-$("quitBtn").onclick = async () => {
-  if (!confirm("Quit decompdecomp? Running agents stop.")) return;
-  await api("/api/quit", { method: "POST" }).catch(() => {});
-  document.body.innerHTML = `<main class="view"><p class="muted">decompdecomp has stopped. You can close this tab.</p></main>`;
+$("quitBtn").onclick = () => {
+  const body = dialog("Quit decompdecomp?", `<p>Agents that are working stop, and so does everything decompdecomp started. Your work is saved.</p>
+    <div class="row"><button class="primary" id="quitGo" type="button">Quit</button><button class="ghost" data-close type="button">Cancel</button></div>`);
+  body.querySelector("#quitGo").onclick = async () => {
+    await api("/api/quit", { method: "POST" }).catch(() => {});
+    closeDialog();
+    showStopped();
+  };
 };
+
+/* The app has quit. The page stops asking it (its polls only filled the window with errors) and says what's left to
+   do; the page stays underneath, so nothing still running finds its elements gone (replacing the page did: "null
+   is not an object (evaluating 'width')"). */
+function showStopped() {
+  const newest = setTimeout(() => {}, 0);
+  for (let id = 0; id <= newest; id++) { clearTimeout(id); clearInterval(id); }  // timer ids count up: this is every poll
+  document.body.insertAdjacentHTML("beforeend", `<div class="stopped" role="alert"><p><b>decompdecomp has stopped.</b> Close this window.</p></div>`);
+}
 
 loadNav();
 route();
+pollEvents();  // where the notification centre's feed starts: nothing from before is news
 setTimeout(() => checkUpdate(false, true), 4000);
 setInterval(() => checkUpdate(false, true), 10 * 60 * 1000);

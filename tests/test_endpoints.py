@@ -7,8 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from decompnet.agents import api
 from decompnet.app import agents
-from decompnet.app.support import Settings, _session_options, _spread
+from decompnet.app.engine import RomNetwork
+from decompnet.app.support import Settings, session_options, spread_sessions
 
 
 def test_the_one_saved_api_becomes_the_first_endpoint(tmp_path):
@@ -38,6 +40,8 @@ def test_endpoints_are_added_changed_and_removed(tmp_path):
         s.save_endpoint({"id": "e1", "context_tokens": "lots"})
     with pytest.raises(ValueError):  # a new one that doesn't validate isn't half made
         s.save_endpoint({"model": "x", "max_sessions": "two"})
+    with pytest.raises(ValueError, match="API address and model"):  # "Add" on the empty form
+        s.save_endpoint({"provider": "custom", "base_url": "", "model": "", "api_key": ""})
     assert len(s.endpoints()) == 2
     s.remove_endpoint("e1")
     assert [e["id"] for e in s.endpoints()] == ["e2"]
@@ -54,38 +58,39 @@ def test_sessions_spread_across_the_endpoints_within_their_limits(tmp_path):
     s = Settings(tmp_path / "settings.json")
     s.save_endpoint({"provider": "custom", "name": "small", "base_url": "http://10.0.0.2:8080/v1", "model": "a", "max_sessions": 1})
     s.save_endpoint({"provider": "custom", "name": "big", "base_url": "http://10.0.0.3:8080/v1", "model": "b", "api_key": "kb"})
-    plan = _spread(s, fake_manager(), ["e1", "e2"], 4, {})
+    plan = spread_sessions(s, fake_manager(), ["e1", "e2"], 4, {})
     assert [(e["name"], n) for e, n in plan] == [("small", 1), ("big", 3)]
-    plan = _spread(s, fake_manager(("e1", "working")), ["e1", "e2"], 2, {})  # small is busy already
+    plan = spread_sessions(s, fake_manager(("e1", "working")), ["e1", "e2"], 2, {})  # small is busy already
     assert [(e["name"], n) for e, n in plan] == [("big", 2)]
     with pytest.raises(ValueError, match="already runs"):
-        _spread(s, fake_manager(("e1", "working")), ["e1"], 1, {})
+        spread_sessions(s, fake_manager(("e1", "working")), ["e1"], 1, {})
     with pytest.raises(ValueError, match="isn't saved"):
-        _spread(s, fake_manager(), ["e9"], 1, {})
-    opts = _session_options(plan[0][0])
+        spread_sessions(s, fake_manager(), ["e9"], 1, {})
+    opts = session_options(plan[0][0])
     assert opts["endpoint"] == "e2" and opts["api_key"] == "kb" and opts["provider_name"] == "big"
 
 
 def test_a_saved_key_never_goes_to_an_address_typed_in(tmp_path):
     s = Settings(tmp_path / "settings.json")
     s.save_endpoint({"provider": "deepseek", "api_key": "sk-deepseek"})
-    ((entry, n),) = _spread(s, fake_manager(), [], 2, {})
+    ((entry, n),) = spread_sessions(s, fake_manager(), [], 2, {})
     assert n == 2 and entry["api_key"] == "sk-deepseek"  # an older GUI's start: the first endpoint, as saved
-    ((entry, _),) = _spread(s, fake_manager(), [], 1, {"provider": "custom", "base_url": "http://elsewhere.example/v1"})
+    ((entry, _),) = spread_sessions(s, fake_manager(), [], 1, {"provider": "custom", "base_url": "http://elsewhere.example/v1"})
     assert entry["base_url"] == "http://elsewhere.example/v1" and "api_key" not in entry
     with pytest.raises(ValueError, match="add an API endpoint"):
-        _spread(Settings(tmp_path / "empty.json"), fake_manager(), [], 1, {"provider": "custom"})
+        spread_sessions(Settings(tmp_path / "empty.json"), fake_manager(), [], 1, {"provider": "custom"})
 
 
 def test_sessions_are_numbered_per_endpoint(tmp_path, monkeypatch):
     monkeypatch.setattr(agents.Manager, "_run", lambda self, s: None)
     monkeypatch.setattr(agents.Manager, "_prepare", lambda self, slug: None)
-    m = agents.Manager(SimpleNamespace(), tmp_path, "http://127.0.0.1:1/mcp")
-    m.start("api", "p", 2, {"provider_name": "gpu-box", "endpoint": "e1"})
+    net = RomNetwork(tmp_path / "app.db", tmp_path)
+    m = agents.Manager(net, tmp_path, "http://127.0.0.1:1/mcp")
+    m.start("api", "p", 2, {"provider_name": "gpu-box", "endpoint": "e1", "api_key": "sk-1"})
     m.start("api", "p", 1, {"provider_name": "laptop", "endpoint": "e2"})
-    m.start("api", "p", 1, {"provider_name": "gpu-box", "endpoint": "e1"})
+    m.start("api", "p", 1, {"provider_name": "gpu-box", "endpoint": "e1", "api_key": "sk-1"})
     assert sorted(s.label for s in m.sessions.values()) == ["gpu-box #1", "gpu-box #2", "gpu-box #3", "laptop #1"]
-    assert all("api_key" not in r["options"] for r in m.running())
+    assert "sk-1" not in json.dumps([dict(r) for r in net.store.all("SELECT * FROM helpers")])  # keys stay in settings
 
 
 @pytest.mark.parametrize("base, local", [
@@ -95,4 +100,4 @@ def test_sessions_are_numbered_per_endpoint(tmp_path, monkeypatch):
     ("http://localhost:1234/v1", True), ("https://api.deepseek.com/v1", False), ("http://172.32.0.1/v1", False),
     ("https://8.8.8.8/v1", False)])
 def test_local_servers_are_recognised_by_address_or_name(base, local):
-    assert agents.is_local(base, resolve=False) is local
+    assert api.is_local(base, resolve=False) is local

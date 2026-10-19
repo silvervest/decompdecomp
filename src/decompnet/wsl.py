@@ -1,6 +1,6 @@
 """Running the Linux-only period compilers on Windows, through WSL 2.
 
-KMC GCC (N64), the PlayStation GCCs, EE-GCC (PS2) and agbcc (GBA) exist only as Linux programs. On Windows they're
+KMC GCC (N64) and EE-GCC (PS2) exist only as Linux programs. On Windows they're
 installed like any toolchain (downloaded and checked on the Windows side, under the user's toolchain folder) and run
 inside WSL 2, which reads that folder through /mnt/<drive>. WSL 1 can't run them: their compilers are 32-bit.
 
@@ -34,6 +34,7 @@ def wanted() -> bool:
 
 
 def exe() -> str | None:
+    """Where wsl.exe is (DECOMP_WSL can name a stand-in), or None."""
     if os.environ.get("DECOMP_WSL"):
         return os.environ["DECOMP_WSL"]
     found = shutil.which("wsl")

@@ -2,15 +2,35 @@
 /* ------------------------------------------------------------------ home */
 let picked = null;
 
+/* Once, after this version's first start: the old `decomp mcp` entries it took out of the agents' settings
+   (app/cleanup.py), each a sentence from the app, until the user dismisses them. Those entries started decompdecomp
+   again whenever it was closed. */
+function renderBridgesNotice() {
+  const st = S.st || {}, removed = Array.isArray(st.bridges_removed) ? st.bridges_removed : [];
+  const box = $("bridgesNotice");
+  box.hidden = !removed.length || !!(st.settings && st.settings.bridges_removed_seen);
+  if (box.hidden) return;
+  setHtml(box, `<span><b>decompdecomp removed its old connection from your agents.</b> It isn't needed any more: helpers get
+    what they need from the app itself.<ul class="small">${removed.map((s) => `<li>${esc(s)}</li>`).join("")}</ul></span>
+    <button class="ghost small-btn" type="button" id="bridgesOk">Dismiss</button>`);
+  $("bridgesOk").onclick = async () => {
+    box.hidden = true;
+    try { S.st.settings = await api("/api/settings", { method: "POST", body: { bridges_removed_seen: true } }); } catch { /* it shows again next time */ }
+  };
+}
+
 async function showHome() {
   show("home");
   resetDrop();
-  const st = await loadState();
+  loadState().catch(() => {});  // the version and the compiler lists: the projects don't wait for them
+  let projects;
+  try { projects = S.projects = await api("/api/projects"); } catch { projects = S.projects || []; }
+  renderNav();
   const box = $("projects");
   box.innerHTML = "";
-  $("recent").hidden = !st.projects.length;
-  $("home").classList.toggle("returning", st.projects.length > 0);  // your projects first once you have some
-  for (const p of st.projects) {
+  $("recent").hidden = !projects.length;
+  $("home").classList.toggle("returning", projects.length > 0);  // your projects first once you have some
+  for (const p of projects) {
     const pct = p.bytes ? (100 * p.matched_bytes) / p.bytes : 0;
     const a = document.createElement("a");
     a.className = "card";
@@ -24,7 +44,7 @@ async function showHome() {
     const meta = p.kind === "fork"
       ? `${p.origin === "scratch" ? "from scratch" : "public decomp"}${p.version ? " · " + esc(p.version) : ""}${p.ready ? "" : " · needs setup"}`
       : `${esc(p.rom?.game_code || "")}${p.rom?.region ? " · " + esc(p.rom.region) : ""} · ${esc(p.compiler?.name || "")}`;
-    a.innerHTML = `<div class="cc-top"><span class="plat">${esc(p.platform_name || "?")}</span><span class="meta">${esc(since(p.last_activity))}</span></div>
+    a.innerHTML = `<div class="cc-top"><span class="plat">${esc(p.platform_name || "?")}</span><span class="grow"></span><span class="meta">${esc(since(p.last_activity))}</span><span class="swatch pc-${colourOf(p.slug)}" aria-hidden="true"></span></div>
       <div><h4>${esc(p.title)}</h4><p class="meta">${meta}</p></div>
       <div class="meter"><i></i></div><p class="meta"><b>${pctNum(pct)}%</b> of code · ${(p.matched || 0).toLocaleString()} / ${(p.functions || 0).toLocaleString()} functions</p>`;
     box.append(a);
@@ -81,6 +101,7 @@ function parseRom(buf) {
 }
 
 /* What the user dropped, from its first bytes (nothing is uploaded until they confirm). */
+<<<<<<< HEAD
 const PLATFORM_NAME = { n64: "Nintendo 64", psx: "PlayStation", ps2: "PlayStation 2", playstation: "PlayStation 1 or 2",
   gc: "GameCube", wii: "Wii", gcwii: "GameCube or Wii", gba: "Game Boy Advance", nds: "Nintendo DS", win32: "Windows PC", xbox: "Original Xbox" };
 const CW_PACK = {
@@ -118,6 +139,17 @@ function crc16(bytes, from, to) {
   }
   return crc;
 }
+=======
+const platformName = (p) => (p === "gcwii" ? "GameCube or Wii" : consoleOf(p)?.name || "");
+/* What installing a console's proprietary compiler pack (its first pack) means, and how its compiler is picked. */
+const CW_PACK = {
+  mwcc: { title: "CodeWarrior", text: "Install CodeWarrior, the compilers GameCube and Wii games were built with (about 80 MB). It's proprietary software, kept by the decomp community: only if you accept that.",
+    note: "Not sure? Keep the default; you can change it later in configure.py if functions don't match." },
+  msvc: { title: "Visual C++", text: "Install Visual C++ 6.0, 7.0 and 7.1, the compilers most PC games of 1998-2005 were built with (about 50 MB). It's proprietary software, kept by the decomp community: only if you accept that.",
+    note: "decompdecomp reads which Visual C++ built the game from the program itself when it can; you can change it later in tools/configure.py. The functions are found by Ghidra (installed once, 540 MB, needs Java 21+)." },
+};
+const packOf = (p) => CW_PACK[consoleOf(p)?.packs[0]] ? consoleOf(p).packs[0] : "mwcc";
+>>>>>>> upstream/main
 const MB = (n) => (n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KiB` : `${(n / 1048576).toFixed(n < 10485760 ? 1 : 0)} MiB`);
 
 function identifyHead(head, file) {
@@ -129,6 +161,7 @@ function identifyHead(head, file) {
   const pe = text(0, 2) === "MZ" && head.length >= 0x40 ? dv.getUint32(0x3c, true) : 0;
   if (pe && pe + 0x1a <= head.length && text(pe, pe + 4) === "PE\0\0" && dv.getUint16(pe + 4, true) === 0x14c && dv.getUint16(pe + 24, true) === 0x10b)
     return { ...base, platform: "win32", order: "Windows program (.exe)", entry: dv.getUint32(pe + 52, true) + dv.getUint32(pe + 40, true) };
+<<<<<<< HEAD
   const xbe = identifyXbe(head, file, base);
   if (xbe) return xbe;
   if (text(0, 8) === "PS-X EXE") return { ...base, platform: "psx", order: "PS-X EXE", entry: dv.getUint32(0x10, true) };
@@ -143,6 +176,10 @@ function identifyHead(head, file) {
   }
   if (text(0x8001, 0x8006) === "CD001" || text(0x9319, 0x931e) === "CD001" || text(0x9311, 0x9316) === "CD001") return { ...base, platform: "playstation", order: "disc image" };
   if (text(0, 8) === "MComprHD") return { ...base, platform: "playstation", order: "CHD disc image" };
+=======
+  if (text(0x8001, 0x8006) === "CD001" || text(0x9319, 0x931e) === "CD001" || text(0x9311, 0x9316) === "CD001") return { ...base, platform: "ps2", order: "disc image" };
+  if (text(0, 8) === "MComprHD") return { ...base, platform: "ps2", order: "CHD disc image" };
+>>>>>>> upstream/main
   if (text(0, 4) === "\x7fELF" && head[5] === 1 && dv.getUint16(18, true) === 8) return { ...base, platform: "ps2", order: "ELF program", entry: dv.getUint32(24, true) };
   if (head.length > 0x60 && dv.getUint32(0x1c) === 0xc2339f3d) return { ...base, platform: "gc", order: "disc image", code: ascii(0, 6), title: ascii(0x20, 0x80) || stem };
   if (head.length > 0x60 && dv.getUint32(0x18) === 0x5d1c9ea3) return { ...base, platform: "wii", order: "disc image", code: ascii(0, 6), title: ascii(0x20, 0x80) || stem };
@@ -167,6 +204,7 @@ function notSupported(head, file) {
   const text = (a, b) => String.fromCharCode(...head.slice(a, b));
   const ext = (file.name.match(/\.([^.]+)$/) || [])[1]?.toLowerCase() || "";
   if (text(0, 2) === "MZ") return "That's a 64-bit or non-x86 Windows program (or a DOS one). decompdecomp starts PC games from their 32-bit x86 .exe.";
+  if (text(0, 8) === "PS-X EXE" || ["gba", "nds"].includes(ext)) return "PlayStation 1, Game Boy Advance and DS games aren't supported in this version. For those, continue a public decomp.";
   if (text(0, 4) === "XEX2" || ext === "xex") return "That's an Xbox 360 program. Xbox 360 games aren't supported yet.";
   if (["nsp", "xci", "nso", "nro", "nca"].includes(ext) || text(0, 4) === "NSO0" || text(0, 4) === "PFS0") return "That's a Nintendo Switch file. Switch games aren't supported yet.";
   if (["sfc", "smc"].includes(ext)) return "That's a Super Nintendo ROM. SNES games were written in assembly, not compiled from C, so there's no C source to match.";
@@ -177,6 +215,8 @@ function notSupported(head, file) {
   if (ext === "pbp" || ext === "cso") return "That's a PSP file. PSP games aren't supported yet.";
   return null;
 }
+// 1.0.3 rewrote most of the app: every platform is being tested again, and reports are how a platform moves up
+const TRY_AND_TELL = `This version is new, so <a href="https://github.com/n-delic/decompdecomp/issues" target="_blank" rel="noopener">tell us how it goes</a> on your game.`;
 const NOT_A_GAME = "That isn't a game file decompdecomp can start from scratch (yet). For other platforms, continue a public decomp.";
 
 async function pickFile(file) {
@@ -198,16 +238,20 @@ async function pickFile(file) {
   const facts = p === "n64"
     ? [["Game code", info.code || "—"], ["Region", info.region], ["Size", MB(info.size)], ["Format", info.order],
        ["Entry", hex8(info.entry)], ["Looks like", info.compiler === "IDO" ? "IDO" : "GCC (KMC)"]]
-    : [["Platform", PLATFORM_NAME[p]], ["Format", info.order], ["Size", MB(info.size)],
+    : [["Platform", platformName(p)], ["Format", info.order], ["Size", MB(info.size)],
        info.code ? ["Game ID", info.code] : ["Entry", info.entry != null ? hex8(info.entry) : "from the disc"],
+<<<<<<< HEAD
        ["Project", ["gc", "wii", "gcwii"].includes(p) ? "dtk-template" : p === "nds" ? "ds-decomp" : p === "gba" ? "luvdis" : p === "win32" || p === "xbox" ? "Ghidra + objdiff" : "splat"]];
+=======
+       ["Project", consoleOf(p)?.layout || ""]];
+>>>>>>> upstream/main
   $("romFacts").innerHTML = facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`).join("");
   const level = platformStatus(p);
   $("romStatus").hidden = !level;
   $("romStatus").className = `plat-status ${level || ""}`;
   $("romStatus").innerHTML = level === "recommended"
-    ? `<b>★ Recommended platform.</b> The most tested path to a full decomp you can port and mod.`
-    : `<b>Beta.</b> ${esc(PLATFORM_NAME[p] || "This platform")} works and is tested on homemade games, less so on real ones yet. Problems are worth <a href="https://github.com/n-delic/decompdecomp/issues" target="_blank" rel="noopener">reporting</a>.`;
+    ? `<b>★ Recommended platform.</b> The most tested path to a full decomp you can port and mod. ${TRY_AND_TELL}`
+    : `<b>Beta.</b> ${esc(platformName(p) || "This platform")} works, and needs more games tried on it. ${TRY_AND_TELL}`;
   setupCompilers(info);
   $("dropIdle").hidden = true;
   $("dropPicked").hidden = false;
@@ -216,8 +260,9 @@ async function pickFile(file) {
 
 function setupCompilers(info) {
   const p = info.platform, select = $("compilerPick"), note = $("compilerNote");
-  const cw = S.st?.codewarrior || { installed: false, ds_installed: false, gc: [], wii: [], ds: [] };
+  const con = consoleOf(p) || { mode: "", compilers: [], packs: [], default_compiler: "" };
   $("compilerRow").hidden = false; note.hidden = true; $("mwConsent").hidden = true; $("mwAccept").checked = false;
+<<<<<<< HEAD
   $("ltcgRow").hidden = p !== "xbox"; $("ltcgPick").value = "";
   if (p === "n64") fillCompilers(select, info.compiler === "IDO" ? "ido-7.1" : "gcc-2.7.2-kmc", "N64");
   else if (p === "psx") fillCompilers(select, "gcc-2.7.2-psx", "PS1");
@@ -254,7 +299,24 @@ function setupCompilers(info) {
     note.hidden = false;
     note.textContent = "Not sure? Keep the default; you can change it later in configure.py if functions don't match.";
     $("mwConsent").hidden = cw.installed;
+=======
+  if (con.mode === "rom") {
+    if (info.order.endsWith("disc image")) {
+      $("compilerRow").hidden = true; note.hidden = false;
+      note.textContent = "The compiler is picked from the disc's program, then tested on its code. You can change it later.";
+    } else fillCompilers(select, info.compiler === "IDO" ? "ido-7.1" : con.default_compiler, con.id);
+    return;
+>>>>>>> upstream/main
   }
+  // a project of the community's kind: the compiler versions its build knows (a compressed GameCube or Wii disc: both)
+  const shown = p === "gcwii" ? [consoleOf("gc"), consoleOf("wii")].filter(Boolean) : [con];
+  select.innerHTML = shown.map((c) => `<optgroup label="${esc(c.name)}">${c.compilers.map((v) => `<option value="${esc(v.id)}" ${v.id === c.default_compiler && (p !== "gcwii" || c.id === "gc") ? "selected" : ""}>${esc(v.name)}</option>`).join("")}</optgroup>`).join("")
+    + (con.default_compiler ? "" : `<option value="" selected>Let decompdecomp pick (from the program itself)</option>`);
+  const pack = packOf(p);
+  note.hidden = false;
+  note.textContent = CW_PACK[pack].note;
+  $("mwText").textContent = CW_PACK[pack].text;
+  $("mwConsent").hidden = !!(S.st?.toolchains || []).find((t) => t.id === pack && t.installed);
 }
 
 function updateAnalyse() {
@@ -264,7 +326,8 @@ function updateAnalyse() {
 $("mwAccept").addEventListener("change", updateAnalyse);
 
 function fillCompilers(select, current, platform) {
-  const tcs = (S.st?.toolchains || []).filter((t) => t.kind === "compiler" && (!platform || !t.platform || t.platform === platform));
+  const own = (consoleOf(platform)?.compilers || []).map((c) => c.id);  // the console's compilers
+  const tcs = (S.st?.toolchains || []).filter((t) => t.kind === "compiler" && (!own.length || own.includes(t.id)));
   select.innerHTML = tcs.map((t) => {
     const note = !t.supported ? " (not available on this computer)" : t.installed ? "" : t.license === "proprietary" ? " (install in Compilers & tools)" : " (will be installed)";
     return `<option value="${esc(t.id)}" ${t.id === current ? "selected" : ""} ${t.supported ? "" : "disabled"}>${esc(t.name)} · ${esc(t.use)}${note}</option>`;
@@ -313,21 +376,33 @@ function importFailed(name, e, logText) {
   $("errName").textContent = name || "the game";
   $("errMsg").textContent = e.message;
   $("errLog").textContent = [log, job.trace].filter(Boolean).join("\n\n") || "(nothing was logged)";
+  // the log shows here: a link would leave the app's window for the user's browser, which the app doesn't answer
+  $("errLogLink").onclick = async () => {
+    try {
+      const res = await fetch("/api/log");
+      $("errLog").textContent = await res.text();
+      $("errLog").closest("details").open = true;
+      $("errLog").scrollTop = $("errLog").scrollHeight;
+    } catch (e) { toast(esc(e.message), "err"); }
+  };
   $("errCopy").onclick = async () => {
-    const st = S.st || {};
-    const report = [`decompdecomp ${st.version || "?"}${st.build ? ` (${st.build})` : ""} · ${st.runtime || st.platform || navigator.platform}`,
-      `Importing: ${name}`, `Error: ${e.message}`, "", "Log:", "```", log.split("\n").slice(-80).join("\n"), job.trace || "", "```"].join("\n");
-    try { await navigator.clipboard.writeText(report); toast("Copied: paste it into a GitHub issue"); }
-    catch { toast("Couldn't reach the clipboard: select the text under What happened instead", "err"); }
+    if (await copyText(bugReport([`Importing: ${name}`, `Error: ${e.message}`], [log, job.trace].filter(Boolean).join("\n")))) toast("Copied: paste it into a GitHub issue");
+    else toast("Couldn't reach the clipboard: select the text under What happened instead", "err");
   };
 }
 $("errBack").onclick = (e) => { e.stopPropagation(); resetDrop(); };
 
 async function ensureCodeWarrior() {
   if ($("mwConsent").hidden) return;
+<<<<<<< HEAD
   $("busyTitle").textContent = ["win32", "xbox"].includes(picked?.info.platform) ? "Installing Visual C++…" : "Installing CodeWarrior…";
   const pack = CW_PACK[picked?.info.platform] || CW_PACK.gcwii;
   const { job } = await api("/api/toolchain", { method: "POST", body: { id: pack.id, accept_license: true } });
+=======
+  const id = packOf(picked?.info.platform);
+  $("busyTitle").textContent = `Installing ${CW_PACK[id].title}…`;
+  const { job } = await api("/api/toolchain", { method: "POST", body: { id, accept_license: true } });
+>>>>>>> upstream/main
   await followJob(job, $("jobLog"));
   await loadState();
 }
@@ -338,7 +413,11 @@ $("analyse").onclick = async () => {
   const title = `Analysing ${picked.info.title}…`;
   if (!$("mwConsent").hidden) {
     $("dropPicked").hidden = true; $("dropBusy").hidden = false; $("impUp").hidden = true;
+<<<<<<< HEAD
     try { await ensureCodeWarrior(); } catch (e) { importFailed(["win32", "xbox"].includes(picked.info.platform) ? "Visual C++" : "CodeWarrior", e, $("jobLog").textContent); return; }
+=======
+    try { await ensureCodeWarrior(); } catch (e) { importFailed(CW_PACK[packOf(picked.info.platform)].title, e, $("jobLog").textContent); return; }
+>>>>>>> upstream/main
   }
   const body = picked.buf instanceof Blob ? picked.buf : new Blob([picked.buf]);
   const ltcg = $("ltcgRow").hidden ? "" : $("ltcgPick").value;
@@ -354,9 +433,35 @@ $("pathPick").onclick = (e) => {
   body.querySelector("#ppGo").onclick = () => {
     const path = $("ppPath").value.trim();
     if (!path) return;
-    $("dialog").hidden = true;
+    closeDialog();
     runImport(`confirmed=1&path=${encodeURIComponent(path)}`, undefined, "Analysing your game…");
   };
 };
 $("demoBtn").onclick = () => runImport("demo=1", undefined, "Opening Demo Quest 64…");
+
+/* Open a saved project (app/saves.py): a save folder, or the git repository it was pushed to, and the user's own copy
+   of the game (never in the save). Like an import, it runs in the background and opens the project when it's done. */
+function openRestore() {
+  const body = dialog("Open a saved project", `<p class="muted">Your progress on a game, saved by decompdecomp (on this computer or another one): the matched C, notes, names and settings. The game itself is never in a save: you add your own copy, and decompdecomp checks it's the same game.</p>
+    <label class="field"><span>The save: its folder, or the git address you pushed it to</span><input id="rsSource" class="mono" placeholder="/home/you/saves/my-game, or a git address"></label>
+    <label class="field"><span>Your copy of the game: its path on this computer</span><input id="rsGame" class="mono" placeholder="/home/you/games/my-game.z64"></label>
+    <label class="check"><input type="checkbox" id="rsOwn"><span>This is my own copy of this game, obtained legally. The results stay with me for my own use.</span></label>
+    <div class="row"><button class="primary" id="rsGo" type="button" disabled>Open it</button><button class="ghost" data-close type="button">Cancel</button></div>
+    <pre class="joblog tall" id="rsLog" hidden></pre>`, "restore");
+  body.querySelector("#rsOwn").onchange = (e) => { $("rsGo").disabled = !e.target.checked; };
+  body.querySelector("#rsGo").onclick = async () => {
+    const source = $("rsSource").value.trim(), path = $("rsGame").value.trim();
+    if (!source || !path) return showJobError($("rsLog"), "Say where the save is and where your copy of the game is.");
+    $("rsGo").disabled = true;
+    showJobError($("rsLog"), "");
+    try {
+      const { job } = await api("/api/restore", { method: "POST", body: { source, path, confirmed: true } });
+      const r = await followJob(job, $("rsLog"));
+      toast(`${plural(r.matched || 0, "matched function")} back${r.lost && r.lost.length ? `; ${r.lost.length} no longer match` : ""}.`, "match");
+      closeDialog();
+      loadNav();
+      location.hash = `#/p/${r.slug}`;
+    } catch (e) { if ($("rsLog")) { showJobError($("rsLog"), e.message); $("rsGo").disabled = false; } }
+  };
+}
 

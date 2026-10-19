@@ -11,10 +11,19 @@ import re
 import time
 from pathlib import Path
 
-from ... import compilermap, scoring, toolchains
+from ... import compilermap, consoles, scoring, toolchains
 from ...project import compiler_for
-from ...rom import detect
-from .common import PLATFORM_COMPILERS, SHORT_NAMES
+
+# What the notification centre tells: news a person wants to hear about, not every claim and attempt agents make.
+NOTIFY_KINDS = ("match", "link", "autopilot", "compiler", "reopen", "knowledge", "collab", "import", "files",
+                "paused", "stopped")
+EVENTS_PER_ASK = 200  # events the notification centre gets per ask (it asks again for more)
+# what the project's page gets on each poll (about once a second): the newest since its last ask, at most
+LIVE_EVENTS, LIVE_ATTEMPTS = 60, 80
+FUNCTION_NOTES = 10  # the newest notes the function panel shows
+EVENT_ROWS = ("SELECT e.id, e.kind, e.detail, e.created_at, a.name AS agent, p.slug, p.name AS project FROM events e "
+              "JOIN projects p ON p.id=e.project_id LEFT JOIN agents a ON a.id=e.agent_id "
+              f"WHERE e.kind IN ({', '.join(repr(k) for k in NOTIFY_KINDS)})")
 
 
 class GuiMixin:
@@ -23,11 +32,9 @@ class GuiMixin:
         if self.fork_slug(slug):  # a fork's work is already in its source tree, committed
             return {"path": self._project(slug)["root"], "identical": None}
         from ...rom.export import export_rom
-        from ...rom.export_gba import export_gba
 
         proj = self._project(slug)
-        export = export_gba if self.cfg(proj).get("platform") == "gba" else export_rom
-        res = export(self, slug, Path(proj["root"]) / "source", log=log)
+        res = export_rom(self, slug, Path(proj["root"]) / "source", self.console(proj), log=log)
         with self.store.tx() as db:  # shown on the project page: what's in the tree and whether it rebuilds
             cfg = json.loads(db.execute("SELECT config FROM projects WHERE id=?", (proj["id"],)).fetchone()["config"])
             cfg["export"] = {"t": time.time(), "path": str(res["path"]), "identical": res.get("identical"),
@@ -50,6 +57,7 @@ class GuiMixin:
                                              "twins": None if twins is None else {
                                                  k: getattr(twins, k) for k in ("state", "pairs", "tried", "matched", "asm")},
                                              "helper_matches": helpers,
+                                             "readable": self.readability.counts(proj)["readable"],
                                              "spend": cfg.get("spend"), "instructions": cfg.get("instructions") or "",
                                              "priority": cfg.get("priority", []),
                                              # (a suggestion its own check disproved isn't one: older ones were filed)
@@ -67,23 +75,50 @@ class GuiMixin:
             "SUM(CASE WHEN status='matched' THEN size ELSE 0 END) AS matched_bytes, SUM(attempts) AS attempts "
             "FROM functions WHERE project_id=?", proj["id"])
         tc = toolchains.get(cfg["compiler"]["toolchain"])
+        console = self.console(proj)
         return {
             "slug": proj["slug"], "title": proj["name"], "description": proj["description"],
-            "platform": cfg.get("platform", "n64"), "platform_name": detect.PLATFORMS.get(cfg.get("platform", "n64"), ""),
-            "compilers": PLATFORM_COMPILERS.get(cfg.get("platform", "n64"), []),
+            **console.project_facts(),
+            "compilers": [c.id for c in console.compilers],
             "rom": {k: cfg["rom"].get(k) for k in ("title", "game_code", "region", "size", "sha1", "byte_order", "compiler_guess")},
-            "compiler": {"toolchain": tc.id, "name": SHORT_NAMES.get(tc.id, tc.name), "flags": cfg["compiler"]["flags"],
+            "compiler": {"toolchain": tc.id, "name": consoles.compiler_name(tc.id), "flags": cfg["compiler"]["flags"],
                          "installed": toolchains.installed(tc.id) is not None, "proprietary": tc.proprietary,
-                         "supported": tc.supported, "wsl": tc.via_wsl,
+                         "supported": tc.supported,
                          "why": None if tc.supported else toolchains.unsupported_cpu()},
             "functions": agg["total"] or 0, "matched": agg["matched"] or 0, "bytes": agg["bytes"] or 0,
             "matched_bytes": agg["matched_bytes"] or 0, "attempts": agg["attempts"] or 0,
             "context_version": self._context(proj["id"])["version"],
             "folder": proj["root"],
             "export": cfg.get("export"),
-            "exportable": cfg.get("platform", "n64") in ("n64", "psx", "ps2", "gba"),
+            "exportable": consoles.EXPORT in console.features,
             "room": self._room_info(proj["slug"]),
         }
+
+    def summary(self, slug: str) -> dict:
+        """A project for the project list (the sidebar asks every 5 s, for every project): what it is and how far it
+        got, from the database alone. It used to be each project's whole overview, a fork's files included, and with
+        agents at work the list took 2.5-3.7 s."""
+        proj = self._project(slug)
+        cfg = self.cfg(proj)
+        agg = self.store.one(
+            "SELECT COUNT(*) AS total, SUM(status='matched') AS matched, SUM(size) AS bytes, "
+            "SUM(CASE WHEN status='matched' THEN size ELSE 0 END) AS matched_bytes FROM functions WHERE project_id=?",
+            proj["id"])
+        console = self.console(proj)
+        if cfg.get("kind") == "fork":
+            about = {"kind": "fork", "origin": cfg.get("origin"), "version": cfg.get("version"),
+                     "ready": bool(cfg.get("ready")), "rom": {"game_code": cfg.get("version") or "", "region": console.name},
+                     "compiler": {"name": "Project's own build"}}
+        else:
+            about = {"rom": {k: cfg["rom"].get(k) for k in ("game_code", "region")},
+                     "compiler": {"name": consoles.compiler_name(cfg["compiler"]["toolchain"])}}
+        return {"slug": proj["slug"], "title": proj["name"], **console.project_facts(),
+                "functions": agg["total"] or 0, "matched": agg["matched"] or 0, "bytes": agg["bytes"] or 0,
+                "matched_bytes": agg["matched_bytes"] or 0,
+                "last_activity": self.store.one("SELECT MAX(created_at) AS t FROM events WHERE project_id=?",
+                                                proj["id"])["t"],
+                "room": (self._room_info(slug) or {}).get("role"),
+                "autopilot": (self.autopilot_status(slug) or {}).get("state")} | about
 
     def _room_info(self, slug: str) -> dict | None:
         if slug in self.links:
@@ -105,37 +140,38 @@ class GuiMixin:
         # who works on what in the room: by address, or by name in a git project (its functions have no addresses)
         key = (lambda r: r["name"]) if link is not None and link.fork else (lambda r: r["vram"])
         remote = {key(c): "@" + c["agent"] for c in (link.claims if link is not None else [])}
-        looks = self._map_columns(proj)
         return [{"name": r["name"], "vram": r["vram"], "size": r["size"], "insns": r["n_insns"], "unit": r["unit"],
                  "status": r["status"] if r["status"] in ("matched", "asm") else "working" if (r["agent"] or key(r) in remote) else "open",
                  "best": r["best_score"], "attempts": r["attempts"], "agent": r["agent"] or remote.get(key(r)),
-                 "matched_at": r["matched_at"], "matched_by": r["matched_by"]}
-                | looks.get(r["vram"], {}) for r in rows]
+                 "matched_at": r["matched_at"], "matched_by": r["matched_by"]} for r in rows]
 
-    def _map_columns(self, proj) -> dict[int, dict]:
-        """The compiler map's view of each function for the ROM map: the compiler its code looks like (cc), and
-        whether that isn't the one it's built with today, or a habit rules today's out (ccx)."""
+    def map_columns(self, slug: str) -> list[list]:
+        """The compiler map's view of each function for the ROM map, asked for after the map is drawn: the map no
+        longer waits for the compiler map (GTA San Andreas: 710-800 ms after any match). One row per function:
+        [vram, the compiler its code looks like, whether that isn't the one it's built with today or a habit rules
+        today's out]."""
+        proj = self._project(slug)
         try:
-            cmap = self.compiler_map(proj)
-        except Exception:  # the map never stands between the user and the ROM map
+            cmap = self.compiler_map(proj, fresh=True)
+        except Exception:  # the colours never stand between the user and the ROM map
             logging.getLogger("decompdecomp").exception("the compiler map failed")
-            return {}
+            return []
         if cmap is None:
-            return {}
+            return []
         cfg = self.cfg(proj)
-        out = {}
+        out = []
         for addr, looks in cmap.of.items():
             own = compiler_for(cfg, addr)
             tc, small = compilermap.kind(looks)
-            out[addr] = {"cc": f"{SHORT_NAMES.get(tc, tc)} {small}".strip(),
-                         "ccx": compilermap.kind(looks) != compilermap.kind((own["toolchain"], tuple(own["flags"])))
-                         or addr in cmap.contradicted}
+            out.append([addr, f"{consoles.compiler_name(tc)} {small}".strip(),
+                        compilermap.kind(looks) != compilermap.kind((own["toolchain"], tuple(own["flags"])))
+                        or addr in cmap.contradicted])
         return out
 
     def _range_rows(self, cfg: dict) -> list[dict]:
         """The project's compiler ranges for the GUI, each with what checking it again said (rangecheck.py)."""
         said = {tuple(map(tuple, c["spans"])): c.get("said", "") for c in cfg.get("range_checks", []) if c.get("audit")}
-        return [r | {"name": SHORT_NAMES.get(r["toolchain"], r["toolchain"]), "check": said.get(((r["start"], r["end"]),), "")}
+        return [r | {"name": consoles.compiler_name(r["toolchain"]), "check": said.get(((r["start"], r["end"]),), "")}
                 for r in cfg.get("compiler_ranges", [])]
 
     def map_signature(self, slug: str) -> str:
@@ -202,12 +238,11 @@ class GuiMixin:
         latest = self.store.one("SELECT source, score FROM attempts WHERE function_id=? AND source IS NOT NULL "
                                 "ORDER BY id DESC LIMIT 1", fn["id"])
         notes = self.store.all("SELECT n.text, n.created_at, a.name AS agent FROM notes n LEFT JOIN agents a "
-                               "ON a.id=n.agent_id WHERE n.function_id=? ORDER BY n.id DESC LIMIT 10", fn["id"])
+                               f"ON a.id=n.agent_id WHERE n.function_id=? ORDER BY n.id DESC LIMIT {FUNCTION_NOTES}", fn["id"])
         x = self.xrefs(proj)
         syms = self.symbols(proj["id"])
-        if not (fn["matched_source"] or fn["best_source"] or latest) and fn["seed"] is None:
-            with self._seed_lock:
-                self._seed_for(fn, proj)
+        if not (fn["matched_source"] or fn["best_source"] or latest) and fn["status"] == "open":
+            self._seed_for(fn, proj)  # (made again first when what it's made from changed)
             fn = self._function(fn["name"], slug)
         return {
             "name": fn["name"], "vram": fn["vram"], "rom_offset": fn["rom_offset"], "size": fn["size"],
@@ -246,15 +281,18 @@ class GuiMixin:
 
     def live(self, slug: str, since_event: int = 0, since_attempt: int = 0) -> dict:
         proj = self._project(slug)
-        with self.store.tx() as db:
-            self._expire_claims(db)
+        # the GUI asks every second: the writer's lock only when a claim really ran out, not on every poll
+        if self.store.one("SELECT 1 FROM claims WHERE expires_at < ? LIMIT 1", time.time()):
+            with self.store.tx() as db:
+                self._expire_claims(db)
         events = self.store.all(
             "SELECT e.id, e.kind, e.detail, e.created_at, a.name AS agent FROM events e LEFT JOIN agents a "
-            "ON a.id=e.agent_id WHERE e.project_id=? AND e.id>? ORDER BY e.id DESC LIMIT 60", proj["id"], since_event)
+            f"ON a.id=e.agent_id WHERE e.project_id=? AND e.id>? ORDER BY e.id DESC LIMIT {LIVE_EVENTS}", proj["id"],
+            since_event)
         attempts = self.store.all(
             "SELECT t.id, t.score, t.compiled, t.created_at, f.name AS function, f.n_insns, a.name AS agent "
             "FROM attempts t JOIN functions f ON f.id=t.function_id LEFT JOIN agents a ON a.id=t.agent_id "
-            "WHERE f.project_id=? AND t.id>? ORDER BY t.id DESC LIMIT 80", proj["id"], since_attempt)
+            f"WHERE f.project_id=? AND t.id>? ORDER BY t.id DESC LIMIT {LIVE_ATTEMPTS}", proj["id"], since_attempt)
         claims = self.store.all(
             "SELECT f.name, f.n_insns, f.best_score, f.attempts, a.name AS agent, c.claimed_at FROM claims c "
             "JOIN functions f ON f.id=c.function_id JOIN agents a ON a.id=c.agent_id WHERE f.project_id=?", proj["id"])
@@ -267,3 +305,28 @@ class GuiMixin:
                     claims.append(dict(row) | {"agent": "@" + c["agent"], "claimed_at": None})
         return {"events": [dict(e) for e in reversed(events)], "attempts": [dict(t) for t in reversed(attempts)],
                 "claims": claims, "overview": self.overview(slug)}
+
+    def events_after(self, after: int | None, limit: int = EVENTS_PER_ASK) -> dict:
+        """The notification centre's feed, for every project at once: what happened after event `after`, oldest
+        first. With no `after` (the app's window just opened): nothing, only where the feed starts, so nothing that
+        happened before is ever shown as news. Two games with agents at work flooded each project's own feed with
+        what happened before it was opened. A range of the events' primary key: cheap however long the history."""
+        last = self.store.one("SELECT COALESCE(MAX(id), 0) AS n FROM events")["n"]
+        if after is None:
+            return {"last": last, "events": []}
+        # (up to `last` only: an event written meanwhile comes with the next ask, not twice)
+        rows = self.store.all(f"{EVENT_ROWS} AND e.id>? AND e.id<=? ORDER BY e.id LIMIT ?", after, last, limit)
+        return {"last": rows[-1]["id"] if len(rows) == limit else last, "events": [dict(r) for r in rows]}
+
+    def recent_events(self, limit: int = EVENTS_PER_ASK) -> list[dict]:
+        """The notification centre's history: the latest notable events of every project, newest first."""
+        return [dict(r) for r in self.store.all(f"{EVENT_ROWS} ORDER BY e.id DESC LIMIT ?", limit)]
+
+    def record_event(self, slug: str, kind: str, detail: str, agent_name: str = "") -> None:
+        """Something that happened outside the judge (a helper paused on an error), in the project's feed and the
+        notification centre. A project removed meanwhile: nothing to record."""
+        proj = self.store.one("SELECT id FROM projects WHERE slug=?", slug)
+        agent = self.store.one("SELECT id FROM agents WHERE name=?", agent_name) if agent_name else None
+        if proj is not None:
+            with self.store.tx() as db:
+                self._event(db, proj["id"], agent["id"] if agent else None, kind, detail)

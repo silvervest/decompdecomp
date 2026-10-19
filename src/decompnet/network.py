@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import policy, scoring
+from . import agents, scoring
 from .compiler import compile_source
 from .elfobj import FunctionObj, Reloc, extract_function
 from .project import compiler_config, compiler_for
@@ -25,6 +25,9 @@ from .store import Store
 CLAIM_TTL = 30 * 60
 # A function an agent just released goes to the back of the queue for this long, for every agent: the next one
 # starts on something fresh instead of passing the same function back and forth. Asked for by name, it comes at once.
+# For agents of the released one's model family it stays at the back until the shared header or the compiler changes
+# (see model_family): only 5.5% of released functions ever matched later, and another try by the same model mostly
+# fails the same way.
 RELEASE_COOLDOWN = 15 * 60
 # The agent that released a function doesn't get it back automatically for this long, or until its run ends (the
 # app writes a 'stopped' event when one of its helpers stops). It used to be kept off every function it ever
@@ -32,12 +35,21 @@ RELEASE_COOLDOWN = 15 * 60
 # found "nothing left to claim" among exactly the ten functions their names gave up on in earlier runs, while a new
 # Opus helper claimed at once. After that the function still comes to it last.
 SELF_RELEASE_WINDOW = RELEASE_COOLDOWN
+# The family of a helper's model, from its name (app/agents.py helper_name: kind-model-n): its agent's, when the
+# agent runs one maker's models (agents.FAMILIES: Claude Code Anthropic's, Codex OpenAI's, Antigravity Google's),
+# else the model the name says (opencode and API helpers).
+MODEL_FAMILIES = {"opus": "claude", "sonnet": "claude", "haiku": "claude", "fable": "claude", "o3": "gpt", "o4": "gpt"}
+# When compile_and_diff tells an agent to move on: after this many compiles in a row that didn't beat its best score,
+# by the function's size (the first number of instructions it's under). Functions that match mostly do in the first
+# few compiles (up to 20 instructions: 43%, 29%, 17%, 11% of the first four compiles matched, October 2026), so small
+# ones get few; big ones get more, as long as the score keeps falling.
+STALL_BUDGET = ((32, 3), (64, 4), (128, 6), (256, 8))
+STALL_BUDGET_BIGGEST = 10
+STALL_LOOKBACK = 16  # compiles stall_note reads back: more than the biggest budget
+BRIEF_NOTES = 8  # the newest notes on a function its brief shows
+NOTE_CHARS = 4000  # a note longer than this is cut: notes are for findings, not code dumps
+NOTES_FOUND = 20  # search_notes' answer at most
 MACHINE_AGENTS = ("autopilot", "permuter")  # decompdecomp's own workers: their claims never mean "given up on"
-# Twins first (see app/twins.py): a function whose code the game has more than once (boost: how many more times)
-# and isn't too big or given up on, best value per instruction first; its twins (boost -1) last, as they match for
-# free once it does.
-_TWINS = ("(f.boost > 0 AND f.n_insns <= 400 AND f.abandons < 2) DESC, "
-          "CASE WHEN f.boost > 0 THEN (f.boost + 1) * 64 / (f.n_insns + 16) ELSE 0 END DESC, f.boost < 0, ")
 # Prerequisites (release_function's `needs`, the waits table): a function an agent found needs another one first
 # (a callee whose convention or body it depends on, a helper the original inlines) waits, claimed after everything
 # else, until that one matches; the one it waits for is claimed first meanwhile; once it matches, the waiting one
@@ -45,12 +57,42 @@ _TWINS = ("(f.boost > 0 AND f.n_insns <= 400 AND f.abandons < 2) DESC, "
 WAITING = ("SELECT w.function_id FROM waits w JOIN functions n ON n.id=w.needs_id WHERE n.status != 'matched'")
 READY = "SELECT w.function_id FROM waits w JOIN functions n ON n.id=w.needs_id WHERE n.status = 'matched'"
 WANTED = "SELECT w.needs_id FROM waits w JOIN functions b ON b.id=w.function_id WHERE b.status = 'open'"
+# Twins first (see app/twins.py): a function whose code the game has more than once (boost: how many more times)
+# and isn't too big or given up on, best value per instruction first; its twins (boost -1) last, as they match for
+# free once it does.
+TWIN_MAX_INSNS = 400  # a bigger function waits its turn by size, twins or not: one match of it takes long
+TWIN_MAX_ABANDONS = 2  # agents gave it back this often: it's hard, twins or not
+# value per instruction: the copies a match brings, over the size; SQL divides integers, so it's scaled up, and a few
+# instructions are added so a two-instruction twin doesn't beat a real function with many copies
+TWIN_VALUE_SCALE, TWIN_SIZE_FLOOR = 64, 16
+_TWINS = (f"(f.boost > 0 AND f.n_insns <= {TWIN_MAX_INSNS} AND f.abandons < {TWIN_MAX_ABANDONS}) DESC, "
+          f"CASE WHEN f.boost > 0 THEN (f.boost + 1) * {TWIN_VALUE_SCALE} / (f.n_insns + {TWIN_SIZE_FLOOR}) ELSE 0 "
+          f"END DESC, f.boost < 0, ")
+# Where in the game a function is says much about its chances: on GTA San Andreas small functions matched 19-28% of
+# the time in most of the game and 87% in one part of it; on Mario Kart 64 one part 19%, the rest 71-85% (October
+# 2026). Mostly another compiler or flags built the bad parts. So among functions of about the same size, the one
+# from the part where matches happen comes first (its share of tried functions matched, pulled towards the game's
+# overall share while little there is tried), and a part that keeps failing comes after everything else: more
+# agents won't fix a wrong compiler, the compiler map and range checks will.
+REGION_BYTES = 0x40000  # one part of the game: 256 KB of code
+REGION_PRIOR = 8  # tries' worth of the game's overall share, so a part judged on two functions isn't judged yet
+FAILING_SHARE, FAILING_TRIED = 0.15, 20
+SIZE_STEP = 64  # instructions: functions within one step are "about the same size"
+FINISH_SIZE_STEP = 32  # the same for "finish", in finer steps: there the file closest to done decides within one
+_REGION = (f"(SELECT vram / {REGION_BYTES} AS region, SUM(status = 'matched') AS won, "
+           f"SUM(status = 'matched' OR attempts > 0) AS tried FROM functions WHERE project_id = :pid "
+           f"AND status != 'asm' AND vram IS NOT NULL GROUP BY region)")
+_SHARE = f"((COALESCE(r.won, 0) + {REGION_PRIOR} * :overall) / (COALESCE(r.tried, 0) + {REGION_PRIOR}))"
+_FAILING = f"(COALESCE(r.tried, 0) >= {FAILING_TRIED} AND {_SHARE} < {FAILING_SHARE})"
 STRATEGIES = {
-    "easiest": _TWINS + "f.abandons > 0, f.n_insns ASC",
+    # (a failing part waits even for its twins: they'd fail the same way)
+    "easiest": f"{_FAILING}, " + _TWINS + f"f.abandons > 0, (f.n_insns + {SIZE_STEP - 1}) / {SIZE_STEP} ASC, "
+                                          f"{_SHARE} DESC, f.n_insns ASC",
     # what nobody gave up on, small first; among functions of about the same size, the files closest to done (a
     # file is linked into the game once all of it matches). Leftovers agents released again and again come last,
     # or a crowd of agents spends its time passing the hardest functions around.
-    "finish": _TWINS + "f.abandons ASC, (f.n_insns + 31) / 32 ASC, (SELECT COUNT(*) FROM functions g WHERE "
+    "finish": f"{_FAILING}, " + _TWINS + f"f.abandons ASC, (f.n_insns + {FINISH_SIZE_STEP - 1}) / {FINISH_SIZE_STEP} ASC, "
+                       "(SELECT COUNT(*) FROM functions g WHERE "
                        "g.project_id=f.project_id AND g.unit=f.unit AND g.status='open') ASC, f.n_insns ASC",
     # near-misses, the ones given up on least first (else every agent resumes the same stuck one)
     "closest": "f.best_score IS NULL, f.abandons ASC, CAST(f.best_score AS REAL) / (f.n_insns * 100) ASC",
@@ -61,13 +103,6 @@ STRATEGIES = {
 
 class NetworkError(Exception):
     """An error meant to be shown to the agent as-is."""
-
-
-def move_on_after(n_insns: int | None) -> int:
-    """compile_and_diff's move-on rule: no better in this many compiles in a row. Big functions get longer (a
-    quarter of Mario Party 6's agent matches over 64 instructions took more than 4 compiles)."""
-    n = n_insns or 0
-    return 4 if n < 64 else 6 if n < 128 else 8 if n < 256 else 10
 
 
 def _no_better(scores: list[int | None]) -> int:
@@ -109,8 +144,31 @@ class Agent:
     trusted: bool = False
 
 
-def _hash_token(token: str) -> str:
+def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+def model_family(agent_name: str) -> str:
+    """Who made an agent's model ("claude-opus-1": claude, "opencode-deepseek-v4.1-flash-2": deepseek); an agent
+    whose name says no model is a family of its own."""
+    kind, _, rest = agent_name.lower().partition("-")
+    if kind in agents.FAMILIES:
+        return agents.FAMILIES[kind]
+    word = re.match(r"[a-z]+\d*", rest)
+    if word is None:
+        return kind
+    return MODEL_FAMILIES.get(word.group(0), re.sub(r"\d+$", "", word.group(0)))
+
+
+def stall_budget(n_insns: int) -> int:
+    """Compiles in a row without a better score before an agent is told to move on (STALL_BUDGET)."""
+    return next((after for under, after in STALL_BUDGET if n_insns < under), STALL_BUDGET_BIGGEST)
+
+
+def stall_budget_text() -> str:
+    """The budget in words: the prompt and the workflow guide say exactly this."""
+    return (f"no better score after {STALL_BUDGET[0][1]} compiles in a row for small functions, up to "
+            f"{STALL_BUDGET_BIGGEST} for the biggest")
 
 
 def _ago(ts: float | None) -> str:
@@ -128,10 +186,8 @@ class Network:
 
     # ------------------------------------------------------------------ agents
 
-    def register_agent(self, name: str, owner: str | None = None, *, trusted: bool = True, origin: str = "cli",
-                       terms_accepted: bool = False) -> str:
-        """Mint an agent token. Operator-created (CLI) agents are trusted; self-registered (web) agents
-        start at reputation level 'new' and earn the rest through verified matches."""
+    def register_agent(self, name: str, owner: str | None = None, *, trusted: bool = True, origin: str = "cli") -> str:
+        """Mint an agent token for one of the app's helpers (`trusted` stays on the record for older databases)."""
         name = name.strip()
         if not name or len(name) > 40 or not all(c.isalnum() or c in "-_." for c in name):
             raise NetworkError("agent name must be 1-40 chars of [A-Za-z0-9-_.]")
@@ -143,30 +199,20 @@ class Network:
                 raise NetworkError(f"agent name {name!r} is taken")
             db.execute(
                 "INSERT INTO agents(name,owner,token_hash,created_at,trusted,origin,terms_accepted_at) VALUES(?,?,?,?,?,?,?)",
-                (name, owner, _hash_token(token), now, int(trusted), origin, now if terms_accepted else None),
+                (name, owner, hash_token(token), now, int(trusted), origin, None),
             )
         return token
 
     def authenticate(self, token: str | None) -> Agent:
+        """The agent a token belongs to (helpers get theirs from the app when it starts them)."""
         if not token:
-            raise NetworkError("missing API token: add `--header \"Authorization: Bearer dn_...\"` to your MCP config")
-        row = self.store.one("SELECT id,name,owner,trusted FROM agents WHERE token_hash=?", _hash_token(token))
+            raise NetworkError("missing token: only helpers decompdecomp starts can work on its projects")
+        row = self.store.one("SELECT id,name,owner,trusted FROM agents WHERE token_hash=?", hash_token(token))
         if row is None:
             raise NetworkError("invalid API token")
         with self.store.tx() as db:
             db.execute("UPDATE agents SET last_seen=? WHERE id=?", (time.time(), row["id"]))
         return Agent(row["id"], row["name"], row["owner"], bool(row["trusted"]))
-
-    def _require_budget(self, agent: Agent) -> None:
-        ok, why = policy.compile_budget(self.store, agent.id)
-        if not ok:
-            raise NetworkError(why)
-
-    def _require_level(self, agent: Agent, what: str) -> None:
-        rep = policy.reputation(self.store, agent.id)
-        if not rep["level"].can_edit_context:
-            raise NetworkError(f"{what} needs reputation level 'member' (one verified match). You are '{rep['level'].name}': "
-                               f"match a function first; add_note is open to everyone.")
 
     # ---------------------------------------------------------------- helpers
 
@@ -174,12 +220,12 @@ class Network:
         if slug:
             row = self.store.one("SELECT * FROM projects WHERE slug=?", slug)
             if row is None:
-                raise NetworkError(f"no project {slug!r}; call list_projects")
+                raise NetworkError(f"no project {slug!r} here: check its name, or whether it was removed")
             return row
         rows = self.store.all("SELECT * FROM projects")
         if len(rows) == 1:
             return rows[0]
-        raise NetworkError("several projects exist; pass `project` (see list_projects)")
+        raise NetworkError("several projects exist; pass `project` (its slug)")
 
     def _function(self, name: str, project: str | None):
         if project is None and "/" in name and "@" not in name.split("/", 1)[0]:  # project/name (fork names hold units)
@@ -258,25 +304,9 @@ class Network:
 
     # ---------------------------------------------------------------- projects
 
-    def list_projects(self) -> str:
-        rows = self.store.all(
-            """SELECT p.slug, p.name, p.arch, p.description, p.config, COUNT(f.id) AS total,
-                      SUM(f.status='matched') AS matched, SUM(f.size) AS bytes,
-                      SUM(CASE WHEN f.status='matched' THEN f.size ELSE 0 END) AS matched_bytes
-               FROM projects p LEFT JOIN functions f ON f.project_id=p.id GROUP BY p.id ORDER BY p.slug"""
-        )
-        if not rows:
-            return "No projects yet."
-        out = []
-        for r in rows:
-            pct = 100 * (r["matched_bytes"] or 0) / (r["bytes"] or 1)
-            legal = json.loads(r["config"]).get("legal", {})
-            out.append(f"- {r['slug']}: {r['name']} [{r['arch']}] — {r['matched'] or 0}/{r['total']} functions "
-                       f"matched ({pct:.1f}% of code); legal basis: {legal.get('basis')}, contributions licensed "
-                       f"{legal.get('license')}\n  {r['description']}".rstrip())
-        return "\n".join(out)
-
     def get_context(self, project: str | None, function: str | None = None) -> str:
+        """The shared header a function compiles with, as agents read it (a project with one header per source
+        file needs the function)."""
         if function:
             fn = self._function(function, project)
             proj = self.store.one("SELECT * FROM projects WHERE id=?", fn["project_id"])
@@ -371,21 +401,32 @@ class Network:
                 db.execute("INSERT INTO claims VALUES(?,?,?,?)", (fn["id"], agent.id, now, now + self.claim_ttl))
                 self._event(db, fn["project_id"], agent.id, "claim", fn["name"])
             else:
-                # not what this agent released lately (see SELF_RELEASE_WINDOW); what it released before that last
+                family = model_family(agent.name)
+                kin = [r["id"] for r in db.execute("SELECT id, name FROM agents") if model_family(r["name"]) == family]
+                tried = db.execute("SELECT SUM(status = 'matched') AS won, SUM(status = 'matched' OR attempts > 0) "
+                                   "AS tried FROM functions WHERE project_id=? AND status != 'asm'", (proj["id"],)).fetchone()
+                overall = (tried["won"] or 0) / tried["tried"] if tried["tried"] else 0.5
+                # not what this agent released lately (see SELF_RELEASE_WINDOW); what it released before that last;
                 # functions waiting for another to match come last (WAITING); the ones they wait for, and those whose
                 # wait is over, first (after what the release rules put back)
                 fn = db.execute(
-                    f"""SELECT f.* FROM functions f WHERE f.project_id=? AND f.status='open'
+                    f"""SELECT f.* FROM functions f LEFT JOIN {_REGION} r ON r.region = f.vram / {REGION_BYTES}
+                        WHERE f.project_id=:pid AND f.status='open'
                         AND f.id NOT IN (SELECT function_id FROM claims)
-                        AND f.name NOT IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release'
-                                           AND created_at > ?)
+                        AND f.name NOT IN (SELECT detail FROM events WHERE project_id=:pid AND agent_id=:agent
+                                           AND kind='release' AND created_at > :own_cutoff)
                         ORDER BY f.id IN ({WAITING}),
-                                 f.name IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release'),
-                                 f.name IN (SELECT detail FROM events WHERE project_id=? AND kind='release'
-                                            AND created_at > ?),
+                                 f.name IN (SELECT detail FROM events WHERE project_id=:pid AND agent_id=:agent
+                                            AND kind='release'),
+                                 f.name IN (SELECT detail FROM events WHERE project_id=:pid AND kind='release'
+                                            AND agent_id IN (SELECT value FROM json_each(:kin)) AND created_at >
+                                            COALESCE((SELECT MAX(created_at) FROM events WHERE project_id=:pid
+                                                      AND kind IN ('context', 'compiler')), 0)),
+                                 f.name IN (SELECT detail FROM events WHERE project_id=:pid AND kind='release'
+                                            AND created_at > :cooled),
                                  f.id IN ({READY}) DESC, f.id IN ({WANTED}) DESC, {STRATEGIES[strategy]} LIMIT 1""",
-                    (proj["id"], proj["id"], agent.id, self._own_release_cutoff(db, agent.id, now),
-                     proj["id"], agent.id, proj["id"], now - RELEASE_COOLDOWN),
+                    {"pid": proj["id"], "agent": agent.id, "kin": json.dumps(kin), "cooled": now - RELEASE_COOLDOWN,
+                     "overall": overall, "own_cutoff": self._own_release_cutoff(db, agent.id, now)},
                 ).fetchone()
                 if fn is None:
                     return None
@@ -397,6 +438,8 @@ class Network:
         return fn
 
     def release(self, agent: Agent, function: str, notes: str, project: str | None = None) -> str:
+        """An agent gives a function back: its claim ends, its notes stay for the next agent, and the function
+        counts one more give-up (the claim order puts those later)."""
         fn = self._function(function, project)
         with self.store.tx() as db:
             row = db.execute("SELECT agent_id FROM claims WHERE function_id=?", (fn["id"],)).fetchone()
@@ -473,28 +516,26 @@ class Network:
                               f"{self._agent_name(fn['best_agent_id'])} ({fn['attempts']} attempts total) — "
                               f"start from this", "```c", fn["best_source"].strip(), "```"]
             elif fn["seed"]:
-                lines += ["", "### Machine-generated starting point (m2c: expect wrong types and names; "
-                              "the context header helps)", "```c",
-                          fn["seed"].strip(), "```"]
+                lines += ["", "### Machine draft (m2c): its control flow and arithmetic are usually right, its types "
+                              "and names usually wrong. Start from it and fix those", "```c", fn["seed"].strip(), "```"]
         notes = self.store.all(
             "SELECT n.text, n.created_at, a.name FROM notes n LEFT JOIN agents a ON a.id=n.agent_id "
-            "WHERE n.function_id=? ORDER BY n.id DESC LIMIT 8", fn["id"])
+            f"WHERE n.function_id=? ORDER BY n.id DESC LIMIT {BRIEF_NOTES}", fn["id"])
         if notes:
             lines += ["", "### Notes from previous agents on this function"]
             lines += [f"- ({n['name']}, {_ago(n['created_at'])}) {stale_note(n['text'], fn['status'])}" for n in notes]
         lines += self.dependency_brief(fn)
-        pnotes = self.store.all(
-            "SELECT n.text, a.name FROM notes n LEFT JOIN agents a ON a.id=n.agent_id "
-            "WHERE n.project_id=? AND n.function_id IS NULL ORDER BY n.id DESC LIMIT 5", proj["id"])
-        if pnotes:
-            lines += ["", "### Project-wide notes (latest)"] + [f"- ({n['name']}) {n['text']}" for n in pnotes]
         if fn["unit"] and fn["unit"] in self._unit_contexts(proj["id"]):
             lines.insert(2, f"source unit {fn['unit']}: call get_context with function=\"{fn['name']}\" for its header")
         if header == "CLAIMED":
-            lines += ["", "Next: read context.h with get_context, write C for this function, and iterate with "
-                          "compile_and_diff until score is 0. Submit only the function body (plus any helper "
-                          "declarations); context.h is included automatically."]
+            lines += ["", self._next_step(proj, ctx)]
         return "\n".join(lines)
+
+    def _next_step(self, proj, ctx) -> str:
+        """The brief's last line for the agent that claimed the function."""
+        return ("Next: read context.h with get_context, write C for this function, and iterate with "
+                "compile_and_diff until score is 0. Submit only the function body (plus any helper "
+                "declarations); context.h is included automatically.")
 
     # --------------------------------------------------------- compile & diff
 
@@ -503,7 +544,6 @@ class Network:
 
     def attempt(self, agent: Agent, function: str, source: str, project: str | None = None) -> dict:
         """Compile, score and record one attempt. Returns {"text", "score", "matched"} (score None: didn't compile)."""
-        self._require_budget(agent)
         fn = self._function(function, project)
         proj = self.store.one("SELECT * FROM projects WHERE id=?", fn["project_id"])
         now = time.time()
@@ -541,6 +581,8 @@ class Network:
         if verdict is not None:
             d = scoring.DiffResult(0 if verdict else max(1, d.score), d.max_score, d.rows, verdict)
         matched_now = d.bytes_match and not scratch
+        last = self.store.one("SELECT score FROM attempts WHERE function_id=? AND agent_id=? AND score IS NOT NULL "
+                              "ORDER BY id DESC LIMIT 1", fn["id"], agent.id)
         self._record(fn, agent, d.score, source, ctx["version"], matched=matched_now)
 
         if scratch:
@@ -554,6 +596,7 @@ class Network:
             best = self.store.one("SELECT best_score FROM functions WHERE id=?", fn["id"])["best_score"]
             head = (f"score {d.score} ({scoring.percent_text(d.percent)} match) — best so far {best}. "
                     f"Target {len([r for r in d.rows if r[1]])} insns, yours {len([r for r in d.rows if r[2]])}.")
+            head += self._what_changed(d, last["score"] if last else None)
             if d.rows and all(m == " " for m, _, _ in d.rows):
                 head += ("\nNOT A MATCH YET: every instruction reads the same, but the bytes differ"
                          + (" because of the linking notes at the end: fix those." if problems else
@@ -563,15 +606,31 @@ class Network:
             warn += "\nwhen linking your code at the function's address:\n" + "\n".join(f"- {p}" for p in problems)
         return {"text": f"{head}\n{d.render()}{warn}{self.stall_note(fn['id'], agent.id)}", "score": d.score, "matched": False}
 
+    @staticmethod
+    def _what_changed(d: scoring.DiffResult, last: int | None) -> str:
+        """What the agent's last change did, and where the first difference is now: one small change per compile
+        works best, and an agent that sees which way the score moved knows whether to keep or undo it."""
+        said = ""
+        if last is not None:
+            said = ("\nYour last change: no effect on the score." if d.score == last else
+                    f"\nYour last change made it better ({last} → {d.score}): keep it." if d.score < last else
+                    f"\nYour last change made it worse ({last} → {d.score}): undo it, or it fixed one thing and broke another.")
+        same, total, row = scoring.first_mismatch(d.rows)
+        if row is not None:
+            mark, target, yours = row
+            said += (f"\nThe first {same} of {total} target instructions match; the first difference "
+                     f"({scoring.MARKERS.get(mark, mark)}): target `{target or '-'}`, yours `{yours or '-'}`.")
+        return said
+
     def stall_note(self, function_id: int, agent_id: int, after: int | None = None) -> str:
         """A nudge once an agent's last `after` compiles of a function didn't beat its best: functions that match
         mostly do in the first few tries, and the agent's time is better spent on the next one. Big functions get
         longer (a quarter of Mario Party 6's agent matches over 64 instructions took more than 4 compiles, and
-        those functions hold most of the code left)."""
+        those functions hold most of the code left): STALL_BUDGET."""
         if after is None:
             row = self.store.one("SELECT n_insns FROM functions WHERE id=?", function_id)
-            after = move_on_after(row["n_insns"] if row else 0)
-        rows = self.store.all("SELECT score FROM attempts WHERE function_id=? AND agent_id=? ORDER BY id DESC LIMIT 16",
+            after = stall_budget((row["n_insns"] if row else 0) or 0)
+        rows = self.store.all(f"SELECT score FROM attempts WHERE function_id=? AND agent_id=? ORDER BY id DESC LIMIT {STALL_LOOKBACK}",
                               function_id, agent_id)
         since = _no_better([r["score"] for r in reversed(rows)])
         if since < after:
@@ -591,7 +650,7 @@ class Network:
                               "ORDER BY id", fn["id"], agent.id, start)
         scores = [r["score"] for r in rows]
         return {"claimed_at": start, "compiles": len(scores), "no_better": _no_better(scores),
-                "after": move_on_after(fn["n_insns"]),
+                "after": stall_budget(fn["n_insns"] or 0),
                 "best": min((s for s in scores if s is not None), default=None)}
 
     # ---------------------------------------------------------- prerequisites
@@ -663,7 +722,6 @@ class Network:
                      function: str | None = None) -> str:
         """Exact-string edit of a header. Accepted only if every already-matched function compiled against
         that header still matches with the new one — that's the project's test suite."""
-        self._require_level(agent, "Editing the shared header")
         if function:
             fn = self._function(function, project)
             proj = self.store.one("SELECT * FROM projects WHERE id=?", fn["project_id"])
@@ -705,7 +763,6 @@ class Network:
         """Project-wide refactor: rename an identifier (field, type, global, function param...) in every
         header *and* in every matched source / best attempt, then regression-test the result.
         The rename is textual (whole words), so it is meant for unique names like `unk_1C` or `func_80012345`."""
-        self._require_level(agent, "Renaming across the project")
         proj = self._project(project)
         ident = re.compile(r"^[A-Za-z_]\w*$")
         if not (ident.match(old) and ident.match(new)):
@@ -761,6 +818,8 @@ class Network:
 
     def regression_test(self, proj, header: str | None, sources: dict[int, str] | None = None,
                         only: list | None = None, header_for=None) -> list[tuple[str, str]]:
+        """Every matched function (or `only`) built again with a changed header or sources: (name, why) of each
+        that no longer matches, so a header edit that breaks matches is refused."""
         matched = only if only is not None else self.store.all(
             "SELECT * FROM functions WHERE project_id=? AND status='matched'", proj["id"])
 
@@ -787,21 +846,23 @@ class Network:
     # ------------------------------------------------------------------ notes
 
     def add_note(self, agent: Agent, project: str | None, text: str, function: str | None = None) -> str:
+        """A note for the agents after this one, on a function or on the whole project."""
         proj = self._project(project)
         fn = self._function(function, proj["slug"]) if function else None
         if not text.strip():
             raise NetworkError("empty note")
         with self.store.tx() as db:
             db.execute("INSERT INTO notes(project_id,function_id,agent_id,text,created_at) VALUES(?,?,?,?,?)",
-                       (proj["id"], fn["id"] if fn else None, agent.id, text.strip()[:4000], time.time()))
+                       (proj["id"], fn["id"] if fn else None, agent.id, text.strip()[:NOTE_CHARS], time.time()))
         return "Noted. Other agents will see it" + (f" when they open {fn['name']}." if fn else " in their briefings.")
 
     def search_notes(self, project: str | None, query: str) -> str:
+        """Notes on the project that contain `query`, newest first."""
         proj = self._project(project)
         rows = self.store.all(
             "SELECT n.text, n.created_at, a.name AS agent, f.name AS fn FROM notes n "
             "LEFT JOIN agents a ON a.id=n.agent_id LEFT JOIN functions f ON f.id=n.function_id "
-            "WHERE n.project_id=? AND n.text LIKE ? ORDER BY n.id DESC LIMIT 20", proj["id"], f"%{query}%")
+            f"WHERE n.project_id=? AND n.text LIKE ? ORDER BY n.id DESC LIMIT {NOTES_FOUND}", proj["id"], f"%{query}%")
         if not rows:
             return f"No notes matching {query!r}."
         return "\n".join(f"- [{r['fn'] or 'project'}] ({r['agent']}, {_ago(r['created_at'])}) {r['text']}" for r in rows)
@@ -809,6 +870,7 @@ class Network:
     # ------------------------------------------------------------- the project as a whole
 
     def remove_project(self, slug: str) -> int:
+        """Delete a project and everything recorded for it. Returns how many functions it had."""
         proj = self._project(slug)
         with self.store.tx() as db:
             ids = [r["id"] for r in db.execute("SELECT id FROM functions WHERE project_id=?", (proj["id"],))]
@@ -818,18 +880,3 @@ class Network:
                 db.execute(f"DELETE FROM {table} WHERE project_id=?", (proj["id"],))
             db.execute("DELETE FROM projects WHERE id=?", (proj["id"],))
         return len(ids)
-
-    def learnings(self, slug: str, budget: int = 2500) -> str:
-        """The project-wide notes agents left (newest first, within `budget` characters), for every new session:
-        what one agent works out about the compiler or the project, the next one starts with."""
-        proj = self._project(slug)
-        out, used = [], 0
-        for r in self.store.all("SELECT text FROM notes WHERE project_id=? AND function_id IS NULL ORDER BY id DESC LIMIT 40",
-                                proj["id"]):
-            text = " ".join(r["text"].split())[:600]
-            if used + len(text) > budget:
-                break
-            out.append(f"- {text}")
-            used += len(text)
-        return "\n".join(out)
-

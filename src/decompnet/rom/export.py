@@ -28,13 +28,6 @@ from ..project import compiler_for
 from . import match
 from .symbols import AUTO_NAME
 
-AS_FLAGS = {
-    "n64": ["-EB", "-march=vr4300", "-mabi=32"],
-    "psx": ["-EL", "-march=r3000", "-mabi=32"],
-    "ps2": ["-EL", "-march=r5900", "-mabi=eabi"],
-}
-LD_ENDIAN = {"n64": "-EB", "psx": "-EL", "ps2": "-EL"}
-IMAGE_EXT = {"n64": ".z64", "psx": ".exe", "ps2": ".bin"}
 _ADDR_COMMENT = re.compile(r"/\*\s*([0-9A-F]+)\s+([0-9A-F]{8})\b")
 _BSS_COMMENT = re.compile(r"/\*\s*([0-9A-F]{8})\s*\*/\s*\.space")
 _DEFINES = re.compile(r"^\s*(?:glabel|dlabel|jlabel|alabel|ehlabel)\s+(\w+)|^\s*\.globl\s+(\w+)|^\s*(\w+):", re.M)
@@ -44,6 +37,17 @@ DISCARD = ["*(.reginfo)", "*(.MIPS.abiflags)", "*(.MIPS.options)", "*(.pdr)", "*
 
 class ExportError(RuntimeError):
     pass
+
+
+CONTEXT_INCLUDE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*"context\.h"', re.M)
+
+
+def exported_source(prelude: str, include: str, source: str) -> str:
+    """A matched function's file in the export: its header first, as the judge compiled it. The judge offers the
+    shared header as context.h, and some agents include it themselves: the export's header has the project's own
+    name (common.h), so their #include "context.h" names that instead (#4: Champions of Norrath's export stopped
+    at "context.h: No such file or directory"). Including it twice is what the judge compiled too."""
+    return f'{prelude}#include "{include}"\n\n{CONTEXT_INCLUDE.sub(f"#include \"{include}\"", source.strip())}\n'
 
 
 def _first_address(path: Path) -> tuple[int | None, int | None]:
@@ -90,13 +94,15 @@ def _segments(config: dict) -> list[dict]:
     return out
 
 
-def export_rom(net, slug: str, out: Path, log=print) -> dict:
-    """Write the rebuildable tree to `out`, build it once and report: {"path", "identical", "matched", ...}."""
+def export_rom(net, slug: str, out: Path, console, log=print) -> dict:
+    """Write the rebuildable tree to `out`, build it once and report: {"path", "identical", "matched", ...}.
+    `console` (consoles/) says its processor's assembler flags, the image's extension, its assembly's preamble."""
+    from ..consoles import EXPORT
+
     proj = net._project(slug)
     cfg = net.cfg(proj)
-    platform = cfg.get("platform", "n64")
-    if platform not in AS_FLAGS:
-        raise ExportError(f"exporting a rebuildable project isn't supported for {platform} yet")
+    if EXPORT not in console.features:
+        raise ExportError(f"exporting a rebuildable project isn't supported for {console.name or 'this console'} yet")
     work = Path(proj["root"])
     configs = sorted(work.glob("*.yaml"))
     if not configs:
@@ -179,7 +185,7 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
         src.parent.mkdir(parents=True, exist_ok=True)
         include = "common.h" if not unit else f"common_{unit}.h"
         prelude = toolchains.get(compiler_for(cfg, row["vram"])["toolchain"]).prelude
-        src.write_text(f'{prelude}#include "{include}"\n\n{row["matched_source"].strip()}\n', encoding="utf-8")
+        src.write_text(exported_source(prelude, include, row["matched_source"]), encoding="utf-8")
         f["kind"] = "c"
         f["src"] = src.relative_to(out).as_posix()
         f["obj"] = f"build/src/{f['seg']}/{f['name']}.o"
@@ -253,19 +259,19 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
         fn_json.append(entry)
 
     # 5. build description, build script, objdiff, docs
-    ext = IMAGE_EXT[platform]
+    ext = console.image_ext
     base = f"baserom{ext}"
     (out / image_name).rename(out / base)
     yml = out / "splat.yaml"
     yml.write_text(re.sub(r"(^\s*target_path:\s*).*$", rf"\g<1>{base}", yml.read_text(encoding="utf-8"), count=1, flags=re.M),
                    encoding="utf-8")
     build = {
-        "title": proj["name"], "platform": platform, "image": base, "output": f"build/game{ext}",
+        "title": proj["name"], "platform": console.id, "image": base, "output": f"build/game{ext}",
         "sha1": hashlib.sha1(image).hexdigest(), "compiler": cfg["compiler"],
         "compiler_ranges": cfg.get("compiler_ranges") or [], "gp": cfg.get("gp") or 0,
-        "big_endian": platform == "n64",
-        "as_flags": [*AS_FLAGS[platform], "-G0", "-no-pad-sections", "-I", "include"],
-        "ld_flags": [LD_ENDIAN[platform], "--no-check-sections"],
+        "big_endian": console.big_endian, "asm_preamble": console.asm_preamble,
+        "as_flags": [*console.as_flags, "-G0", "-no-pad-sections", "-I", "include"],
+        "ld_flags": ["-EB" if console.big_endian else "-EL", "--no-check-sections"],
         "assembly": objects, "segments": layout, "functions": fn_json,
         "symbols": {k: v for k, v in sorted(absolute.items(), key=lambda kv: kv[1])},
     }
@@ -281,7 +287,7 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
     (out / "objdiff.json").write_text(json.dumps({"build_base": False, "build_target": False, "units": units_json}, indent=2),
                                       encoding="utf-8")
     matched = sum(1 for f in functions if f["kind"] == "c")
-    _write_docs(out, proj["name"], platform, base, matched, len(functions), as_fallback)
+    _write_docs(out, proj["name"], console.name, base, matched, len(functions), as_fallback)
     # everything made from the game itself stays local: build.py regenerates it from your copy
     (out / ".gitignore").write_text("build/\nbaserom*\nasm/\nassets/\n*.ld\n*_auto.txt\n.splat/\n*.d\n",
                                     encoding="utf-8")
@@ -297,19 +303,18 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
             "fallback": as_fallback, "log": (proc.stdout + proc.stderr)[-3000:]}
 
 
-def _write_docs(out: Path, title: str, platform: str, base: str, matched: int, total: int, fallback) -> None:
-    names = {"n64": "Nintendo 64", "psx": "PlayStation", "ps2": "PlayStation 2"}
+def _write_docs(out: Path, title: str, console_name: str, base: str, matched: int, total: int, fallback) -> None:
     notes = "".join(f"\n- `{n}`: kept as assembly, {why}" for n, why in fallback)
     (out / "README.md").write_text(f"""# {title} (decompilation)
 
-A matching decompilation of {title} for the {names[platform]}, started with [decompdecomp](https://github.com/n-delic/decompdecomp).
+A matching decompilation of {title} for the {console_name}, started with [decompdecomp](https://github.com/n-delic/decompdecomp).
 {matched} of {total} functions are C that compiles to exactly the original code; the rest are still assembly.
 `build.py` rebuilds the game from this tree and checks it against your original, byte for byte.
 
 ## Build
 
 1. Put your own copy of the game here as `{base}` (it is in `.gitignore`; never commit it).
-2. `python build.py` (needs decompdecomp installed for the period compiler and assembler).
+2. `python3 build.py` (it uses decompdecomp's period compiler and assembler, so decompdecomp must be installed).
 
 ## Layout
 
@@ -332,7 +337,7 @@ share it.{chr(10) + chr(10) + '## Notes' + notes if notes else ''}
 """, encoding="utf-8")
     (out / "AGENTS.md").write_text("""# Working on this decompilation
 
-- Goal: C that the original compiler turns into exactly the original bytes. `python build.py` must end with
+- Goal: C that the original compiler turns into exactly the original bytes. `python3 build.py` must end with
   "identical".
 - Pick a function from `asm/nonmatchings/`, write it as `src/<segment>/<name>.c` (one function, `#include
   "common.h"` first), add an entry `{"kind": "c", "src": ..., "obj": ...}` to `build.json` objects and point the

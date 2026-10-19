@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import capstone
 
+from . import arch
 from .elfobj import FunctionObj, mask_relocs
 
 PENALTY_STACKDIFF = 1
@@ -22,16 +23,7 @@ PENALTY_REORDER = 60
 PENALTY_INSERTION = 100
 PENALTY_DELETION = 100
 
-_CS = {
-    ("x86_64", False): (capstone.CS_ARCH_X86, capstone.CS_MODE_64),
-    ("x86", False): (capstone.CS_ARCH_X86, capstone.CS_MODE_32),
-    # MIPS64 decoding also covers MIPS I/II; N64 (MIPS III) and PS2 (R5900) code uses 64-bit instructions.
-    ("mips", True): (capstone.CS_ARCH_MIPS, capstone.CS_MODE_MIPS64 | capstone.CS_MODE_BIG_ENDIAN),
-    ("mips", False): (capstone.CS_ARCH_MIPS, capstone.CS_MODE_MIPS64 | capstone.CS_MODE_LITTLE_ENDIAN),
-    ("ppc", True): (capstone.CS_ARCH_PPC, capstone.CS_MODE_32 | capstone.CS_MODE_BIG_ENDIAN),
-    ("arm", False): (capstone.CS_ARCH_ARM, capstone.CS_MODE_ARM),
-    ("thumb", False): (capstone.CS_ARCH_ARM, capstone.CS_MODE_THUMB),
-}
+_CS = arch.capstone_modes()  # (arch, big-endian) -> capstone's (architecture, mode), from arch/
 
 _REG = re.compile(
     r"^\$?(r[a-z0-9]+|e[a-z]{2}|[a-d][lhx]|[sd]il?|[bs]pl?|[xyz]mm\d+|r\d+[dwb]?"  # x86
@@ -61,6 +53,8 @@ def percent_text(p: float | None) -> str:
 
 
 def disassemble(fn: FunctionObj) -> list[Insn]:
+    """A function's instructions, with relocated fields masked and named after their symbols, so the target and a
+    candidate compare by what they do, not by where they were linked."""
     arch, mode = _CS[(fn.arch, fn.big_endian)]
     md = capstone.Cs(arch, mode)
     md.detail = True
@@ -175,6 +169,16 @@ class DiffResult:
         return render_rows(self.rows, context, max_rows)
 
 
+def first_mismatch(rows: list[tuple[str, str, str]]) -> tuple[int, int, tuple[str, str, str] | None]:
+    """(how many target instructions match from the start, the target's length, the first row that differs): one
+    small change per compile works best, and this says where the next one goes."""
+    total = sum(1 for _, target, _ in rows if target)
+    for row in rows:
+        if row[0] != " ":
+            return sum(1 for m, target, _ in rows[:rows.index(row)] if target), total, row
+    return total, total, None
+
+
 MARKERS = {"<": "missing", ">": "extra", "|": "different", "o": "reordered", "r": "regalloc", "s": "stack",
            "i": "operand"}
 LEGEND = ("markers: r=regalloc s=stack-offset i=operand |=different insn <=missing (target only) >=extra (yours only) "
@@ -183,6 +187,8 @@ LEGEND = ("markers: r=regalloc s=stack-offset i=operand |=different insn <=missi
 
 def render_rows(rows: list[tuple[str, str, str]], context: int = 2, max_rows: int = 60, run: int = 6,
                 legend: str = LEGEND) -> str:
+    """A diff's rows as text for an agent: the differing lines with `context` lines around them, at most `max_rows`,
+    long equal stretches folded, and a count of each kind of difference."""
     counts = Counter(m for m, _, _ in rows if m != " ")
     summary = ", ".join(f"{n} {MARKERS.get(m, m)}" for m, n in counts.most_common())
     width = min(max((len(t) for _, t, _ in rows), default=10) + 2, 44)
@@ -241,6 +247,8 @@ def compact_asm(text: str) -> str:
 
 
 def diff(target: FunctionObj, candidate: FunctionObj) -> DiffResult:
+    """Compare a candidate with the target instruction by instruction: a score (0 is a match, lower is closer), the
+    rows to show, and what's missing or extra. Equal bytes are a match whatever the score."""
     t_ins, c_ins = disassemble(target), disassemble(candidate)
     max_score = max(1, len(t_ins)) * PENALTY_INSERTION
     bytes_match = target.fingerprint() == candidate.fingerprint()

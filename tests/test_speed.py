@@ -102,7 +102,6 @@ def test_a_match_matches_its_twins(game):
     same = twin(net, slug, "player_take_damage", 0x80400000)
     other = twin(net, slug, "player_take_damage", 0x80400100, {syms["g_player"]: 0x80047000})
     proj = net.project_row(slug)
-    assert net.twins.group_sizes(proj)[net._function(same, slug)["id"]] == 3
     assert net.twins.update_boosts(proj) >= 1  # one of the three goes first, the others last
     boosts = sorted(net._function(n, slug)["boost"] for n in ("player_take_damage", same, other))
     assert boosts == [-1, -1, 2]
@@ -265,14 +264,17 @@ def test_turns_not_wasted(game):
     assert "No better in your last" in out
 
 
-def test_the_permuter_finishes_a_near_miss(game):
+def test_the_permuter_finishes_a_near_miss(game, monkeypatch):
     """A near miss (a matching source with one rewrite that changes its code: statements swapped, a cast) is
-    left to the permuter, which finds its way back to a match on its own."""
+    left to the permuter, which finds its way back to a match on its own: here with the simple rewrites, as
+    without decomp-permuter."""
     import random
 
+    from decompnet.app import permute
     from decompnet.app.permute import State
     from decompnet.permuter import mutate
 
+    monkeypatch.setattr(permute, "available", lambda: False)
     net, slug, _ = game
     agent, _ = net.local_agent("agent")
     source = csource.get((GAME / "game.c").read_text(), "entity_update_physics")
@@ -295,3 +297,38 @@ def test_the_permuter_finishes_a_near_miss(game):
     st = State()
     net.permuter._permute(permuter, proj, net._function("entity_update_physics", slug), st)
     assert st.matched == 1 and net._function("entity_update_physics", slug)["status"] == "matched", st
+
+
+@pytest.mark.skipif(toolchains.installed("decomp-permuter") is None, reason="needs decomp-permuter")
+@pytest.mark.parametrize("name,written,near", [
+    ("entity_spawn", "e->vel_x = 0;\n            e->vel_y = 0;", "e->vel_y = 0;\n            e->vel_x = 0;"),
+    ("checksum_save", "(sum << 5) + sum", "sum + (sum << 5)"),  # no simple rewrite turns operands around
+])
+def test_decomp_permuter_brings_a_near_miss_back_to_a_match(game, name, written, near):
+    """A matching function with two statements in another order, or an addition's operands the other way round,
+    left as an agent's near miss: decomp-permuter's variants, judged by our judge, match it again in one turn."""
+    import time
+
+    from decompnet.app import permute
+    from decompnet.app.permute import State
+
+    net, slug, _ = game
+    agent, _ = net.local_agent("agent")
+    source = csource.get((GAME / "game.c").read_text(), name)
+    if net._function(name, slug)["status"] != "matched":
+        assert net.attempt(agent, name, source, slug)["matched"]
+    fn = net._function(name, slug)
+    variant = source.replace(written, near)
+    score = net.try_quietly(agent, net.project_row(slug), {**fn, "status": "open"}, variant)["score"]
+    assert 0 < score <= fn["n_insns"] * 100 * permute.NEAR, score
+    with net.store.tx() as db:  # as if agents had left it there
+        db.execute("UPDATE functions SET status='open', matched_source=NULL, best_score=?, best_source=?, permuted=0 "
+                   "WHERE id=?", (score, variant, fn["id"]))
+    proj = net.project_row(slug)
+    assert name in [r["name"] for r in net.permuter.candidates(proj)]
+    permuter, _ = net.local_agent("permuter")
+    st = State()
+    started = time.monotonic()
+    net.permuter._permute(permuter, proj, net._function(name, slug), st)
+    assert st.matched == 1 and net._function(name, slug)["status"] == "matched", st
+    assert time.monotonic() - started < permute.SECONDS

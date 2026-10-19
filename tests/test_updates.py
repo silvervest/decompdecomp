@@ -93,6 +93,7 @@ def test_install_runs_uv_then_the_new_setup(tmp_path, monkeypatch):
     for f in (uv, bindir / "decomp"):
         f.chmod(f.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setattr(updates, "uv", lambda: str(uv))
+    monkeypatch.setattr(updates.edition, "DEV", False)  # (the tests run from a checkout: a development copy)
     updates.record("branch", "cross-platform", "1" * 40)
     found = {"current": updates.installed(), "available": True, "latest": {"version": "0.10.0", "commit": "2" * 40},
              "spec": f"decompnet @ https://github.com/{updates.REPO}/archive/" + "2" * 40 + ".tar.gz"}
@@ -142,14 +143,16 @@ def test_update_api(tmp_path, monkeypatch):
     home = tmp_path / "home"
     (home / ".decomp").mkdir(parents=True)
     net = RomNetwork(home / ".decomp" / "decomp.db", home)
-    mcp, manager, security = build(net, home / ".decomp", 6498, "sec")
+    from decompnet.app import window
+
+    mcp, manager, security, _ = build(net, home / ".decomp", 6498, "sec")
     client = TestClient(mcp.streamable_http_app(transport_security=security, host="127.0.0.1"),
                         base_url="http://127.0.0.1:6498")
-    assert client.get("/api/update").status_code == 401  # the GUI's secret, as everywhere
-    client.cookies.set("decomp_live", "sec")
+    assert client.get("/api/update").status_code == 401  # the window's secret, as everywhere
+    client.headers["User-Agent"] = f"{window.TOKEN_AGENT}sec"
     monkeypatch.setenv("DECOMP_UPDATES", "on")
     st = client.get("/api/update").json()
-    assert st["available"] is False and st["job"]["state"] == "idle" and "runtime" in st
+    assert st["available"] is False and st["job"]["state"] == "idle"
     r = client.post("/api/update", json={"apply": True}, headers={"X-Decomp": "1"})
     assert r.status_code == 400 and "up to date" in r.json()["error"]
     assert client.post("/api/settings", json={"check_updates": False}, headers={"X-Decomp": "1"}).json()["check_updates"] is False
@@ -166,7 +169,7 @@ def test_apply_installs_what_a_fresh_check_finds(monkeypatch):
     installed = []
     monkeypatch.setattr(updates, "install", lambda found, log=print: installed.append(found))
     up = updates.Updater(lambda: None, 0, "")
-    monkeypatch.setattr(updates, "restart", lambda port, secret: None)
+    monkeypatch.setattr(updates, "restart", lambda port, secret, window: None)
     up.last = old
     up.apply()
     import threading
@@ -191,15 +194,34 @@ def test_a_packaged_install_points_at_the_releases(monkeypatch):
     assert not ok and "AppImage" in why and f"github.com/{updates.REPO}/releases" in why
 
 
-def test_an_appimage_bridge_is_the_appimage_itself(monkeypatch):
-    from decompnet.app import connect
-    monkeypatch.setenv("APPIMAGE", "/home/me/decompdecomp.AppImage")
-    assert connect.bridge_command() == ["/home/me/decompdecomp.AppImage", "mcp"]
-
-
 def test_an_install_from_main_updates_on_releases_only():
     """Installed from a checkout of main, every commit used to be offered as an update (a website edit too)."""
     updates.record("branch", branch="main", commit="abc123")
     assert updates.installed()["channel"] == "release"
     updates.record("branch", branch="window-fix", commit="abc123")
     assert updates.installed()["channel"] == "branch"
+
+
+def test_an_update_from_1_0_2_restarts_into_the_new_version_with_a_window(monkeypatch):
+    """1.0.2's updater restarts into the new version with `--no-browser --port N` and no word about a window (it had
+    a browser tab): the new `decomp` must take those arguments, or the update ends the app, and open its window."""
+    import json
+
+    from decompnet.app import cli
+
+    ran = {}
+    monkeypatch.setattr(cli, "run", lambda args: ran.update(port=args.port) or 0)
+    assert cli.main(["--no-browser", "--port", "6464"]) == 0 and ran == {"port": 6464}
+    monkeypatch.setenv("DECOMP_RESTART", json.dumps({"port": 6464, "secret": "s"}))
+    restarted = cli._restart_state()
+    assert restarted.get("window", True) is True  # how run() reads it: open the window
+
+
+def test_a_development_copy_never_updates_itself(monkeypatch):
+    """A checkout's Settings said updates came from GitHub's releases, and "Update now" would have installed a release
+    beside it: a second app. It updates with git; the app says so."""
+    from decompnet.app import edition
+    monkeypatch.delenv("DECOMP_PACKAGE", raising=False)
+    monkeypatch.setattr(edition, "DEV", True)
+    ok, why = updates.can_apply()
+    assert not ok and "development copy" in why

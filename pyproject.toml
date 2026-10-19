@@ -1,10 +1,10 @@
 [project]
 name = "decompnet"
-version = "1.0.2-alpha"
-description = "decompdecomp, a continuation of decomp.wtf: your AI agent decompiles games you own into C that compiles to the exact same bytes, with a live view. Runs locally."
+version = "1.0.3-alpha"
+description = "A desktop app where AI agents decompile the games you own into C that rebuilds them byte for byte. Runs locally."
 readme = "README.md"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "LICENSE-decomp.wtf"]
 authors = [
     { name = "sam wolfs", email = "appelsiensam@gmail.com" },  # decomp.wtf, up to 0.10.6
     { name = "NDelic" },  # decompdecomp
@@ -20,7 +20,6 @@ dependencies = [
     "httpx>=0.28",
     "uvicorn>=0.30",
     "ninja>=1.11",  # builds GameCube/Wii (dtk) and other ninja-based decomp projects
-    "truststore>=0.10; sys_platform == 'win32'",  # HTTPS verified by Windows itself (see decompnet/__init__.py)
     "zstandard>=0.23; sys_platform == 'linux'",  # the .zst runtime old compilers need, without the zstd command
 ]
 
@@ -32,7 +31,7 @@ Source = "https://github.com/n-delic/decompdecomp"
 decomp = "decompnet.app.cli:main"
 
 [build-system]
-requires = ["uv_build>=0.12.18,<0.13.0"]
+requires = ["uv_build>=0.12.18,<0.14.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
@@ -45,7 +44,7 @@ dev = [
 line-length = 120
 target-version = "py312"
 # the website's tooling isn't decompdecomp's code; ninja_syntax.py is ninja's own, copied into the project templates
-extend-exclude = ["site", "src/decompnet/forks/*_template/tools/ninja_syntax.py"]
+extend-exclude = ["site", "src/decompnet/consoles/*/project_template/tools/ninja_syntax.py"]
 
 [tool.ruff.lint]
 # Only rules that find real problems or real inconsistencies: no formatter, no line length (docs/CONVENTIONS.md, "Linting")

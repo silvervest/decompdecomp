@@ -6,8 +6,8 @@ import pytest
 
 from decompnet.compiler import SourceRejected, check_source
 from decompnet.network import Network, NetworkError
-from decompnet.project import import_project
 
+from .handmade import import_project
 from .solutions import SOLUTIONS, WRONG_CLAMP
 
 DEMO = Path(__file__).resolve().parent.parent / "projects" / "demo"
@@ -144,31 +144,6 @@ def test_auth(net):
         net.register_agent("bad name!")
 
 
-def test_projects_need_a_lawful_basis(tmp_path):
-    import shutil
-
-    from decompnet.project import ProjectRejected
-    proj = tmp_path / "game"
-    shutil.copytree(DEMO, proj)
-    toml = (proj / "project.toml").read_text()
-    net = Network(tmp_path / "l.db")
-
-    (proj / "project.toml").write_text(toml.replace('basis = "own-code"', 'basis = "abandonware"'))
-    with pytest.raises(ProjectRejected, match="basis"):
-        import_project(net.store, proj, log=lambda *_: None)
-    (proj / "project.toml").write_text(toml.replace('basis = "own-code"', 'basis = "permission"'))
-    with pytest.raises(ProjectRejected, match="evidence"):
-        import_project(net.store, proj, log=lambda *_: None)
-    (proj / "project.toml").write_text(toml.replace('license = "CC0-1.0"\n', ""))
-    with pytest.raises(ProjectRejected, match="license"):
-        import_project(net.store, proj, log=lambda *_: None)
-    assert net.store.one("SELECT COUNT(*) AS n FROM projects")["n"] == 0
-
-
-def test_projects_show_their_legal_basis(net):
-    assert "legal basis: own-code" in net.list_projects()
-
-
 def test_removing_a_project_removes_everything_in_it(net, agents):
     alice, bob = agents
     net.compile_and_diff(alice, "abs_s32", SOLUTIONS["abs_s32"])
@@ -206,18 +181,6 @@ def test_give_ups_are_recounted_once_without_decomp_wtfs_own_expiries(tmp_path):
     assert Store(path).one("SELECT abandons FROM functions WHERE name='f'")["abandons"] == 7  # once only
 
 
-def test_every_new_session_starts_with_what_agents_learned(net, agents):
-    """Project-wide notes (compiler quirks, conventions) go into every session's prompt, newest first, within a
-    budget: what one agent works out, the next one starts with."""
-    alice, _ = agents
-    net.add_note(alice, "demo", "old tip: " + "x" * 300)
-    net.add_note(alice, "demo", "MWCC here: declare the loop counter last to get r31")
-    net.add_note(alice, "demo", "a note on one function only", "clamp_s32")
-    learned = net.learnings("demo", budget=400)
-    assert learned.startswith("- MWCC here") and "one function only" not in learned and "old tip" in learned
-    assert "old tip" not in net.learnings("demo", budget=100)
-
-
 def test_big_functions_get_more_compiles_before_the_nudge_to_move_on(net, agents):
     alice, _ = agents
     fn = net.store.one("SELECT id FROM functions WHERE name='clamp_s32'")
@@ -229,3 +192,13 @@ def test_big_functions_get_more_compiles_before_the_nudge_to_move_on(net, agents
     with net.store.tx() as db:
         db.execute("UPDATE functions SET n_insns=300 WHERE id=?", (fn["id"],))
     assert net.stall_note(fn["id"], alice.id) == ""  # a big one: not before 10
+
+
+def test_the_guide_gives_the_compile_budget_compile_and_diff_keeps():
+    """The guide said "stuck after ~20 compiles" while compile_and_diff nudged after 4."""
+    from decompnet import network
+    from decompnet.app import tools
+
+    said = network.stall_budget_text()
+    assert said in " ".join(tools.guide_text("workflow").split())
+    assert f"after {network.stall_budget(10)} compiles" in said and network.stall_budget(1000) == network.STALL_BUDGET_BIGGEST

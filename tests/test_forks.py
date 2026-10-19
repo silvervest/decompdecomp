@@ -259,7 +259,7 @@ def _dtk_project(root: Path, version: str, config: str) -> None:
 def test_a_project_that_reads_an_extracted_disc_gets_its_files_from_the_disc_image(tmp_path, monkeypatch):
     """Older dtk projects read orig/<version>/sys/main.dol and files/... (the README says "extract the disc with
     Dolphin"); decompdecomp copies exactly those files out of the user's disc image, picking the disc of that version."""
-    from decompnet.forks import scratch_dtk
+    from decompnet.consoles.gc_wii import scratch as scratch_dtk
     from decompnet.forks.project import ForkProject
 
     _dtk_project(tmp_path, "GP6E01", "object: orig/GP6E01/sys/main.dol\nmodules:\n- object: orig/GP6E01/files/dll/a.rel\n"
@@ -287,7 +287,7 @@ def test_a_project_that_reads_an_extracted_disc_gets_its_files_from_the_disc_ima
 
 
 def test_a_disc_of_another_version_switches_the_project_or_is_refused(tmp_path, monkeypatch):
-    from decompnet.forks import scratch_dtk
+    from decompnet.consoles.gc_wii import scratch as scratch_dtk
 
     net = RomNetwork(tmp_path / "decomp.db", tmp_path / "ws")
     root = tmp_path / "ws" / "mp6"
@@ -308,16 +308,16 @@ def test_a_disc_of_another_version_switches_the_project_or_is_refused(tmp_path, 
 
 def test_a_project_made_from_scratch_builds_with_this_computers_tools(tmp_path, monkeypatch):
     """The manifest of a generated project records the tools of the computer that made it; setup uses this one's."""
-    from decompnet.forks import scratch_dsd
+    from decompnet.consoles.pc import scratch as scratch_pe
     from decompnet.forks.project import ForkProject
 
     (tmp_path / ".decomp.wtf.json").write_text(json.dumps({
-        "created": "from scratch", "platform": "nds", "version": "abce",
-        "setup": [["python", "tools/configure.py", "abce", "--dsd", "/elsewhere/dsd", "--compilers", "/elsewhere/mw"], ["ninja"]]}))
-    monkeypatch.setattr(scratch_dsd, "tool_args", lambda: ["--dsd", "/here/dsd", "--compilers", "/here/mw"])
-    cmds = ForkProject(tmp_path).setup_commands("abce")
-    assert cmds[0][1:] == ["tools/configure.py", "abce", "--dsd", "/here/dsd", "--compilers", "/here/mw"]
-    assert cmds[1] == ["ninja"]
+        "created": "from scratch", "platform": "win32", "version": "game",
+        "setup": [["python", "tools/configure.py", "game", "--msvc", "/elsewhere/msvc"], ["ninja", "prepare"]]}))
+    monkeypatch.setattr(scratch_pe, "tool_args", lambda: ["--msvc", "/here/msvc", "--wibo", "/here/wibo"])
+    cmds = ForkProject(tmp_path).setup_commands("game")
+    assert cmds[0][1:] == ["tools/configure.py", "game", "--msvc", "/here/msvc", "--wibo", "/here/wibo"]
+    assert cmds[1] == ["ninja", "prepare"]
 
 
 @needs_tools
@@ -430,7 +430,18 @@ def test_a_projects_own_words_on_ai_come_before_forking(tmp_path):
     assert got["error"] is None and set(got["files"]) == {"README.md", ".github/CONTRIBUTING.md"}
     assert got["lines"] == [{"file": ".github/CONTRIBUTING.md", "text": "Pull requests written by AI tools will be closed."}]
     assert got["lean"] == "no"
-    assert policy.check(f"file://{tmp_path}/nothing")["error"].startswith("couldn't read the repository")
+    gone = policy.check(f"file://{tmp_path}/nothing")
+    assert gone["error"] == policy.MISSING_REPO and gone["missing"]
+
+
+def test_git_trouble_reading_a_repository_is_said_in_a_sentence():
+    """A fork of a repository that doesn't exist showed git's "could not read Username for 'https://github.com':
+    terminal prompts disabled": GitHub's answer for a missing repository, which says nothing to most people."""
+    from decompnet.forks import policy
+    github = "Cloning into 'x'...\nfatal: could not read Username for 'https://github.com': terminal prompts disabled\n"
+    assert policy.git_trouble(github) == policy.MISSING_REPO
+    assert "internet connection" in policy.git_trouble("fatal: unable to access 'https://x/': Could not resolve host: x")
+    assert policy.git_trouble("fatal: something odd\n") == "git couldn't read the repository (something odd)."
 
 
 def test_c_code_going_into_a_cpp_file_gets_c_linkage(tmp_path, monkeypatch):

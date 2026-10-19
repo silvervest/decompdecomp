@@ -25,8 +25,6 @@ FUNCTIONS = ["clamp_s32", "abs_s32", "player_take_damage", "rng_next", "count_al
 DEMOS = {
     "n64": (ROOT / "src/decompnet/app/static/demo/demo-quest-64.z64", ROOT / "projects/demo-rom/build/demo-quest-64.elf",
             "gcc-2.7.2-kmc", ROOT / "projects/demo-rom/build.py"),
-    "psx": (ROOT / "projects/demo-psx/build/DEMOQ_PS1.EXE", ROOT / "projects/demo-psx/build/demoq_ps1.elf",
-            "gcc-2.7.2-psx", ROOT / "projects/demo-psx/build.py"),
     "ps2": (ROOT / "projects/demo-ps2/build/SLUS_999.99", ROOT / "projects/demo-ps2/build/demoq_ps2.elf",
             "ee-gcc-2.96", ROOT / "projects/demo-ps2/build.py"),
 }
@@ -73,7 +71,7 @@ def _decompile(tmp: Path, platform: str):
     return net, slug
 
 
-@pytest.mark.parametrize("platform", ["n64", "psx", "ps2"])
+@pytest.mark.parametrize("platform", ["n64", "ps2"])
 def test_export_rebuilds_the_game(tmp_path, platform):
     if not _ready(platform):
         pytest.skip(f"needs the {platform} toolchain and binutils-mips")
@@ -113,3 +111,13 @@ def test_check_records_a_function_written_outside(tmp_path):
     (tree / "src" / "main" / "lerp.c").write_text('#include "common.h"\n\n' + csource.get((GAME / "game.c").read_text(), "lerp"))
     assert py("check", "lerp").returncode == 0
     assert "identical" in py().stdout
+
+
+def test_an_agents_own_include_of_context_h_names_the_exports_header():
+    """#4: the judge offers the shared header as context.h; the export calls it common.h, so a matched function that
+    included context.h itself didn't build in the export."""
+    from decompnet.rom.export import exported_source
+
+    text = exported_source("", "common_ovl.h", '#include "context.h"\n\nint f(void) { return 1; }')
+    assert text == '#include "common_ovl.h"\n\n#include "common_ovl.h"\n\nint f(void) { return 1; }\n'
+    assert "context.h" not in exported_source("", "common.h", '  # include "context.h"\nint g;')

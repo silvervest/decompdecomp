@@ -15,6 +15,7 @@ The engine is one class, RomNetwork, put together from a module per topic:
 - importing.py: importing a game
 - judging.py: the judge, claims and attempts
 - briefs.py: what agents read about a function
+- layouts.py: struct layouts guessed from the code (guess_struct, and the brief's lines on them)
 - compilers.py: which compiler builds which part of a game, suggestions, the compiler map
 - editing.py: changing the project (names, the header, notes, splits, function ends)
 - rooms.py: rooms (collab.py), the engine's side
@@ -26,18 +27,19 @@ from __future__ import annotations
 
 from .autopilot import AutopilotMixin
 from .briefs import BriefMixin
-from .common import COMPILERS, MW_VERSIONS, PLATFORM_STATUS, SHORT_NAMES, TOOLS, parse_ranges
+from .common import COMPILERS, TOOLS, parse_ranges
 from .compilers import CompilerMixin
 from .core import Core
 from .editing import EditMixin
 from .gui import GuiMixin
 from .importing import ImportMixin
 from .judging import JudgeMixin
+from .layouts import LayoutMixin
 from .rooms import RoomMixin
 
-__all__ = ["RomNetwork", "COMPILERS", "MW_VERSIONS", "PLATFORM_STATUS", "SHORT_NAMES", "TOOLS", "parse_ranges"]
+__all__ = ["RomNetwork", "COMPILERS", "TOOLS", "parse_ranges"]
 
 
-class RomNetwork(ImportMixin, JudgeMixin, BriefMixin, CompilerMixin, EditMixin, RoomMixin, GuiMixin, AutopilotMixin,
-                 Core):
+class RomNetwork(ImportMixin, JudgeMixin, BriefMixin, LayoutMixin, CompilerMixin, EditMixin, RoomMixin, GuiMixin,
+                 AutopilotMixin, Core):
     """A ROM project engine: Network's claims, attempts and notes, for games split from their ROM (see above)."""

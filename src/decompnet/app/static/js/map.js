@@ -36,56 +36,41 @@ function renderMapView() {
   const has = S.map.some((f) => f.cc);
   $("mapView").hidden = !has;
   if (!has) S.mapView = "progress";
-  $("mapView").querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.view === S.mapView));
+  $("mapView").querySelectorAll("button").forEach((b) => { b.classList.toggle("on", b.dataset.view === S.mapView); b.setAttribute("aria-checked", b.dataset.view === S.mapView); });
   const note = $("mapCompilerNote");  // (compilerNote is the import screen's)
   if (S.mapView !== "compiler") { $("mapLegend").innerHTML = PROGRESS_LEGEND; note.hidden = true; return; }
   const kinds = compilerKinds();
   $("mapLegend").innerHTML = kinds.map(([k, n]) => `<span><i class="sw" data-cc="${ccIndex.get(k)}"></i>${esc(k)} (${n.toLocaleString()})</span>`).join("");
   // the page's CSP refuses inline style attributes: the swatches get their colour through the DOM
   $("mapLegend").querySelectorAll("[data-cc]").forEach((sw) => { sw.style.background = `var(${CC_COLORS[sw.dataset.cc]})`; });
+  // the colours only: the answer and the app's checking are Settings → Compiler
   const odd = S.map.filter((f) => f.ccx).length;
-  const sv = S.survey || {}, run = sv.survey && sv.survey.state === "running";
-  setHtml(note, `${odd ? `${odd.toLocaleString()} ringed functions look built by another compiler than today's.` : "The code agrees with the compilers the game builds it with today."} `
-    + (run ? `The judge's survey is running: ${sv.survey.tried} tried, ${sv.survey.confirmed} confirmed.`
-       : `${sv.tried ? `The judge's survey: ${sv.confirmed} confirmed in ${sv.tried} functions tried.` : "The judge's survey builds agents' C with each compiler the project uses: what matches becomes a suggestion."}`
-          + ` <button class="ghost small-btn" type="button" id="surveyBtn">${sv.tried ? "Survey again" : "Run the survey"}</button>`)
-    + rangeChecksLine(sv.checks || []));
+  setHtml(note, `Each square in the colour of the compiler its code looks like. ${odd ? `${odd.toLocaleString()} ringed ${odd === 1 ? "one looks" : "ones look"} built by another compiler than the one used for ${odd === 1 ? "it" : "them"} today.` : "The code agrees with the compilers used for it today."}`
+    + ` <a class="link" href="#/p/${esc(S.slug)}/settings">The compiler answer</a>`);
   note.hidden = false;
-  const btn = $("surveyBtn");
-  if (btn) btn.onclick = async () => {
-    try { S.survey = await api("/api/compilermap", { method: "POST", body: { slug: S.slug } }); } catch (e) { toast(esc(e.message), "err"); return; }
-    renderMapView(); watchSurvey();
-  };
-  const audit = $("auditBtn");
-  if (audit) audit.onclick = async () => {
-    try { S.survey = await api("/api/compilermap", { method: "POST", body: { slug: S.slug, audit: true } }); } catch (e) { toast(esc(e.message), "err"); return; }
-    toast("Checking the applied ranges against their neighbours", "match");
-    setTimeout(watchSurvey, 3000);
-  };
 }
 
-/* Range checks: a suggested range is tested on its neighbours before it applies; applied ones can be looked at again. */
-function rangeChecksLine(checks) {
-  const n = (st, audit) => checks.filter((c) => c.audit === audit && (Array.isArray(st) ? st.includes(c.status) : c.status === st)).length;
-  const parts = [];
-  if (checks.some((c) => !c.audit)) parts.push(`suggested ranges: ${n(["checking", "waiting"], false)} being checked, ${n("confirmed", false)} confirmed, ${n("quirk", false)} quirks`);
-  if (checks.some((c) => c.audit)) parts.push(`applied ranges: ${n("confirmed", true)} confirmed, ${n("quirk", true)} look like quirks, ${n(["checking", "waiting"], true)} unsettled`);
-  return `<button class="ghost small-btn" type="button" id="auditBtn">Check the applied ranges</button>${parts.length ? "<br>Range checks: " + parts.join("; ") + "." : ""}`;
+/* The compiler map's colours come in a request of their own, after the map is drawn: after a match the compiler map
+   is built again, and the ROM map waited for it (GTA San Andreas: 710-800 ms). */
+async function loadMapColumns(slug) {
+  let data;
+  try { data = await api(`/api/mapcolumns?slug=${slug}`); } catch { return; }
+  if (slug !== S.slug || !data.rows.length) return;
+  const col = Object.fromEntries(data.keys.map((k, i) => [k, i]));
+  const at = new Map(S.map.map((f, i) => [f.vram, i]));
+  for (const r of data.rows) {
+    const i = at.get(r[col.vram]);
+    if (i != null) { S.map[i].cc = r[col.cc]; S.map[i].ccx = r[col.ccx]; }
+  }
+  renderMapView();
+  if (S.mapView === "compiler") { mapChanged(); drawMap(); }
 }
-async function watchSurvey() {
-  const slug = S.slug;
-  try { S.survey = await api(`/api/compilermap?slug=${slug}`); } catch { return; }
-  if (slug !== S.slug) return;
-  if (S.mapView === "compiler") renderMapView();
-  if (S.survey.survey && S.survey.survey.state === "running") setTimeout(watchSurvey, 4000);
-  else if (S.survey.survey && S.survey.survey.state === "done") refreshMap(true);
-}
+
 $("mapView").addEventListener("click", (ev) => {
   const b = ev.target.closest("button[data-view]");
   if (!b) return;
   S.mapView = b.dataset.view;
   renderMapView(); mapChanged(); drawMap();
-  if (S.mapView === "compiler") watchSurvey();
 });
 const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
 const rgb = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;

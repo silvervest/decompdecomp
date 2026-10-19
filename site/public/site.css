@@ -123,17 +123,16 @@ h1 {
 .check-head h2 { font-size: var(--typography-h2-size); line-height: var(--typography-h2-lh); }
 @media (min-width: 905px) { .check-head { max-width: none; grid-template-columns: 1fr 2fr; align-items: baseline; } }
 .platforms { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-10); }
-.platforms label, .os label { position: relative; }
-.platforms input, .os input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
-.platforms span, .os span {
+.platforms label { position: relative; }
+.platforms input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.platforms span {
   display: inline-flex; align-items: center; min-height: var(--size-control-md); padding: 0 var(--space-6);
   border: var(--border-width-hairline) solid var(--color-border-strong); border-radius: var(--radius-control);
   font-weight: 600; font-size: var(--typography-label-size); transition: background var(--duration-fast) var(--ease-standard);
 }
-.platforms label:hover span, .os label:hover span { background: var(--color-action-secondary); }
-.platforms input:checked + span, .os input:checked + span { background: var(--color-mark-fill); color: var(--color-mark-text); border-color: var(--color-text-primary); }
-.platforms input:focus-visible + span, .os input:focus-visible + span { outline: var(--border-width-strong) solid var(--color-focus); outline-offset: var(--space-1); }
-.os small { font-weight: 400; margin-left: var(--space-3); color: inherit; opacity: 0.8; }
+.platforms label:hover span { background: var(--color-action-secondary); }
+.platforms input:checked + span { background: var(--color-mark-fill); color: var(--color-mark-text); border-color: var(--color-text-primary); }
+.platforms input:focus-visible + span { outline: var(--border-width-strong) solid var(--color-focus); outline-offset: var(--space-1); }
 
 .answer { display: block; margin-top: var(--space-8); font-size: var(--typography-body-lg-size); font-weight: 650; }
 .answer::before { content: "→ "; }
@@ -184,10 +183,7 @@ h1 {
 .js .pipeline.on .stations li:nth-child(4) { animation-delay: 120ms; }
 .js .pipeline.on .stations li:nth-child(5) { animation-delay: 160ms; }
 @keyframes rise { from { opacity: 0; transform: translateY(var(--space-3)); } }
-.tell { margin-top: var(--space-11); max-width: 44rem; }
-.tell-label, .step-n { font-family: var(--typography-code-family); font-size: var(--typography-caption-size); letter-spacing: 0.06em; text-transform: uppercase; color: var(--color-text-secondary); margin-bottom: var(--space-4); }
-.tell-line { display: flex; align-items: center; gap: var(--space-5); padding: var(--space-4) var(--space-4) var(--space-4) var(--space-6); border: var(--border-width-strong) solid var(--color-text-primary); border-radius: var(--radius-card); }
-.tell-line code { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: var(--typography-body-size); font-weight: 600; }
+.step-n { font-family: var(--typography-code-family); font-size: var(--typography-caption-size); letter-spacing: 0.06em; text-transform: uppercase; color: var(--color-text-secondary); margin-bottom: var(--space-4); }
 .fineprint { margin-top: var(--space-9); font-size: var(--typography-body-sm-size); color: var(--color-text-secondary); max-width: 70ch; }
 
 /* ---------------------------------------------------------------- 3 · proof */
@@ -227,8 +223,6 @@ h1 {
 .start h2 { font-size: var(--typography-display-size); line-height: var(--typography-display-lh); font-stretch: 125%; font-weight: 800; }
 .steps { display: grid; gap: var(--space-11); margin-top: var(--space-11); }
 .step { display: grid; gap: var(--space-5); align-content: start; }
-.os { display: flex; gap: var(--space-3); }
-.js .cmd[data-os]:not(.on) { display: none; }
 .step-note { font-size: var(--typography-body-sm-size); color: var(--color-text-secondary); }
 .step-note code { font-size: 0.95em; }
 @media (min-width: 905px) { .steps { grid-template-columns: 1fr 1fr; gap: var(--space-11); } }
@@ -254,7 +248,7 @@ h1 {
 }
 @media print { .top nav, .platforms, .copy { display: none; } }
 /* grid items may shrink below their longest line of code (pre and code scroll inside instead) */
-.claim-side, .check-head > *, .proof > *, .listing > *, .steps > *, .step > *, .yours-list > *, .tell > * { min-width: 0; }
+.claim-side, .check-head > *, .proof > *, .listing > *, .steps > *, .step > *, .yours-list > * { min-width: 0; }
 
 /* the rail runs across on wide screens (after the base rule, so it wins) */
 @media (min-width: 905px) {

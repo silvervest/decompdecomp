@@ -8,6 +8,7 @@ import json
 import re
 import time
 
+from ... import arch
 from ...network import Agent, NetworkError
 from ...rom import split
 from ...rom.symbols import IDENT, Symbol, SymbolTable
@@ -38,8 +39,6 @@ class EditMixin:
         syms = self.symbols(proj["id"])
         if not IDENT.match(new_name) or new_name in syms.by_name:
             raise NetworkError(f"`{new_name}` is not a free C identifier")
-        if self.cfg(proj).get("platform") == "gba":
-            return self._split_gba(agent, proj, fn, addr, new_name, syms)
         head, tail = self._cut(proj, fn, addr, new_name, syms, agent.id, "split", f"{fn['name']} / {new_name}")
         return (f"✅ split: {fn['name']} is now {len(head.lines)} instructions; {new_name} at 0x{addr:08X} has "
                 f"{len(tail.lines)}. Continue with {fn['name']} (get_function shows its new assembly).")
@@ -83,8 +82,8 @@ class EditMixin:
             raise NetworkError("in a team room the host's project decides where functions end: tell the host (add_note)")
         fn = self._function(function, slug)
         proj = self._project(slug)
-        if self.cfg(proj).get("platform") == "gba" or (proj["arch"] or "mips") != "mips":
-            raise NetworkError("boundary reports are for MIPS games (N64, PlayStation, PlayStation 2) for now")
+        if arch.BOUNDARIES not in self.console(proj).features:
+            raise NetworkError(f"boundary reports are for MIPS games (N64, PlayStation 2) for now, not {self.console(proj).name}")
         if fn["status"] == "matched":
             raise NetworkError(f"{fn['name']} is matched: its boundaries are proven")
         m = _ADDRESS.match(str(end).strip())
@@ -126,65 +125,6 @@ class EditMixin:
         self._update_cfg(slug, lambda cfg: next(r for r in cfg["boundaries"] if r["id"] == rid).__setitem__(
             "status", "applied" if apply else "dismissed"))
 
-    def _split_gba(self, agent: Agent, proj, fn, addr: int, new_name: str, syms: SymbolTable) -> str:
-        """Cut a GBA function's bytes and assembly in two at `addr` (Thumb: a halfword boundary)."""
-        off = addr - fn["vram"]
-        if off >= fn["size"] and off % 2 == 0:  # code after the function that nobody found yet: make it a function
-            return self._add_gba_function(agent, proj, fn, addr, new_name, syms)
-        if off <= 0 or off >= fn["size"] or off % 2:
-            raise NetworkError(f"0x{addr:08X} isn't inside {fn['name']} (0x{fn['vram']:08X}, {fn['size']} bytes)")
-        head, tail = fn["target"][:off], fn["target"][off:]
-        cut = re.search(rf"^(?:_|\.L){addr:08X}:|^\t(?:thumb|arm)_func_start \w*{addr:08X}\b", fn["asm"], re.M)
-        asm_head, asm_tail = ((fn["asm"][:cut.start()], fn["asm"][cut.start():]) if cut else
-                              (fn["asm"], f"\tthumb_func_start {new_name}\n@ split from {fn['name']}: see its assembly\n"))
-        refs = json.loads(fn["relocs"])
-        refs_head = [r for r in refs if r[0] < off]
-        refs_tail = [[r[0] - off, r[1], r[2]] for r in refs if r[0] >= off]
-        syms.add(Symbol(new_name, addr, len(tail), "func"))
-        with self.store.tx() as db:
-            db.execute("UPDATE functions SET size=?, n_insns=?, target=?, relocs=?, asm=?, seed=NULL, best_score=NULL "
-                       "WHERE id=?", (len(head), max(1, len(head) // 2), head, json.dumps(refs_head), asm_head, fn["id"]))
-            db.execute("INSERT INTO functions(project_id,name,size,n_insns,target,relocs,asm,seed,unit,vram,rom_offset) "
-                       "VALUES(?,?,?,?,?,?,?,?,?,?,?)", (proj["id"], new_name, len(tail), max(1, len(tail) // 2), tail,
-                                                        json.dumps(refs_tail), asm_tail, None, fn["unit"], addr,
-                                                        fn["rom_offset"] + off))
-            db.execute("UPDATE symbols SET size=? WHERE project_id=? AND name=?", (len(head), proj["id"], fn["name"]))
-            db.execute("INSERT OR REPLACE INTO symbols(project_id,name,address,size,kind) VALUES(?,?,?,?,?)",
-                       (proj["id"], new_name, addr, len(tail), "func"))
-            self._event(db, proj["id"], agent.id, "split", f"{fn['name']} / {new_name}")
-        self._xrefs.pop(proj["id"], None)
-        self._ops.pop(proj["id"], None)
-        return (f"✅ split: {fn['name']} is now {len(head)} bytes; {new_name} at 0x{addr:08X} has {len(tail)}. "
-                f"Continue with {fn['name']} (get_function shows its new assembly).")
-
-    def _add_gba_function(self, agent: Agent, proj, prev, addr: int, new_name: str, syms: SymbolTable) -> str:
-        from ...rom import gba, gba_candidates
-
-        nxt = self.store.one("SELECT vram FROM functions WHERE project_id=? AND vram>? ORDER BY vram LIMIT 1",
-                             proj["id"], prev["vram"])
-        rom, _ = self._rom(proj)
-        off, limit = addr - gba.BASE, (nxt["vram"] - gba.BASE) if nxt else len(rom)
-        if not off < limit or not gba_candidates.plausible_function(rom, off):
-            raise NetworkError(f"0x{addr:08X} doesn't look like the start of a function")
-        literals = gba_candidates.literal_words(rom, [addr])
-        end = min(next(gba_candidates.bodies(rom, [addr], literals))[1], limit)
-        while end + 4 <= limit and end in literals:
-            end += 4
-        code = rom[off:end]
-        syms.add(Symbol(new_name, addr, len(code), "func"))
-        with self.store.tx() as db:
-            db.execute("INSERT INTO functions(project_id,name,size,n_insns,target,relocs,asm,seed,unit,vram,rom_offset) "
-                       "VALUES(?,?,?,?,?,?,?,?,?,?,?)", (proj["id"], new_name, len(code), max(1, len(code) // 2), code,
-                                                        json.dumps(gba._refs(code, addr, literals, off)),
-                                                        f"\tthumb_func_start {new_name}\n@ found by an agent after {prev['name']}\n",
-                                                        None, prev["unit"], addr, off))
-            db.execute("INSERT OR REPLACE INTO symbols(project_id,name,address,size,kind) VALUES(?,?,?,?,?)",
-                       (proj["id"], new_name, addr, len(code), "func"))
-            self._event(db, proj["id"], agent.id, "split", f"{prev['name']} / {new_name}")
-        self._xrefs.pop(proj["id"], None)
-        self._ops.pop(proj["id"], None)
-        return f"✅ new function {new_name} at 0x{addr:08X}, {len(code)} bytes."
-
     def rename_symbol(self, agent: Agent, project: str | None, old: str, new: str, message: str = "") -> str:
         self._rom_only(project, "rename_symbol")
         proj = self._project(project)
@@ -196,33 +136,47 @@ class EditMixin:
             if text.startswith("✅"):
                 link.sync()
             return text
-        old, new = old.strip(), new.strip()
-        if not (IDENT.match(old) and IDENT.match(new)):
-            raise NetworkError("old and new must be C identifiers")
+        return self.rename_symbols(agent, project, [(old, new)], message)
+
+    def rename_symbols(self, agent: Agent, project: str | None, pairs: list[tuple[str, str]], message: str = "") -> str:
+        """Rename several symbols at once (old -> new): the shared headers, matched sources and best attempts
+        change together, after one check that every matched function still matches. One rename is the agents'
+        rename_symbol; many at once are the PS2 kernel stubs named at import (consoles/ps2/syscalls.py)."""
+        proj = self._project(project)
+        pairs = [(old.strip(), new.strip()) for old, new in pairs]
+        if not pairs:
+            return "nothing to rename"
         syms = self.symbols(proj["id"])
-        addr = syms.resolve(old)
-        if addr is None:
-            raise NetworkError(f"`{old}` is not a symbol of this ROM: use a name from the assembly (func_/D_...) "
-                               f"or one given earlier")
-        taken = syms.resolve(new)
-        if taken is not None and taken != addr:
-            raise NetworkError(f"`{new}` already names 0x{taken:08X}")
-        word = re.compile(rf"\b{re.escape(old)}\b")
         trial = SymbolTable([Symbol(s.name, s.address, s.size, s.kind) for s in syms.by_name.values()])
-        if old in trial.by_name:
-            trial.rename(old, new)
-        else:
-            fnrow = self.store.one("SELECT size FROM functions WHERE project_id=? AND vram=?", proj["id"], addr)
-            current, _ = syms.name_at(addr)
-            base = syms.by_name.get(current) if current != f"D_{addr:08X}" else None
-            trial.add(Symbol(new, addr, fnrow["size"] if fnrow else (base.size if base and base.address == addr else 0),
-                             "func" if fnrow else (base.kind if base else "data")))
+        addresses = {}
+        for old, new in pairs:
+            if not (IDENT.match(old) and IDENT.match(new)):
+                raise NetworkError("old and new must be C identifiers")
+            addr = syms.resolve(old)
+            if addr is None:
+                raise NetworkError(f"`{old}` is not a symbol of this ROM: use a name from the assembly (func_/D_...) "
+                                   f"or one given earlier")
+            taken = trial.resolve(new)
+            if taken is not None and taken != addr:
+                raise NetworkError(f"`{new}` already names 0x{taken:08X}")
+            addresses[old] = addr
+            if old in trial.by_name:
+                trial.rename(old, new)
+            else:
+                fnrow = self.store.one("SELECT size FROM functions WHERE project_id=? AND vram=?", proj["id"], addr)
+                current, _ = syms.name_at(addr)
+                base = syms.by_name.get(current) if current != f"D_{addr:08X}" else None
+                trial.add(Symbol(new, addr, fnrow["size"] if fnrow else (base.size if base and base.address == addr else 0),
+                                 "func" if fnrow else (base.kind if base else "data")))
+        new_of = dict(pairs)
+        word = re.compile(r"\b(" + "|".join(re.escape(old) for old in new_of) + r")\b")
+        swap = lambda text: word.sub(lambda m: new_of[m.group(1)], text)
         units = self._unit_contexts(proj["id"])
         current_ctx = {u: self._context(proj["id"], u) for u in ({""} | units)}
-        changed = {u: word.sub(new, c["header"]) for u, c in current_ctx.items() if word.search(c["header"])}
+        changed = {u: swap(c["header"]) for u, c in current_ctx.items() if word.search(c["header"])}
         matched = self.store.all("SELECT * FROM functions WHERE project_id=? AND status='matched'", proj["id"])
-        rewritten = {r["id"]: word.sub(new, r["matched_source"]) for r in matched}
-        renamed_rows = [dict(r) | {"name": new if r["name"] == old else r["name"]} for r in matched]
+        rewritten = {r["id"]: swap(r["matched_source"]) for r in matched}
+        renamed_rows = [dict(r) | {"name": new_of.get(r["name"], r["name"])} for r in matched]
         header_for = lambda fn: changed.get(self._effective_unit(fn, units),
                                             current_ctx[self._effective_unit(fn, units)]["header"])
         self._sym_override[proj["id"]] = trial
@@ -233,13 +187,15 @@ class EditMixin:
         if broken:
             listing = "\n".join(f"- {n}: {why}" for n, why in broken[:10])
             return f"❌ REJECTED: renaming breaks {len(broken)} matched function(s).\n{listing}"
-        msg = message.strip() or f"rename {old} -> {new}"
+        msg = message.strip() or ", ".join(f"rename {old} -> {new}" for old, new in pairs[:3]) + (" ..." if len(pairs) > 3 else "")
         with self.store.tx() as db:
-            if db.execute("UPDATE symbols SET name=? WHERE project_id=? AND name=?", (new, proj["id"], old)).rowcount == 0:
-                s = trial.by_name[new]
-                db.execute("INSERT OR REPLACE INTO symbols(project_id,name,address,size,kind) VALUES(?,?,?,?,?)",
-                           (proj["id"], new, s.address, s.size, s.kind))
-            db.execute("UPDATE functions SET name=? WHERE project_id=? AND (name=? OR vram=?)", (new, proj["id"], old, addr))
+            for old, new in pairs:
+                addr = addresses[old]
+                if db.execute("UPDATE symbols SET name=? WHERE project_id=? AND name=?", (new, proj["id"], old)).rowcount == 0:
+                    s = trial.by_name[new]
+                    db.execute("INSERT OR REPLACE INTO symbols(project_id,name,address,size,kind) VALUES(?,?,?,?,?)",
+                               (proj["id"], new, s.address, s.size, s.kind))
+                db.execute("UPDATE functions SET name=? WHERE project_id=? AND (name=? OR vram=?)", (new, proj["id"], old, addr))
             for u, header in changed.items():
                 version = self._next_version(db, proj["id"])
                 db.execute("INSERT INTO context_versions(project_id,version,header,agent_id,message,created_at,unit) "
@@ -248,10 +204,14 @@ class EditMixin:
                 db.execute("UPDATE functions SET matched_source=?, best_source=? WHERE id=?", (src, src, fid))
             for r in db.execute("SELECT id, best_source FROM functions WHERE project_id=? AND status='open' "
                                 "AND best_source IS NOT NULL", (proj["id"],)).fetchall():
-                db.execute("UPDATE functions SET best_source=? WHERE id=?", (word.sub(new, r["best_source"]), r["id"]))
-            self._event(db, proj["id"], agent.id, "rename", f"{old} → {new}")
+                db.execute("UPDATE functions SET best_source=? WHERE id=?", (swap(r["best_source"]), r["id"]))
+            self._event(db, proj["id"], agent.id, "rename", msg if len(pairs) > 1 else f"{pairs[0][0]} → {pairs[0][1]}")
         self._syms.pop(proj["id"], None)
-        return f"✅ 0x{addr:08X} is now `{new}` (was `{old}`); {len(rewritten)} matched sources updated, all still match."
+        if len(pairs) == 1:
+            (old, new), = pairs
+            return (f"✅ 0x{addresses[old]:08X} is now `{new}` (was `{old}`); {len(rewritten)} matched sources updated, "
+                    f"all still match.")
+        return f"✅ renamed {len(pairs)} symbols; {len(rewritten)} matched sources updated, all still match."
 
     def edit_context(self, agent: Agent, project: str | None, old: str, new: str, message: str,
                      function: str | None = None) -> str:

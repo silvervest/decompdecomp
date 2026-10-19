@@ -2,33 +2,59 @@
 
 These are the house rules. Read them once before your first change; they apply to people and agents alike.
 [AGENTS.md](../AGENTS.md) is the short version agents read on every task, and [CONTRIBUTING.md](../CONTRIBUTING.md)
-says how to send a change. Examples point at real code (`file:line` was right when this was written; search for the
-name if a line moved).
+says how to send a change. Examples point at real code by file and name: search for the name to find it.
 
 ## 1. Where code goes
 
 | You want to change | Look in |
 | :-- | :-- |
-| Importing a game from scratch, ROM mode (N64, PS1, PS2, GBA) | `rom/` (splat, spimdisasm, luvdis), `app/engine/importing.py` |
-| Importing a game from scratch, fork mode (GameCube, Wii, DS, PC) | `forks/scratch_dtk.py`, `forks/scratch_dsd.py`, `forks/scratch_pe.py` |
+| Anything about one console (its files, compilers, flags, guides, importer) | `consoles/<id>/` (`n64`, `ps2`, `gc_wii`, `pc`): its `__init__.py` lists its files |
+| What every console has to say, and the list of consoles | `consoles/__init__.py`, the connector |
+| What depends only on the processor (relocations, disassembly, hand-written assembly) | `arch/<processor>.py` |
+| Importing a game from scratch, ROM mode (N64, PS2) | `rom/split.py` (splat), `app/engine/importing.py`; the console reads its file |
+| Importing a game from scratch, PROJECT mode (GameCube, Wii, PC) | the console's `scratch.py`, opened by `app/forkengine.py` |
 | Forking a public decomp | `forks/` (`project.py` detects and builds a project), `app/forkengine.py` |
-| The judge | ROM mode: `rom/match.py` (MIPS), `rom/match_arm.py` (ARM). Fork mode: objdiff, run from `forks/project.py` |
-| A tool agents call | the MCP definition and the `HANDLERS` table in `app/tools.py`, the API agents' schema in `app/agents.py` (`api_tool_schemas`), the work in `app/engine/<topic>.py` (ROM) or `app/forkengine.py` (forks) |
+| The judge | ROM mode: `rom/match.py` (MIPS). Fork mode: objdiff, run from `forks/project.py` |
+| A tool agents call | the MCP definition and the `HANDLERS` table in `app/tools.py`, the API agents' schema in `agents/api.py` (`api_tool_schemas`), the work in `app/engine/<topic>.py` (ROM) or `app/forkengine.py` (forks) |
 | What agents read about a function | `app/engine/briefs.py` |
 | Claims, attempts, the judge's bookkeeping | `app/engine/judging.py`, under it `network.py` |
 | Compilers, ranges, suggestions | `app/engine/compilers.py`; the compiler map `compilermap.py`; range checks `app/rangecheck.py` |
+<<<<<<< HEAD
 | C++ classes found in the code | `classes.py` (MIPS); `forks/methods.py` (x86: structs, classes, member functions) |
 | Free matches | twins `app/twins.py`, autopilot `app/engine/autopilot.py`, the permuter `app/permute.py` |
+=======
+| C++ classes found in the code | `classes.py` |
+| Struct layouts guessed from the code | `structs.py` (the types), `arch/mips_fields.py` (MIPS's reader), `app/engine/layouts.py` (`guess_struct`, the brief's lines) |
+| Free matches | twins `app/twins.py` (also across your games), autopilot `app/engine/autopilot.py`, the permuter `app/permute.py` (and its generator `permuter_gen.py`, run in decomp-permuter's environment; `permuter.py` the simple rewrites without it) |
+| Machine drafts | `seeds.py` (m2c, and C++ methods), drafted in the background by `app/drafts.py`; forks: `forks/drafts.py` |
+| Polishing matched code (names, types, comments that still match) | `app/readable.py` |
+| What agents learn, shared once two models agree | `app/knowledge.py` |
+| Saving a ROM project as plain files, and restoring one | `app/saves.py` |
+| Helper agents: starting and restarting them, their records | `app/agents.py`; their prompt: `WORK_PROMPT` in `app/tools.py` |
+| One agent (its command line, reading what it prints, its models; the API helper's own loop) | `agents/<id>.py`: `claude`, `codex`, `antigravity`, `opencode`, `api` |
+| What every agent has to say, and the list of agents | `agents/__init__.py`, the connector |
+| Look-alikes (`find_similar`) | `similarity.py` |
+>>>>>>> upstream/main
 | Decompiling together | `app/collab.py`, `app/engine/rooms.py`, `app/routes/rooms.py` |
-| The GUI's API | `app/routes/<part>.py` (`app/routes/__init__.py` lists the parts) |
-| The GUI | `app/static/`: `index.html`, `app.css`, and `js/` (nine plain scripts loaded in order, one per part of the GUI; `js/base.js` lists them; no build step) |
-| Know-how agents read | `app/guide/*.md`, served by the `guide(topic)` tool |
+| The GUI's API | `app/routes/<part>.py` (`app/routes/__init__.py` lists the parts); what they share `app/support.py` (jobs, settings) |
+| The GUI | `app/static/`: `index.html`, `app.css`, and `js/` (nine plain scripts loaded in order, one per part of the GUI; `js/base.js` lists them; no build step). The notification centre is in `js/sidebar.js` |
+| Know-how agents read | `app/guide/*.md` (shared), `consoles/<id>/guides/*.md` (one console's), served by `guide(topic)` |
 | Compilers and tools themselves | `toolchains.toml` (pinned, with checksums), `toolchains.py` |
-| The app's window, tray, updates | `app/window.py`, `app/tray.py`, `app/updates.py` |
+| The app's window, tray, updates | `app/window.py` + `app/gtkwindow.py`, `app/tray.py`, `app/updates.py`; dev or release: `app/edition.py`; the `decomp` command `app/cli.py`; the apps-menu entry `app/launcher.py`; what the first start removes from older versions `app/cleanup.py` |
 
-A new platform needs: an importer, a judge path, entries in `PLATFORM_COMPILERS` and `PLATFORM_STATUS`
-(`app/engine/common.py:68`, `:20`), a homemade demo game in `projects/demo-*`, and a column in the table "What works
-where" in [ROADMAP.md](../ROADMAP.md). Every new feature adds its row or its ticks to that table.
+A console's code stays in its folder and reaches the rest of the app only through the connector: the engine,
+briefs, twins, the agents' tools and prompts, the export and the GUI ask `consoles.get(platform)`, never `if
+platform == "ps2"`. A new console is a new folder (copy `consoles/template/`), a demo game in `projects/demo-*`
+whose build writes `build/demo.json`, an entry in the list in `consoles/__init__.py`, a passing
+`tests/test_consoles.py`, and a column in the table "What works where" in [ROADMAP.md](../ROADMAP.md).
+CONTRIBUTING.md, "Consoles", has the steps, and the steps for adding a compiler to a console. Every new feature
+adds its row or its ticks to that table.
+
+Agents work the same way. One agent's code stays in its module in `agents/`, and the rest of the app (the helpers'
+manager in `app/agents.py`, the routes, the GUI) asks `agents.get(kind)` for a fact or a part, never `if kind ==
+"opencode"`. The GUI gets the facts it shows agents by from the server (`uses_endpoints`, `takes_effort`). A new
+agent is a new module (copy `agents/template.py`), an entry in the list in `agents/__init__.py`, and a passing
+`tests/test_agent_kinds.py`. CONTRIBUTING.md, "Adding an agent", has the steps.
 
 A new feature that touches the engine keeps its logic in a module of its own and adds small hooks to the engine
 (see `app/rangecheck.py` and where `self.rangechecks` is used). That keeps the engine's modules readable and makes
@@ -38,13 +64,17 @@ the feature easy to move.
 
 - The project is **decompdecomp** in everything users read. Internal names stay as decomp.wtf left them, because
   existing installs depend on them: the `decomp` command, the `decompnet` package, `~/Decomp`, `.decomp.wtf.json`,
-  `.decomp-wtf/`, the `decomp-wtf` branch and WSL distribution. The decomp.wtf domain isn't ours: nothing points at it.
+  `.decomp-wtf/`, the `decomp-wtf` branch. The decomp.wtf domain isn't ours: nothing points at it.
 - Python: `snake_case` for functions and variables, `CapWords` for classes, `UPPER_CASE` for module constants
-  (`SHORT_NAMES`, `RANGE_PROOF_BYTES`), a leading underscore for what's private to its module or class. The engine's
+  (`STALL_BUDGET`, `MAX_FLAG_VARIANTS`), a leading underscore for what's private to its module or class. The engine's
   parts are `<Topic>Mixin` classes.
 - Names use the domain's words: `claim`, `attempt`, `target`, `twin`, `range`, `brief`, `judge`. Not the
   implementation's (`process_item`, `handle_data`).
 - Tests are named as a sentence of behaviour: `test_an_install_from_main_updates_on_releases_only`.
+
+- Named values, not bare ones: no single letters outside tiny loops, no bare hex or magic numbers in logic. Name a
+  value once and use the name (`VTABLE_HEADER_BYTES = 8`, `CHECK_SECONDS = 20`). People and agents both read this
+  code; a name says what a value means.
 
 ## 3. Comments and docstrings
 
@@ -70,7 +100,7 @@ def try_compiler(self, agent, slug, function, compiler, flags="", source=""):
 
 - **Errors** are `NetworkError` (ROM mode and shared code) or `ForkError` (fork mode) with a sentence the reader can
   act on: what's wrong, and what to do. `raise NetworkError("say which compiler built those ranges (compiler=...)")`
-  (`app/engine/compilers.py:240`). Never a bare exception's text, never a stack trace in a message.
+  (`suggest` in `app/engine/compilers.py`). Never a bare exception's text, never a stack trace in a message.
 - **Tool results** are plain text written for an LLM to act on: what happened, then what to do next.
 - **GUI text** is short and plain, without jargon the user didn't bring.
 - **Docs** (README, GUIDE, the guides for agents) use simplified English: short sentences, one instruction per
@@ -87,14 +117,14 @@ def try_compiler(self, agent, slug, function, compiler, flags="", source=""):
       logging.getLogger("decompdecomp").exception("the compiler map failed")
   ```
 
-- Background jobs always end, with done or with an error that says why (`app/support.py:70`, `Jobs`).
+- Background jobs always end, with done or with an error that says why (`Jobs` in `app/support.py`).
 
 ## 6. External tools and safety
 
 - Compilers and tools come only from the pinned toolchains (`toolchains.toml`), never from PATH.
 - Proprietary compilers are installed only after the user accepts their licence in the app.
 - Heavy tools run through `limits.capped(argv)` (a memory cap) and with a timeout.
-- Agents may edit only source and header files: `EDITABLE` and `FORBIDDEN_PARTS` in `forks/project.py:39`.
+- Agents may edit only source and header files: `EDITABLE` and `FORBIDDEN_PARTS` in `forks/project.py`.
 - The judge is never weakened. A match is byte-identical after linking (ROM mode) or objdiff 100% (fork mode).
   decompdecomp never accepts code that "does the same thing".
 - No game data anywhere in the repository, the tests, issues or screenshots: no ROMs, discs, executables, extracted
@@ -105,15 +135,15 @@ def try_compiler(self, agent, slug, function, compiler, flags="", source=""):
 - No new dependency for a few lines of code. capstone, pyelftools, httpx and rabbitizer are already there.
 - A new runtime dependency needs a reason in its commit message.
 - Development tools (pytest, ruff) go in the `dev` dependency group, never in the runtime dependencies.
-- No JavaScript build step: the GUI is plain files the browser loads.
+- No JavaScript build step: the GUI is plain files the app's window loads.
 
 ## 8. Concurrency
 
 - The server is async (Starlette under the MCP server). Blocking work in a route goes through `await call(fn)`, which
-  runs it in a thread (`app/routes/life.py:29`). Never block inside an `async def`.
+  runs it in a thread (`call` in `app/server.py`). Never block inside an `async def`.
 - Long work is a background job the GUI follows (`Jobs.start`), or a thread with its own state dictionary (autopilot,
   the compiler survey, range checks).
-- Where two threads write the same state, a `threading.Lock` guards it (`app/rangecheck.py:86`).
+- Where two threads write the same state, a `threading.Lock` guards it (`RangeChecks` in `app/rangecheck.py`).
 
 ## 9. Tests
 
@@ -124,17 +154,18 @@ def try_compiler(self, agent, slug, function, compiler, flags="", source=""):
 - Homemade games and objects live in `projects/demo-*` and are built by their own scripts. Small hand-assembled
   machine code in a test is fine (`tests/test_classes.py`, `tests/test_compilermap.py`).
 - Code that's hard to set up gets a small stand-in for what it uses (`FakeNet` in `tests/test_rangecheck.py`).
-- Tests never reach the user's own app: `tests/conftest.py` sets a throwaway `DECOMP_HOME`, `BROWSER=true` and
-  `DECOMP_TRAY=0`, and stops the apps the tests started.
+- Tests never reach the user's own app: `tests/conftest.py` sets a throwaway `DECOMP_HOME`, `DECOMP_WINDOW=0` and
+  `DECOMP_TRAY=0`. Agent CLIs are always stubbed: listing Antigravity's models starts the MCP servers in its settings.
 
 ## 10. Never disturb the user's own decompdecomp
 
 People working on decompdecomp usually have it running too, with agents working in it. A test or an experiment must
 not touch it.
 
-- A newer `decomp` that finds an older app running quits it and takes its place (`app/cli.py`). So never run the
-  checkout's `decomp` or `decomp mcp` against your real `~/Decomp`: give it a throwaway home,
-  `DECOMP_HOME=<scratch> BROWSER=true DECOMP_TRAY=0 uv run decomp ...`.
+- A checkout is a separate app, "decompdecomp dev" (`app/edition.py`): its own home `~/Decomp-dev`, port 6474 and
+  window class. A newer `decomp` that finds an older one running in the same home quits it and takes its place
+  (`app/cli.py`), so never point a checkout at your real `~/Decomp`. For an experiment, use a throwaway home:
+  `DECOMP_HOME=<scratch> DECOMP_TRAY=0 uv run decomp`, with a PATH without agent CLIs.
 - If your app runs from the checkout's `.venv`, run the tests in another environment, so uv doesn't rebuild the one
   your app uses: `UV_PROJECT_ENVIRONMENT=<scratch venv> uv run pytest -q`.
 - To try a change on a real project, use a copy: `sqlite3 "file:$HOME/Decomp/.decomp/decomp.db?mode=ro" ".backup
@@ -145,10 +176,11 @@ not touch it.
 
 - Work on `main`, or on a branch for something big. `main` is what users update from.
 - A commit's subject says what users (or contributors) get, in one sentence. The body says why.
-- A release bumps the version in five places together: `pyproject.toml`, `src/decompnet/__init__.py`,
-  `site/public/install.sh`, `site/public/install.ps1`, `uv.lock`. Its commit reads
+- A release bumps the version in four places together: `pyproject.toml`, `src/decompnet/__init__.py`,
+  `site/public/install.sh`, `uv.lock`. Its commit reads
   `decompdecomp X.Y.Z: <what users get>`. Pre-releases are `X.Y.Z-alpha` (then `-beta`, `-rc`).
-- A release is a `vX.Y.Z` tag. `.github/workflows/release.yml` builds the `.deb` and the AppImage and attaches them.
+- A release is a `vX.Y.Z` tag. `.github/workflows/release.yml` builds the `.deb`, the `.rpm` and the AppImage and
+  attaches them.
 
 ## 12. Linting
 

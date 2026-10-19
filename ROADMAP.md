@@ -9,8 +9,10 @@ Want to work on one? Open an issue first, so two people don't build the same thi
 ## What works where
 
 Each feature and the platforms it covers today. A — is a gap: pick one up (the notes under the table say where to
-start). Keep this table true when a feature ships or reaches another platform.
+start). Keep this table true when a feature ships or reaches another platform. Each column's code is its console's
+folder, `src/decompnet/consoles/<id>/`; a new console adds a column (CONTRIBUTING.md, "Consoles").
 
+<<<<<<< HEAD
 | Feature | N64 | PS1 | PS2 | GBA | GameCube · Wii | DS | Windows PC | Xbox | Public decomps |
 | :-- | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
 | Start from your own copy | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ XBE or disc, your own XDK | fork by address |
@@ -67,26 +69,107 @@ Where to start on a gap:
   to open at the next attempt in the file. Each function now counts once, and delink.py refers to the definition.
   With matches kept, twins and the permuter give free matches on an XDK test program.
 
+=======
+| Feature | N64 | PS2 | GameCube · Wii | Windows PC | Public decomps |
+| :-- | :-: | :-: | :-: | :-: | :-: |
+| Status | recommended | beta | beta | beta | the project's own |
+| Start from your own copy | ✓ | ✓ | ✓ | ✓ | fork by address |
+| Judge | link · compare | link · compare | objdiff | objdiff | objdiff |
+| Machine drafts (m2c, Ghidra for x86) | ✓ | ✓ | ✓ | ✓ Ghidra | by architecture |
+| Autopilot: free matches from drafts | ✓ | ✓ | ✓ | — | — |
+| Drafts follow the header, made in the background; `redraft` | ✓ | ✓ | — | — | — |
+| C++ methods drafted as `Class::method` | ✓ | ✓ | — | — | — |
+| Twins: free matches from identical code | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Permuter on near misses | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Hand-written assembly set aside | ✓ | ✓ | ✓ | — | MIPS, PowerPC |
+| Kernel stubs set aside and named | — | ✓ | — | — | — |
+| Function-end reports (`report_boundary`) | ✓ | ✓ | — | — | — |
+| Compiler ranges and suggestions | ✓ | ✓ | the project's build | the project's build | the project's build |
+| Flag search (`search_flags`) | ✓ | ✓ | the project's build | the project's build | the project's build |
+| Compiler map and the judge's survey | ✓ | ✓ | — | — | — |
+| Range checks: a range applies after its neighbours confirm it | ✓ | ✓ | — | — | — |
+| C++ classes from the code (`get_class`) | ✓ | ✓ | — | — | — |
+| Struct layouts from loads and stores (`guess_struct`) | ✓ | ✓ | — | — | — |
+| The game's own debug symbols: names, types, prototypes | — | ✓ symbol table, STABS | — | — | — |
+| Twins across your games | ✓ | ✓ | — | — | — |
+| Shared knowledge (two models agree) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Polish matched code (still matching) | ✓ | ✓ | — | — | — |
+| Save and restore (`progress/`, Open a saved project) | ✓ | ✓ | the project's git | the project's git | the project's git |
+| Rebuildable export | ✓ | ✓ | the project | — | the project |
+| Rooms: decompile together | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+Where to start on a gap:
+- **PowerPC (GameCube, Wii) and x86 (PC)**: class recovery and the compiler map work on a project's objects in fork
+  mode, not on a ROM; the readers are the part to write (CodeWarrior's vtable pointer is often not at offset 0).
+- **Windows PC**: autopilot needs drafts that compile (Ghidra's output doesn't, as it is); the export needs a linker
+  story (the project is delinked COFF objects).
+- **Function-end reports** cut MIPS functions (`engine._cut`).
+- **Struct layouts** read MIPS loads and stores (`arch/mips_fields.py`); another processor adds its reader as its
+  `Arch.field_accesses`, and structs.py does the rest. Still open on MIPS: the PS2's fifth to eighth arguments
+  (t0-t3), and a pointer into the middle of a struct handed to a callee (`&this->pos`).
+- **Polish, saves, twins across games** work on ROM projects (`app/readable.py`, `app/saves.py`, `app/twins.py`).
+  A project-mode console's work is its git repository; polishing there needs objdiff to judge a rewrite.
+
+## Recently done
+
+- **A standalone app.** Its own window (GTK and WebKitGTK) and a tray icon, so closing the window doesn't stop
+  helper agents; **Quit** ends everything the app started. Only helpers the app starts work on projects: the old
+  `decomp mcp` bridge is gone, and the first start removes its registrations from your agents. A development copy is
+  a separate app (`~/Decomp-dev`) that never touches the installed one.
+- **Helpers that restart by themselves**, with backoff; on a usage limit they wait until it resets. The API helper
+  (any model with an API key) is the main helper: the app runs its whole loop.
+- **One notification centre** (the bell) for every project, and **Report a problem** on every page.
+- **Save and restore** (ROM projects): the work as plain files in `progress/`, every few minutes; **Open a saved
+  project** rebuilds it on another computer from your own copy, and judges every function again.
+- **Polish matched code** (ROM projects): helpers give matched functions real names, types and a comment; a change
+  counts only when the function still matches. The project shows matched and readable.
+- **Shared knowledge**: what agents learn about a game reaches every agent once helpers of two different models
+  agree on it.
+- **Twins across your games**: code matched in one of your games is tried on the identical functions of the others
+  (libraries, the compiler's runtime). No agent time; nothing leaves your computer.
+- **A real permuter**: decomp-permuter rewrites near misses on the parse tree, weighted per compiler, on spare
+  cores at a low priority. On nine near misses made from the demo ROM's functions it matched all nine, the old
+  regex rewrites five. They stay as the fallback, for C decomp-permuter can't parse.
+- **Better drafts**: m2c drafts every function in the background, from the header declarations its code uses, and
+  again when they change; `redraft` runs m2c with an agent's own declarations; methods of known C++ classes are
+  drafted as `Class::method`. On GTA San Andreas, 37 of 40 sampled drafts read the header (none did before).
+- **Flag search** (`search_flags`, MIPS): each flag of the compiler changed once, up to 12 builds.
+- **PS2 debug symbols** (#3): names and sizes from the symbol table; from STABS the source files as units,
+  prototypes, parameters and locals in the brief, every type and global in the header. Big headers: the brief
+  carries only the declarations the function uses.
+- **PS2 kernel calls named**: the stubs (`addiu v1, N; syscall; jr ra`) get the kernel call's name: 154 in GTA San
+  Andreas, 129 in Ridge Racer V.
+- **Consoles as packages**: one folder per console (`consoles/<id>/`), a template and a conformance test. PS1, GBA
+  and DS are public decomps only now; the git history keeps their code.
+- **Linux packages**: a `.deb`, an `.rpm` and an AppImage with their own Python, built for each release.
+- **Struct layouts from loads and stores** (MIPS: PlayStation 2, N64). Every load and store through a function's
+  pointer arguments, the pointers loaded from them and globals, made into types along the call graph: the brief
+  names each pointer argument's likely fields (offset, width, how many functions agree), `guess_struct` writes the
+  struct as C, says where else the type flows and which name matched code already gives it. Checked against the
+  structs agents gave matched functions on GTA San Andreas: 95% of the offsets it proposes from other functions are
+  right. PowerPC and x86 need their instruction readers (`Arch.field_accesses`).
+>>>>>>> upstream/main
 - **Range checks** (MIPS ROM projects). An agent's "this range was built by another compiler" is a hypothesis: the
   judge tests the functions next to it (their matches, agents' attempts, the survey, habits), and where nothing
   settles it the nearest neighbour goes to an agent as a task. A range applies once a second function matches only
   with its compiler; refuted neighbours on both sides make it a quirk (dismissed, with a note on the function). The
-  applied ranges can be checked again the same way (a report). On GTA San Andreas's 72 ranges: 12 confirmed, about
+  applied ranges are checked again the same way, by themselves. On GTA San Andreas's 72 ranges: 12 confirmed, about
   25 resting on one function, about 36 with no function whose C needs their compiler.
 
-- **Compiler map** (MIPS: PlayStation 2, PlayStation, N64): which compiler built each part of the game. Measured on
+- **Compiler map** (MIPS: PlayStation 2, N64): which compiler built each part of the game. Measured on
   GTA San Andreas, compilers' habits only rule compilers out (-G0 code never reads through `$gp`; its CodeWarrior
   code never uses branch-likely), so what rules a compiler in is the judge: the survey builds agents' C for unmatched
   functions with each compiler the project uses, and C that matches with another compiler (and not today's)
   confirms it. Confirmations spread over their neighbours (one object file is one compiler) up to the furthest
   evidence; a run big enough becomes a suggestion, checked against every matched function. The ROM map shows it
   (Compiler view); agents read it with `compiler_map` and in `get_function`.
-- **C++ classes from the game's code** (MIPS: PlayStation 2, PlayStation, N64). Constructors store their class's
+- **C++ classes from the game's code** (MIPS: PlayStation 2, N64). Constructors store their class's
   vtable into the object; from those stores decompdecomp finds each class, its virtual functions, its base class and
   every field its functions touch (offset, type). Agents read them with `get_class`; `get_function` names the fields
   of `this` a function uses. On GTA San Andreas: 507 classes, and the recovered entity layout (position at +4, matrix
   pointer at +0x14, model index at +0x22) is the one found by hand. Why: functions with virtual calls matched 7% of
   the time against 62% for the rest, because agents guessed the layouts.
+<<<<<<< HEAD
 - **Structs and classes for PC and Xbox** (MSVC, fork mode, `forks/methods.py`). A function that uses `this` (ecx
   under __thiscall; under LTCG the register the convention evidence finds) as the base of field accesses is a member
   function; functions called on one global object, local or returned pointer, passing `this` on, or sitting in a
@@ -98,15 +181,49 @@ Where to start on a gap:
   where free functions taking a pointer in a register look the same.
 - **Linux packages**: a `.deb` and an AppImage with their own Python, built for each release.
 - **Its own window and a tray icon**, so closing the window doesn't stop helper agents.
+=======
+>>>>>>> upstream/main
 
 ## Next
 
-### Twins across your games
+### Windows, in 1.0.4-alpha
 
-Twins already give free matches for code a game has more than once. PlayStation 2 games share RenderWare, Sony's
-libraries and libc, so a library function matched in one of your games should be tried in all your others: a
-fingerprint index shared by your projects, the same trial, the same judge. No agent time; nothing leaves your
-computer.
+Windows isn't supported in 1.0.3: many users come from Windows, so it comes back next. The plan is a hybrid. The
+Linux app runs unchanged in its own WSL 2 distribution: every compiler, the sandbox and the helpers' process groups
+work as on Linux. A small native Windows window program (pywebview on WebView2, `app/winwindow.py`) shows its page.
+It keeps the contract of `gtkwindow.py`: its arguments, the stdin words `present` and `close`, the secret in its
+user agent, the close question to the page. The Linux app starts it through WSL interop. Projects live on WSL's own
+disk: the 32-bit compilers fail on `/mnt/c`, and it's about 7 times slower. Games are read from C: once, at import.
+
+Rejected: WSLg's GTK window (blank windows on some GPUs, no tray, a window that looks like Linux), a native Windows
+app (0.9.x tried it, and most Windows releases broke something only Windows has; KMC GCC and EE-GCC run only on
+Linux anyway), and Docker.
+
+In order:
+1. A spike on a Windows 11 VM: a Linux process starts Windows `python.exe winwindow.py` with pipes and WSLENV, and
+   the window loads 127.0.0.1:<port> from WSL. Find out whether GitHub's windows-latest runner has WSL 2.
+2. `app/winwindow.py`, tested on windows-latest against a stub server.
+3. `hostenv.py` becomes the only place that knows about WSL (detection, C:\ paths, explorer.exe for links and
+   folders, the window's command line), with a test that fails when WSL or win32 appears anywhere else.
+4. The native-Windows leftovers go: `wsl.py`, `CompilerConfig.wsl`, `Toolchain.via_wsl`, the `wsl-x86_64` parts.
+5. `install.ps1` again, from the old one (`git show 6d438ca:site/public/install.ps1`) without the agent connection
+   and the browser: the distribution with systemd, the window program, a WebView2 check, Start menu shortcuts,
+   `decomp.cmd`.
+6. release.yml attaches the window program; the docs, a ROADMAP column "Windows (WSL 2)"; a manual pass on a VM;
+   the tag.
+
+### How much usage each agent has left
+
+A window that shows, for each agent you use, what's left of its limits: the 5-hour and weekly limits of Claude Code
+and Codex, and a monthly limit or the credit left on an API key where the provider says it. Helpers already wait for a
+usage limit to reset; this shows it before they hit it, so you can pick which agents to start.
+
+### Library decomps built locally
+
+Twins across your games already match library code you matched once. The next step: match library decomps and
+libgcc/newlib, built on your computer with the project's compiler (libultra on N64, the PS2 SDK libraries), and try
+them as twins. Library sources are fetched only when you ask, never bundled: SDK code is the console maker's
+copyright.
 
 ### Names from another build you own
 
@@ -132,5 +249,15 @@ An image with % matched, functions and platform, for READMEs and posts. No game 
 
 ## Later
 
-- A tray icon on Windows (decompdecomp runs in WSL there; it needs a small Windows program).
+- **Model routing with early escalation.** Easy functions to cheap models. After about three failed attempts, hand a
+  function to a stronger model or to the permuter. Most matches come at the first attempt.
+- **Better look-alikes.** A second measure (edit distance over opcodes) next to today's, and shared runs of
+  instructions, which find inlined helpers and macros. Needs PowerPC and x86 opcode readers.
+- **Decoders for data formats.** Tools that decode N64 display lists, PS2 GS/VIF packets and GameCube GX command
+  lists for agents.
+- **The permuter's C, tidied.** A matching variant from decomp-permuter can be hard to read; a polishing helper
+  could tidy it, still matching.
+- **Polish in the drafts.** Methods of known classes are drafted as `Class::method` in the brief; the polishing pass
+  doesn't use them yet.
+- A Flatpak on the GNOME runtime.
 - macOS.

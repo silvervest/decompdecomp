@@ -17,30 +17,14 @@ from elftools.elf.elffile import ELFFile
 from elftools.elf.relocation import RelocationSection
 from elftools.elf.sections import SymbolTableSection
 
+from . import arch
+
 # e_machine -> arch key used throughout decompnet
 MACHINES = {"EM_X86_64": "x86_64", "EM_386": "x86", "EM_MIPS": "mips", "EM_PPC": "ppc", "EM_ARM": "arm"}
 
-# (arch, reloc type) -> (byte offset from r_offset, length, big-endian bitmask to clear)
-# Anything not listed masks the 4 bytes at r_offset, which is right for most absolute/PC32 relocs.
-_MASKS: dict[tuple[str, int], tuple[int, int, int]] = {
-    ("x86_64", 1): (0, 8, 0xFFFFFFFFFFFFFFFF),  # R_X86_64_64
-    ("mips", 4): (0, 4, 0x03FFFFFF),  # R_MIPS_26
-    ("mips", 5): (0, 4, 0x0000FFFF),  # R_MIPS_HI16
-    ("mips", 6): (0, 4, 0x0000FFFF),  # R_MIPS_LO16
-    ("mips", 7): (0, 4, 0x0000FFFF),  # R_MIPS_GPREL16
-    ("mips", 21): (0, 4, 0x0000FFFF),  # R_MIPS_GOT16 (IDO -KPIC)
-    ("ppc", 4): (0, 2, 0xFFFF),  # R_PPC_ADDR16_LO
-    ("ppc", 5): (0, 2, 0xFFFF),  # R_PPC_ADDR16_HI
-    ("ppc", 6): (0, 2, 0xFFFF),  # R_PPC_ADDR16_HA
-    ("ppc", 10): (0, 4, 0x03FFFFFC),  # R_PPC_REL24
-    ("ppc", 109): (0, 4, 0x001FFFFF),  # R_PPC_EMB_SDA21
-    ("thumb", 10): (0, 4, 0x07FF07FF),  # R_ARM_THM_CALL (both halves of a Thumb bl)
-    ("thumb", 2): (0, 4, 0xFFFFFFFF),  # R_ARM_ABS32 (a literal-pool word)
-    ("arm", 28): (0, 4, 0x00FFFFFF),  # R_ARM_CALL
-    ("arm", 29): (0, 4, 0x00FFFFFF),  # R_ARM_JUMP24
-    ("arm", 43): (0, 4, 0x000F0FFF),  # R_ARM_MOVW_ABS_NC
-    ("arm", 44): (0, 4, 0x000F0FFF),  # R_ARM_MOVT_ABS
-}
+# (arch, reloc type) -> (byte offset from r_offset, length, big-endian bitmask to clear), from each processor's
+# module in arch/. Anything not listed masks the 4 bytes at r_offset, which is right for most absolute/PC32 relocs.
+MASKS_BY_ARCH: dict[tuple[str, int], tuple[int, int, int]] = arch.reloc_masks()
 
 
 @dataclass(frozen=True)
@@ -81,9 +65,11 @@ class FunctionObj:
 
 
 def mask_relocs(code: bytes, relocs: list[Reloc], arch: str, big_endian: bool) -> bytes:
+    """The code with every relocated field cleared, as the processor's relocation masks say: two builds that differ
+    only in where things were linked compare equal."""
     buf = bytearray(code)
     for r in relocs:
-        delta, length, mask = _MASKS.get((arch, r.type), (0, 4, 0xFFFFFFFF))
+        delta, length, mask = MASKS_BY_ARCH.get((arch, r.type), (0, 4, 0xFFFFFFFF))
         start = r.offset + delta
         if start < 0 or start + length > len(buf):
             continue
@@ -103,7 +89,7 @@ def _arch_of(elf: ELFFile) -> tuple[str, bool]:
 _LOCAL_STATIC = re.compile(r"^(.+)\.\d+$")
 
 
-def _canonical(name: str, bind: str) -> str:
+def canonical_symbol(name: str, bind: str) -> str:
     """GCC names function-local statics `name.N`, where N counts statics earlier in the file, so the same
     variable gets a different N when its function is compiled on its own. Compare them by base name."""
     m = _LOCAL_STATIC.match(name) if bind == "STB_LOCAL" else None
@@ -120,14 +106,14 @@ def _symbol_name(elf: ELFFile, symtab: SymbolTableSection, idx: int) -> tuple[st
             return sec[len(".text.") :], True
         # .rodata.str1.1 / .rodata.cst4 etc. are all "rodata" as far as matching cares
         return ("." + sec.split(".")[1]) if sec.count(".") > 1 else sec, True
-    return _canonical(sym.name, sym["st_info"]["bind"]), False
+    return canonical_symbol(sym.name, sym["st_info"]["bind"]), False
 
 
 def _sext16(v: int) -> int:
     return v - 0x10000 if v & 0x8000 else v
 
 
-def _section_target(arch: str, raw: list[dict], k: int) -> int | None:
+def section_target(arch: str, raw: list[dict], k: int) -> int | None:
     """Offset inside the referenced section that a section-relative relocation points at."""
     r = raw[k]
     if r["rela"]:
@@ -151,7 +137,7 @@ def _section_target(arch: str, raw: list[dict], k: int) -> int | None:
     return None
 
 
-def _symbol_at(symtab: SymbolTableSection, shndx: int, offset: int) -> tuple[str, int] | None:
+def symbol_at(symtab: SymbolTableSection, shndx: int, offset: int) -> tuple[str, int] | None:
     """(name, offset into it) of the named symbol covering `offset` in a section, preferring exact starts,
     global symbols, and functions/objects over plain labels."""
     best = None
@@ -169,7 +155,7 @@ def _symbol_at(symtab: SymbolTableSection, shndx: int, offset: int) -> tuple[str
         kind = {"STT_FUNC": 2, "STT_OBJECT": 1}.get(s["st_info"]["type"], 0)
         rank = (lo == offset, kind, s["st_info"]["bind"] == "STB_GLOBAL")
         if best is None or rank > best[0]:
-            best = (rank, _canonical(s.name, s["st_info"]["bind"]), offset - lo)
+            best = (rank, canonical_symbol(s.name, s["st_info"]["bind"]), offset - lo)
     return (best[1], best[2]) if best else None
 
 
@@ -236,6 +222,8 @@ def list_functions(data: bytes) -> list[str]:
 
 
 def extract_function(data: bytes, name: str) -> FunctionObj | None:
+    """One function of an object file: its code, its relocations (with what each refers to) and the processor; None
+    when the object has no function of that name."""
     elf = ELFFile(BytesIO(data))
     arch, big_endian = _arch_of(elf)
     found = _function_symbols(elf).get(name)
@@ -260,7 +248,7 @@ def extract_function(data: bytes, name: str) -> FunctionObj | None:
                 value = rel["r_addend"]
             else:
                 # REL (MIPS): the addend lives in the masked instruction field itself
-                delta, length, mask = _MASKS.get((arch, rtype), (0, 4, 0xFFFFFFFF))
+                delta, length, mask = MASKS_BY_ARCH.get((arch, rtype), (0, 4, 0xFFFFFFFF))
                 field_at = off - start + delta
                 value = int.from_bytes(code[field_at : field_at + length], "big" if big_endian else "little") & mask
             raw.append({"off": off - start, "type": rtype, "symidx": rel["r_info_sym"], "rela": rel.is_RELA(),
@@ -277,8 +265,8 @@ def extract_function(data: bytes, name: str) -> FunctionObj | None:
             # so a function compiled on its own (which references neighbours by name) can still match.
             addend = 0
             sec_idx = r["symtab"].get_symbol(r["symidx"])["st_shndx"]
-            target = _section_target(arch, raw, k)
-            named = _symbol_at(symtab, sec_idx, target) if target is not None else None
+            target = section_target(arch, raw, k)
+            named = symbol_at(symtab, sec_idx, target) if target is not None else None
             if named:
                 sym_name, residual = named
                 addend = _encode(arch, r, residual)
@@ -294,8 +282,9 @@ def unmangle(data: bytes, known) -> bytes:
     """A compiled object with its C++ names turned back into the game's own, so a function written as a class's
     method (`void CPed::func_00123456(int)`) is judged as, and calls, the game's func_00123456: GCC 2.9x's
     `func_00123456__4CPedi`, GCC 3's `_ZN4CPed13func_00123456Ei`. `known(name)` says whether a name is one of the
-    game's. The new name is shorter, so it's written over the old one in the string table."""
-    if b"__" not in data and b"_Z" not in data:
+    game's. The new name is shorter, so it's written over the old one in the string table. GCC 2.9x's special names
+    (_$_4CPed, a destructor; _vt$4CPed, a vtable) are the game's with _ for $ (consoles/ps2/symtab.py), as long."""
+    if b"__" not in data and b"_Z" not in data and b"$" not in data:
         return data
     elf = ELFFile(BytesIO(data))
     symtab = elf.get_section_by_name(".symtab")
@@ -309,7 +298,9 @@ def unmangle(data: bytes, known) -> bytes:
             continue
         new = None
         m = _GCC2_MANGLED.match(name)
-        if m and known(m.group(1)):
+        if "$" in name and known(name.replace("$", "_")):
+            new = name.replace("$", "_")
+        elif m and known(m.group(1)):
             new = m.group(1)
         elif name.startswith("_Z"):  # <length><identifier>... (the Itanium C++ ABI)
             i = 2

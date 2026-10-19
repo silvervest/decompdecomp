@@ -26,9 +26,10 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 
-from ..elfobj import _MASKS, Reloc, mask_relocs
-from ..handwritten import mips_reason, ppc_reason
+from .. import arch
+from ..elfobj import MASKS_BY_ARCH, Reloc, mask_relocs
 from ..network import NetworkError
+from ..project import compiler_for
 
 log = logging.getLogger("decompdecomp")
 IDENT = re.compile(r"^[A-Za-z_]\w*$")
@@ -38,6 +39,14 @@ _CACHE_VERSION = 2  # of twins.json: 2 added why code is hand-written assembly
 # same source gives the same result): every agent start's pass would otherwise redo hundreds of compiles (Mario
 # Party 6: about 900, 15 minutes beside the agents). After a while it's tried again: a header can have changed.
 MISS_TTL = 24 * 3600
+# Across games, functions this small are the same everywhere (a return, a stub): they match on their own anyway
+ACROSS_MIN_BYTES = 32
+FORK_PRINTS_TTL = 10 * 60  # a fork's target objects are looked at again after this long (they can be rebuilt)
+WHOLE_WORD = (0, 4, 0xFFFFFFFF)  # a relocation of a type MASKS_BY_ARCH doesn't know: its whole word is masked
+LABELS_BACK, LABEL_REACH = 64, 0x10000  # rom_renames looks this many labels down, at most this many bytes below
+SQL_CHUNK = 500  # ids per IN (...): under SQLite's limit of variables in one statement
+WHY_CHARS = 300  # how much of a compiler's message a miss keeps
+UNDECLARED_RETRIES = 4  # names a fork twin's file declares later, declared and built again, at most
 _GENERATED = ("__dt__", "__ct__", "__sinit", "__vt__")  # C++ code the compiler writes: nothing to copy
 
 
@@ -48,12 +57,12 @@ class Print:
     refs: list[str]  # the name each relocation refers to, in order (sections as ".data" etc.)
     size: int
     addrs: list[int] = field(default_factory=list)  # ROM projects: the address each relocation fills in
-    asm: str = ""  # why no compiler makes this code (see handwritten.py), or ""
+    asm: str = ""  # why no compiler makes this code (asm_reason: consoles/, arch/), or ""
 
 
 def _mask(code: bytearray, relocs: list[tuple[int, int]], arch: str, order: str) -> None:
     for off, rtype in relocs:
-        delta, length, mask = _MASKS.get((arch, rtype), _MASKS.get(("thumb", rtype), (0, 4, 0xFFFFFFFF)))
+        delta, length, mask = MASKS_BY_ARCH.get((arch, rtype), MASKS_BY_ARCH.get(("thumb", rtype), WHOLE_WORD))
         at = off + delta
         if at < 0 or at + length > len(code):
             continue
@@ -62,13 +71,14 @@ def _mask(code: bytearray, relocs: list[tuple[int, int]], arch: str, order: str)
 
 
 def _key(code: bytes, layout: list[tuple[int, int]]) -> str:
-    h = hashlib.sha1(code)
-    h.update(repr(layout).encode())
-    return h.hexdigest()
+    digest = hashlib.sha1(code)
+    digest.update(repr(layout).encode())
+    return digest.hexdigest()
 
 
 _DECORATED = re.compile(r"[_@]?((?:func|D)_[0-9A-Fa-f]{8})(?:@\d+)?")
 _COFF_RELOC_BYTES = {0x01: 2, 0x02: 2, 0x06: 4, 0x07: 4, 0x0A: 2, 0x0B: 4, 0x14: 4}  # i386 relocation -> bytes
+COFF_I386_MAGIC = b"\x4c\x01"  # an x86 COFF object's first bytes (IMAGE_FILE_MACHINE_I386)
 
 
 def c_name(symbol: str) -> str:
@@ -124,19 +134,22 @@ def coff_prints(data: bytes) -> dict[str, Print]:
 
 
 def object_prints(data: bytes) -> dict[str, Print]:
-    """Fingerprints of every function an object file defines, by symbol (with, for PowerPC, whether its code is
-    hand-written assembly). x86 COFF objects (PC, Xbox) are read by coff_prints()."""
-    if data[:2] == b"\x4c\x01":
+    """Fingerprints of every function an object file defines, by symbol, with whether its code is hand-written
+    assembly where its processor tells that without its console's facts (PowerPC: arch/). x86 COFF objects (PC,
+    Xbox) are read by coff_prints()."""
+    if data[:2] == COFF_I386_MAGIC:
         return coff_prints(data)
     from elftools.elf.elffile import ELFFile
     from elftools.elf.relocation import RelocationSection
 
     elf = ELFFile(BytesIO(data))
-    arch, order = _MACHINE.get(elf["e_machine"], ("", None))
+    arch_id, order = _MACHINE.get(elf["e_machine"], ("", None))
     order = order or ("little" if elf.little_endian else "big")
     symtab = elf.get_section_by_name(".symtab")
-    if symtab is None or not arch:
+    if symtab is None or not arch_id:
         return {}
+    processor = arch.get(arch_id)
+    reason = processor.asm_reason if not processor.asm_needs_console else None
     by_section: dict[int, list] = defaultdict(list)
     for s in symtab.iter_symbols():
         if s["st_info"]["type"] == "STT_FUNC" and isinstance(s["st_shndx"], int) and s["st_size"] > 0 and s.name:
@@ -159,51 +172,51 @@ def object_prints(data: bytes) -> dict[str, Print]:
                     isinstance(sym["st_shndx"], int) else sym.name
                 rels.append((r["r_offset"], r["r_info_type"], name))
         rels.sort()
-        _mask(code, [(o, t) for o, t, _ in rels], arch, order)
+        _mask(code, [(o, t) for o, t, _ in rels], arch_id, order)
         for s in syms:
-            lo = s["st_value"] & ~1 if arch == "arm" else s["st_value"]
+            lo = s["st_value"] & ~1 if arch_id == "arm" else s["st_value"]  # (bit 0: a Thumb function)
             mine = [(o - lo, t, n) for o, t, n in rels if lo <= o < lo + s["st_size"]]
             out[s.name] = Print(_key(bytes(code[lo:lo + s["st_size"]]), [(o, t) for o, t, _ in mine]),
                                 [n for _, _, n in mine], s["st_size"],
-                                asm=(ppc_reason(raw[lo:lo + s["st_size"]]) or "") if arch == "ppc" else "")
+                                asm=(reason(raw[lo:lo + s["st_size"]], order == "big") or "") if reason else "")
     return out
 
 
 def rom_print(fn, arch: str, big_endian: bool, label) -> Print:
     """Fingerprint of a ROM project's function, from its target bytes and the addresses its relocations fill in."""
     relocs = sorted((int(r[0]), int(r[1]), int(r[2])) for r in json.loads(fn["relocs"] or "[]") if len(r) >= 3)
-    arch = "thumb" if arch == "arm" else arch  # GBA code is Thumb; its references are bl pairs and literal words
     code = mask_relocs(fn["target"] or b"", [Reloc(o, t, "", 0) for o, t, _ in relocs], arch, big_endian)
     return Print(_key(code, [(o, t) for o, t, _ in relocs]), [label(a) for _, _, a in relocs], len(fn["target"] or b""),
                  [a for _, _, a in relocs])
 
 
-def rom_renames(syms, source: str, a: Print, b: Print, a_name: str, b_name: str) -> dict[str, str] | None:
+def rom_renames(syms, source: str, a: Print, b: Print, a_name: str, b_name: str, syms_b=None) -> dict[str, str] | None:
     """renames() for a ROM project, where relocations are addresses: for each address a's code refers to, the
     name a's C writes for it (the nearest symbol at or below it that the C mentions: a struct whose field it is,
-    an array whose element), and for b the same offset from b's address, by its name or its automatic one."""
+    an array whose element), and for b the same offset from b's address, by its name or its automatic one.
+    `syms_b`: b's names when b is in another game (the same address there can be something else)."""
     import bisect
 
     words = set(re.findall(r"\b[A-Za-z_]\w*\b", source))
     out: dict[str, str] = {}
     if a_name != b_name:
         out[a_name] = b_name
-    for x, y in zip(a.addrs, b.addrs):
-        if x == y:
+    for in_a, in_b in zip(a.addrs, b.addrs):
+        if in_a == in_b and syms_b is None:
             continue
-        i = bisect.bisect_right(syms._starts, x) - 1
+        below = bisect.bisect_right(syms.starts, in_a) - 1
         base = None
-        for k in range(i, max(-1, i - 64), -1):  # back to the symbol the C writes (at most 64 labels down)
-            sym = syms.by_addr[syms._starts[k]]
-            if x - sym.address > 0x10000:
+        for k in range(below, max(-1, below - LABELS_BACK), -1):  # back to the symbol the C writes
+            sym = syms.by_addr[syms.starts[k]]
+            if in_a - sym.address > LABEL_REACH:
                 break
             if sym.name in words:
                 base = sym
                 break
         if base is None:
             continue  # the C doesn't name it (a literal, a string it defines): the judge compares the values
-        to = y - (x - base.address)
-        other = syms.by_addr.get(to)
+        to = in_b - (in_a - base.address)
+        other = (syms_b or syms).by_addr.get(to)
         name = other.name if other is not None else f"D_{to:08X}"
         if out.setdefault(base.name, name) != name:
             return None
@@ -235,6 +248,21 @@ def renames(a: Print, b: Print, a_name: str, b_name: str) -> dict[str, str] | No
     return out
 
 
+def _declared(header_a: str, header_b: str, names: dict[str, str], a_name: str) -> str:
+    """What a's header declares for a's names, declared for b's too (`extern Player g_player;` for D_80047000),
+    unless b's header declares them already."""
+    decls = []
+    for old_name, new_name in names.items():
+        if old_name == a_name or re.search(rf"\b{re.escape(new_name)}\b", header_b):
+            continue
+        line = next((ln.strip() for ln in header_a.splitlines() if re.search(rf"\b{re.escape(old_name)}\b", ln)
+                     and ln.strip().endswith(";") and "{" not in ln and not ln.strip().startswith(("#", "//", "/*"))),
+                    None)
+        if line:
+            decls.append(apply(line, {old_name: new_name}))
+    return "\n".join(decls) + ("\n" if decls else "")
+
+
 def apply(source: str, names: dict[str, str]) -> str:
     """Rename identifiers in C source, all at once (so a -> b, b -> c doesn't make a into c)."""
     if not names:
@@ -260,7 +288,7 @@ class Twins:
 
     def __init__(self, net):
         self.net = net
-        self._prints: dict[int, tuple[float, dict[int, Print]]] = {}
+        self._prints: dict[int, tuple[float, tuple | None, dict[int, Print]]] = {}  # (when, ROM layout, prints)
         self._lock = threading.Lock()
         self._queue: dict[int, set[int]] = defaultdict(set)  # project id -> newly matched functions to propagate
         self._busy: set[int] = set()
@@ -270,22 +298,25 @@ class Twins:
     # ------------------------------------------------------------------ fingerprints
 
     def prints(self, proj) -> dict[int, Print]:
-        """function id -> fingerprint, for every function of the project (ROM: from the database; fork: from the
-        target objects, cached in the project's state folder by the objects' modification times)."""
+        """function id -> fingerprint, for every function of the project (ROM: from the database, kept until a split
+        or a cut changes the functions, as they took 0.7 s on GTA San Andreas every 10 minutes; fork: from the target
+        objects, looked at again every 10 minutes and cached in the project's state folder by their modification
+        times)."""
+        fork = self.net.fork_slug(proj["slug"])
+        layout = None if fork else self.net._layout_key(proj)
         with self._lock:
             hit = self._prints.get(proj["id"])
-        if hit and time.time() - hit[0] < 600:
-            return hit[1]
-        prints = self._fork_prints(proj) if self.net.fork_slug(proj["slug"]) else self._rom_prints(proj)
+        if hit and (hit[1] == layout if layout is not None else time.time() - hit[0] < FORK_PRINTS_TTL):
+            return hit[2]
+        prints = self._fork_prints(proj) if fork else self._rom_prints(proj)
         with self._lock:
-            self._prints[proj["id"]] = (time.time(), prints)
+            self._prints[proj["id"]] = (time.time(), layout, prints)
         return prints
 
     def _rom_prints(self, proj) -> dict[int, Print]:
         cfg = self.net.cfg(proj)
         syms = self.net.symbols(proj["id"])
-        arch = "arm" if cfg.get("platform") == "gba" else proj["arch"] or "mips"
-        return {r["id"]: rom_print(r, arch, bool(cfg.get("big_endian", True)), syms.label) for r in self.net.store.all(
+        return {r["id"]: rom_print(r, proj["arch"] or "mips", bool(cfg.get("big_endian", True)), syms.label) for r in self.net.store.all(
             "SELECT id, target, relocs FROM functions WHERE project_id=? AND status!='asm'", proj["id"])}
 
     def _fork_prints(self, proj) -> dict[int, Print]:
@@ -375,25 +406,6 @@ class Twins:
                     return other
         return None
 
-    def group_sizes(self, proj) -> dict[int, int]:
-        """For each unmatched function: how many unmatched functions share its code (itself included). Matching
-        the first of a big group matches the rest for free: those are worth an agent's time first."""
-        prints = self.prints(proj)
-        rows = {r["id"]: r["status"] for r in self.net.store.all(
-            "SELECT id, status FROM functions WHERE project_id=?", proj["id"])}
-        groups: dict[str, list[int]] = defaultdict(list)
-        for fid, p in prints.items():
-            if p.size >= 8:
-                groups[p.key].append(fid)
-        out = {}
-        for members in groups.values():
-            if any(rows.get(f) == "matched" for f in members):
-                continue
-            open_ = [f for f in members if rows.get(f) == "open"]
-            for f in open_:
-                out[f] = len(open_)
-        return out
-
     def update_boosts(self, proj, pending: bool = False) -> int:
         """Store the claim order twins give (functions.boost): for each group of identical unmatched functions, one
         gets the group's size - 1 (matching it matches the others), the others -1. `pending`: a pass is about to
@@ -430,15 +442,15 @@ class Twins:
         return sum(1 for b, _ in updates if b > 0)
 
     def set_aside_asm(self, proj) -> int:
-        """Unmatched functions whose code no compiler makes (see handwritten.py) get status 'asm': out of agents'
+        """Unmatched functions whose code no compiler makes (Console.asm_reason) get status 'asm': out of agents'
         way. Returns how many."""
         if not self.net.fork_slug(proj["slug"]):
             return self._set_aside_rom_asm(proj)
         prints = self.prints(proj)
         found = [fid for fid, p in prints.items() if p.asm]
         n = 0
-        for at in range(0, len(found), 500):
-            chunk = found[at:at + 500]
+        for at in range(0, len(found), SQL_CHUNK):
+            chunk = found[at:at + SQL_CHUNK]
             for r in self.net.store.all(f"SELECT * FROM functions WHERE id IN ({','.join('?' * len(chunk))}) "
                                         "AND status='open'", *chunk):
                 self.net.forks.mark_asm(r, reason=prints[r["id"]].asm)
@@ -446,13 +458,11 @@ class Twins:
         return n
 
     def _set_aside_rom_asm(self, proj) -> int:
-        """ROM projects on MIPS (N64, PlayStation, PlayStation 2): mips_reason on each open function's code."""
-        if (proj["arch"] or "mips") != "mips":
-            return 0
-        platform, big = self.net.cfg(proj).get("platform", ""), bool(proj["big_endian"])
+        """ROM projects: the console's asm_reason on each open function's code."""
+        console = self.net.console(proj)
         marks = []
         for r in self.net.store.all("SELECT id, target, meta FROM functions WHERE project_id=? AND status='open'", proj["id"]):
-            if (why := mips_reason(r["target"] or b"", big, platform)):
+            if (why := console.asm_reason(r["target"] or b"")):
                 marks.append((json.dumps({**json.loads(r["meta"] or "{}"), "asm_code": why}), r["id"]))
         if marks:
             with self.net.store.tx() as db:
@@ -502,6 +512,7 @@ class Twins:
             self.update_boosts(proj, pending=True)
             job.ordered.set()
             self.run(slug, job)
+            job.matched += self.across_games(slug, job)
             self.update_boosts(self.net.project_row(slug))
         finally:
             job.ordered.set()
@@ -527,18 +538,8 @@ class Twins:
         names = rom_renames(self.net.symbols(proj["id"]), source, pa, pb, a["name"], b["name"])
         if names is None:
             return None
-        # what the header declares for a's names, declared for b's too (`extern Player g_player;` for D_80047000)
         header = self.net._context(proj["id"], b["unit"])["header"]
-        decls = []
-        for old_name, new_name in names.items():
-            if old_name == a["name"] or re.search(rf"\b{re.escape(new_name)}\b", header):
-                continue
-            line = next((ln.strip() for ln in header.splitlines() if re.search(rf"\b{re.escape(old_name)}\b", ln)
-                         and ln.strip().endswith(";") and "{" not in ln and not ln.strip().startswith(("#", "//", "/*"))),
-                        None)
-            if line:
-                decls.append(apply(line, {old_name: new_name}))
-        return "\n".join(decls) + ("\n" if decls else "") + apply(source, names)
+        return _declared(header, header, names, a["name"]) + apply(source, names)
 
     @staticmethod
     def _fork_names(pa: Print, pb: Print, a, b) -> dict[str, str] | None:
@@ -585,11 +586,60 @@ class Twins:
             return False
         return bool(source) and self._missed(b_id, source)
 
+    def across_games(self, slug: str, job: Job | None = None) -> int:
+        """Matched code from the user's other games, tried on this game's identical functions: libraries (an SDK's,
+        a compiler's runtime, middleware) come in the same code from one game to the next, built by the same
+        compiler. Same kind of processor, same compiler and flags, code identical once addresses are masked; the
+        names swapped as each game's relocations say; the judge decides. Returns how many matched."""
+        proj = self.net.project_row(slug)
+        if not self.net.is_rom(proj) or slug in self.net.links:
+            return 0
+        cfg = self.net.cfg(proj)
+        mine = self.prints(proj)
+        wanted: dict[str, list[int]] = defaultdict(list)
+        for r in self.net.store.all("SELECT id FROM functions WHERE project_id=? AND status='open'", proj["id"]):
+            p = mine.get(r["id"])
+            if p is not None and not p.asm and p.size >= ACROSS_MIN_BYTES:
+                wanted[p.key].append(r["id"])
+        if not wanted:
+            return 0
+        agent, _ = self.net.local_agent("autopilot")
+        matched = 0
+        for other in self.net.store.all("SELECT * FROM projects WHERE id != ? AND arch=? AND big_endian=?",
+                                        proj["id"], proj["arch"], proj["big_endian"]):
+            if (job is not None and job.stop.is_set()) or not self.net.is_rom(other):
+                continue
+            theirs, other_cfg = self.prints(other), self.net.cfg(other)
+            syms_a, syms_b = self.net.symbols(other["id"]), self.net.symbols(proj["id"])
+            header_a = self.net._context(other["id"])["header"]
+            for a in self.net.store.all("SELECT * FROM functions WHERE project_id=? AND status='matched'", other["id"]):
+                pa = theirs.get(a["id"])
+                for b_id in (wanted.get(pa.key, []) if pa is not None else []):
+                    b = self.net.store.one("SELECT * FROM functions WHERE id=? AND status='open'", b_id)
+                    if b is None or compiler_for(other_cfg, a["vram"]) != compiler_for(cfg, b["vram"]):
+                        continue
+                    names = rom_renames(syms_a, a["matched_source"] or "", pa, mine[b_id], a["name"], b["name"], syms_b)
+                    if names is None or not a["matched_source"]:
+                        continue
+                    header_b = self.net._context(proj["id"], b["unit"])["header"]
+                    source = _declared(header_a, header_b, names, a["name"]) + apply(a["matched_source"], names)
+                    if self._missed(b_id, source):
+                        continue
+                    outcome, why = self._attempt_twin(agent, proj, a, b, source, origin=f" in {other['name']}")
+                    if outcome == "match":
+                        matched += 1
+                        log.info("twins: %s matched from %s in %s", b["name"], a["name"], other["slug"])
+                    elif outcome == "miss":
+                        with self.net.store.tx() as db:
+                            db.execute("INSERT OR REPLACE INTO twin_misses(function_id, source_hash, project_id, at, why) "
+                                       "VALUES(?,?,?,?,?)", (b_id, self._miss_key(source), proj["id"], time.time(), why))
+        return matched
+
     def _try_pair(self, agent, proj, a, b) -> str:
         try:
             source = self.source_for(proj, a, b)
         except (NetworkError, OSError, ValueError) as e:
-            log.info("twins: %s from %s not tried: %s", b["name"], a["name"], str(e)[:300])
+            log.info("twins: %s from %s not tried: %s", b["name"], a["name"], str(e)[:WHY_CHARS])
             return "skip"
         if not source:
             if self.net.fork_slug(proj["slug"]) and self.net.forks.is_asm(proj, a):
@@ -616,11 +666,11 @@ class Twins:
         if res.get("score") is None:
             lines = [ln.strip(" #") for ln in (res.get("text") or "").splitlines()
                      if re.search(r"undefined|undeclared|expected|illegal|redefin|not a |declaration|conversion", ln)]
-            return (lines[0] if lines else "it didn't build")[:300]
-        return (res.get("text") or "").splitlines()[0][:300] if res.get("text") else f"score {res.get('score')}"
+            return (lines[0] if lines else "it didn't build")[:WHY_CHARS]
+        return (res.get("text") or "").splitlines()[0][:WHY_CHARS] if res.get("text") else f"score {res.get('score')}"
 
-    def _attempt_twin(self, agent, proj, a, b, source: str) -> tuple[str, str]:
-        note = f"/* identical to {a['name']} (matched), with its names changed by decompdecomp */\n"
+    def _attempt_twin(self, agent, proj, a, b, source: str, origin: str = "") -> tuple[str, str]:
+        note = f"/* identical to {a['name']}{origin} (matched), with its names changed by decompdecomp */\n"
         try:
             if self.net.fork_slug(proj["slug"]):
                 forks, slug, src, prelude = self.net.forks, proj["slug"], source, ""
@@ -638,7 +688,7 @@ class Twins:
                 # declared as the files declare it, then built again
                 prints, decls = self.prints(proj), []
                 names = self._fork_names(prints[a["id"]], prints[b["id"]], a, b) if a["id"] in prints and b["id"] in prints else None
-                for _ in range(4):
+                for _ in range(UNDECLARED_RETRIES):
                     m = names is not None and res.get("score") is None and \
                         re.search(r"undefined identifier '(\w+)'", res.get("text") or "")
                     if not m:
@@ -652,7 +702,7 @@ class Twins:
             else:
                 res = self.net.try_quietly(agent, proj, b, note + source)
         except NetworkError as e:
-            log.info("twins: %s from %s: %s", b["name"], a["name"], str(e)[:300])
+            log.info("twins: %s from %s: %s", b["name"], a["name"], str(e)[:WHY_CHARS])
             return "skip", ""
         return ("match", "") if res.get("matched") else ("miss", self._why(res))
 

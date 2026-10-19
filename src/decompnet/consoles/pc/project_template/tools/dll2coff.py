@@ -183,6 +183,24 @@ def map_symbols(path: Path) -> dict[str, int]:
     return out
 
 
+def map_objects(path: Path) -> dict[str, str]:
+    """Every symbol of the linker's map -> the object it comes from (the line's last word: `00_unit.obj`)."""
+    out = {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = MAP_LINE.match(line)
+        if m and int(m.group(1), 16):
+            out.setdefault(m.group(3), line.split()[-1])
+    return out
+
+
+def own_symbol(syms: dict[str, int], objects: dict[str, str], name: str, source: Path) -> str | None:
+    """`name` (a unit function's original, decorated name) when the map has it from the unit's own source's object
+    (ltcg.py's 00_<source>.obj), not from a stand-in: the function an annotation means when the definition right
+    after the annotation is something else, such as an inline helper written between the two."""
+    own = f"00_{source.stem.replace('.', '_')}.obj"
+    return name if name in syms and objects.get(name, "").endswith(own) else None
+
+
 def symbol_hint(decl: str) -> str | None:
     """The map symbol substring for a definition line: `bool Car::IsFast(` -> `?IsFast@Car@@` (MSVC mangles A::B::f
     as ?f@B@A@@ and a free function f as ?f@@). Operators, constructors and destructors need an explicit one."""
@@ -547,6 +565,7 @@ def main() -> None:
     unit_of = {fn["addr"]: u for u, fns in info["units"].items() for fn in fns}
     img = Image(Path(dll).read_bytes())
     syms = map_symbols(Path(mapf))
+    objects = map_objects(Path(mapf))
     wanted = names.wanted(info)
     starts = sorted({a for a in syms.values() if img.section(a) is not None})
     by_addr = sorted((a, s) for s, a in syms.items())
@@ -568,6 +587,8 @@ def main() -> None:
                 found[addr] = (m[0], syms[m[0]])
             continue
         sym, why = find_symbol(syms, want)
+        if sym is None:  # `// FUNCTION:`, then a helper inlined into the function, then the function itself
+            sym = own_symbol(syms, objects, fn["name"], sources[0]) if sources else None
         if sym is None:
             problems.append(f"0x{addr:08X} {want} {why}")
         else:

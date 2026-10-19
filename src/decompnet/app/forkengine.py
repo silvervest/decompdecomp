@@ -51,6 +51,14 @@ from ..textedit import replace_once
 
 _REPO = re.compile(r"^(https://(github\.com|gitlab\.com|codeberg\.org|git\.[\w.-]+)/[\w.-]+/[\w.-]+?)(\.git)?/?$")
 # A match has to come from C/C++: no inline assembly, asm functions, asm includes or embedded binaries.
+def _path_glob(glob: str) -> str:
+    """A shell-style pattern an agent wrote, as pathlib takes it: `**` only as a whole path component
+    ("src/**.cpp" -> "src/**/*.cpp", "src**/x.h" -> "src*/**/x.h"; pathlib raised ValueError on those)."""
+    glob = glob.strip().lstrip("/")
+    glob = re.sub(r"(?<=[^/])\*\*", "*/**", glob)
+    return re.sub(r"\*\*(?=[^/])", "**/*", glob)
+
+
 _HARNESS_ENTRY = re.compile(r'^[ \t]*extern[ \t]+"C"[^\n;]*\bHarnessEntry[ \t]*\(', re.M)  # tools/ltcg.py's ENTRY
 _CHEAT = re.compile(r"\b(__asm__|__asm|asm|_asm)\b|INCLUDE_ASM|GLOBAL_ASM|INCLUDE_RODATA|\.incbin|#\s*include\s*[\"<][^\">]*\.(s|S|asm|bin|inc\.c)[\">]")
 
@@ -773,6 +781,11 @@ class ForkEngine:
                         score = old["best_score"] if score is None else min(score, old["best_score"])
                     db.execute("UPDATE functions SET size=?, n_insns=?, status=?, best_score=?, meta=? WHERE id=?",
                                (size, n, status, score, json.dumps(meta), old["id"]))
+                    if old["status"] == "matched" and status != "matched":
+                        self._reopened(db, proj, old, "full report" + (", the unit doesn't build" if uname in broken
+                                                                         else ""), fuzzy,
+                                       held=fuzzy is not None and sym in held.get(uname, ())
+                                       and float(f.get("fuzzy_match_percent") or 0) >= 100)
                     if status == "matched" and old["status"] != "matched":
                         if uname not in texts:
                             try:
@@ -1676,11 +1689,32 @@ class ForkEngine:
         with self.net.store.tx() as db:
             db.execute("UPDATE functions SET meta=? WHERE id=?", (json.dumps(meta), fn["id"]))
 
+    def _reopened(self, db, proj, r, via: str, pct: float | None, held: bool = False) -> None:
+        """Record a matched function going back to open, with what measured it and how (`via`: a unit's diff, the
+        full report...), so a function that keeps flipping shows why in the events."""
+        why = ("matches but is held (its constants or references differ)" if held else
+               "isn't in the build's object" if pct is None else f"{pct:.2f}%")
+        self.net._event(db, proj["id"], None, "reopen", f"{r['name']} ({via}: {why})")
+
+    @staticmethod
+    def _missing_note(unit, fn) -> str:
+        """What to tell an agent whose compile built, but whose unit's object has no such function: what the
+        build said about its address (an LTCG harness's <object>.ltcg.json problems)."""
+        at = f"0x{fn['vram']:08X}" if fn["vram"] else None
+        said = [p for p in objdiff.ltcg_problems(unit.base) if at and at.lower() in p.lower()]
+        note = (f"\n\nNOT IN YOUR BUILD: {unit.name} compiled, but its object doesn't define {fn['name']}, so there "
+                "is nothing to compare yet")
+        if not said:
+            return note + "."
+        return (note + ":\n" + "\n".join(f"- {p}" for p in said[:4]) + "\nIf a helper sits between the function's "
+                "`// FUNCTION:` annotation and its definition, move the helper above the annotation (edit_file).")
+
     def _apply_scores(self, proj, unit: str, scores: dict[str, float | None], skip: int | None = None,
-                      agent: Agent | None = None, text: str | None = None) -> None:
+                      agent: Agent | None = None, text: str | None = None, via: str = "unit diff") -> None:
         """Bring every function of a unit up to date with a fresh diff (cheaper than a full report). A function
         that matches now is a match like any other, whichever change made it: `agent` (whose edit it was) is
-        credited, and `text` (the unit's source) gives the matching code."""
+        credited, and `text` (the unit's source) gives the matching code. `via` says which measure it was, for the
+        reopen events."""
         rows = self.net.store.all("SELECT id, name, status, n_insns, best_score, best_source, meta FROM functions "
                                   "WHERE project_id=? AND unit=?", proj["id"], unit)
         held = self._held(proj, unit, text)
@@ -1696,6 +1730,7 @@ class ForkEngine:
                 elif r["status"] == "matched":  # no longer matches: its best is what it scores now, not 0 (identical)
                     db.execute("UPDATE functions SET status='open', best_score=? WHERE id=?",
                                (None if pct is None else scaled(pct, r["n_insns"]), r["id"]))
+                    self._reopened(db, proj, r, via, pct, held=pct is not None and pct >= 100)
                 elif pct is not None and r["best_score"] == 0:  # reopened before this was fixed: still says identical
                     db.execute("UPDATE functions SET best_score=? WHERE id=?", (scaled(pct, r["n_insns"]), r["id"]))
                 elif pct is not None and not r["best_source"]:
@@ -2160,7 +2195,7 @@ class ForkEngine:
             scores, builds = self._baseline(proj, fp, unit, before)
             held = self._held(proj, unit.name, before)
             if scores is not None:
-                self._apply_scores(proj, unit.name, scores, text=before)
+                self._apply_scores(proj, unit.name, scores, text=before, via="unit diff before a compile")
                 protected = {n for n, pct in scores.items()
                              if n != symbol and n not in held and pct is not None and pct >= 100}
                 was_matched = (scores.get(symbol) or 0) >= 100 and symbol not in held
@@ -2240,7 +2275,8 @@ class ForkEngine:
                 return {"text": f"✅ {fn['name']} still matches; your tidier version is committed.{_renamed_note(d)}",
                         "score": 0, "matched": True}
             self.net._record(fn, agent, score, code, 0, matched=matched)
-            self._apply_scores(proj, fn["unit"], d.unit_scores, skip=fn["id"], agent=agent, text=after)
+            self._apply_scores(proj, fn["unit"], d.unit_scores, skip=fn["id"], agent=agent, text=after,
+                               via=f"unit diff after a compile of {fn['name']}")
             self._remember(proj, fp, unit, d)
             if matched:
                 self._commit(proj, fp, unit.source, f"Match {meta.get('demangled') or symbol}\n\n"
@@ -2253,6 +2289,8 @@ class ForkEngine:
         stall = self.net.stall_note(fn["id"], agent.id)
         found = self._unresolved_lines(fp, meta, fn, unit, code)
         stall = ("\n\n" + "\n".join(found) if found else "") + stall
+        if d.match_percent is None:
+            stall = self._missing_note(unit, fn) + stall
         if d.literals:
             return {"text": f"score {score} (0 = identical). {d.literals_note()}{stall}", "score": score, "matched": False}
         return {"text": f"{percent_text(pct)} match (score {score}; 0 = identical).\n{d.render()}{stall}", "score": score,
@@ -2518,7 +2556,11 @@ class ForkEngine:
             rx = re.compile(re.escape(pattern))
         root = fp.root.resolve()
         if glob:
-            files = sorted(fp.root.glob(glob))
+            glob = _path_glob(glob)
+            try:
+                files = sorted(fp.root.glob(glob))
+            except ValueError as e:
+                raise NetworkError(f"glob {glob!r}: {e} (e.g. src/**/*.cpp, include/*.h)") from None
         else:
             files = sorted(p for ext in ("c", "cc", "cpp", "h", "hpp", "inc") for p in fp.root.rglob(f"*.{ext}"))
         hits = []
@@ -2611,7 +2653,8 @@ class ForkEngine:
             for u in units:
                 if after[u.name] is not None:
                     self._keep_scores(proj, u, updated, after[u.name])
-                    self._apply_scores(proj, u.name, after[u.name], agent=agent, text=updated)
+                    self._apply_scores(proj, u.name, after[u.name], agent=agent, text=updated,
+                                       via=f"unit diff after an edit of {rel}")
             self._commit(proj, fp, rel, f"{message.strip()}\n\nEdited by {agent.name} with decompdecomp.")
             with self.net.store.tx() as db:
                 self.net._event(db, proj["id"], agent.id, "context", f"{rel}: {message.strip()[:120]}")

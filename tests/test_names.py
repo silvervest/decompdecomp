@@ -25,7 +25,13 @@ def net(tmp_path):
                 ("fn_1_8CE4@mdsingdll/REL/mdsingdll/mdsing", "mdsingdll/REL/mdsingdll/mdsing", "open", {"symbol": "fn_1_8CE4"}),
                 ("fn_1_17958", "mdsingdll/REL/mdsingdll/mdsing", "open", {"symbol": "fn_1_17958"}),
                 ("Update__6PlayerFv", "game/player", "open", {"symbol": "Update__6PlayerFv",
-                                                              "demangled": "Player::Update(void)"})]:
+                                                              "demangled": "Player::Update(void)"}),
+                # MSVC: the demangled name starts with the return type and the convention
+                ("?InitBlurView@@YA_NPAUSBlurView@@@Z", "render/blur", "open",
+                 {"symbol": "?InitBlurView@@YA_NPAUSBlurView@@@Z", "demangled": "bool __cdecl InitBlurView(struct SBlurView *)"}),
+                ("?CalcCatchupSpeed@CB3AIDriver@@QAEMM@Z", "ai/driver", "open",
+                 {"symbol": "?CalcCatchupSpeed@CB3AIDriver@@QAEMM@Z",
+                  "demangled": "public: float __thiscall CB3AIDriver::CalcCatchupSpeed(float)"})]:
             db.execute("INSERT INTO functions(project_id,name,size,n_insns,status,unit,meta) VALUES(?,?,?,?,?,?,?)",
                        (pid, name, 40, 10, status, unit, json.dumps(meta)))
     return net
@@ -38,6 +44,10 @@ def test_names_as_agents_write_them(net):
     assert find("fn_1_16F0@mdsing") == "fn_1_16F0@mdsingdll/REL/mdsingdll/mdsing"
     assert find("`fn_1_17958()`") == "fn_1_17958"
     assert find("Player::Update") == "Update__6PlayerFv"
+    # MSVC-decorated names, as agents write them (they got "no function 'InitBlurView'" back)
+    assert find("InitBlurView") == "?InitBlurView@@YA_NPAUSBlurView@@@Z"
+    assert find("CB3AIDriver::CalcCatchupSpeed") == "?CalcCatchupSpeed@CB3AIDriver@@QAEMM@Z"
+    assert find("CalcCatchupSpeed") == "?CalcCatchupSpeed@CB3AIDriver@@QAEMM@Z"
     with pytest.raises(NetworkError) as e:
         find("fn_1_16F0")
     assert "fn_1_16F0@mdsingdll/REL/mdsingdll/mdsing" in str(e.value) and "matrix" in str(e.value)

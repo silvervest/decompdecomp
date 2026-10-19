@@ -156,11 +156,15 @@ def test_a_match_that_is_lost_gets_its_score_back_so_the_queue_doesnt_say_it_is_
         db.execute("INSERT INTO functions(id,project_id,name,size,n_insns,status,best_score,best_source,unit,meta,asm) "
                    "VALUES(2,7,'G',40,10,'open',0,'int G() {}','u','{\"symbol\": \"_G\"}','')")
     eng = ForkEngine.__new__(ForkEngine)
-    eng.net = SimpleNamespace(store=store)
-    eng._apply_scores({"id": 7, "root": str(tmp_path)}, "u", {"_F": 52.7, "_G": 90.0})
+    eng.net = SimpleNamespace(store=store, _event=lambda db, pid, aid, kind, detail: db.execute(
+        "INSERT INTO events(project_id,agent_id,kind,detail,created_at) VALUES(?,?,?,?,0)", (pid, aid, kind, detail)))
+    eng._apply_scores({"id": 7, "root": str(tmp_path)}, "u", {"_F": 52.7, "_G": 90.0}, via="unit diff before a compile")
     rows = {r["name"]: r for r in store.all("SELECT name, status, best_score FROM functions")}
     assert rows["F"]["status"] == "open" and rows["F"]["best_score"] > 0  # reopened now
     assert rows["G"]["best_score"] > 0  # reopened before the fix: mended at the next measurement
+    # and the reopen is in the events, with what measured it and how much it scored
+    events = [(r["kind"], r["detail"]) for r in store.all("SELECT kind, detail FROM events")]
+    assert events == [("reopen", "F (unit diff before a compile: 52.70%)")]
 
 
 def test_briefs_and_standins_say_which_struct_a_function_belongs_to(tmp_path):

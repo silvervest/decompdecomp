@@ -494,12 +494,16 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
         return await run(ctx, "split_file", path=path, at=at, new_name=new_name, data=data)
 
     @mcp.tool(meta=ALWAYS_LOAD)
-    async def standins_for(ctx: Context, what: str) -> str:
+    async def standins_for(ctx: Context, what: str = "", unit: str = "", function: str = "", path: str = "") -> str:
         """Forks only (PC, Xbox; for games built with link-time code generation): starting points for a unit's
         harness, from the original's references: stand-ins for the data and functions it uses from elsewhere
         (each callee with the registers it reads and how it's called), a HarnessEntry calling the unit's functions
         the way the original's callers do, and the declarations its source needs. `what`: a unit, its source file
         or one of its functions. Write them into harness/ with edit_file, then shape them like the real ones."""
+        # agents called it as standins_for(unit=...) / (function=...) and got "rejected arguments: ['what']"
+        what = what or unit or function or path
+        if not what:
+            return "standins_for needs `what`: a unit, its source file or one of its functions"
         return await run(ctx, "standins_for", what=what)
 
     @mcp.prompt(title="Decompile", description="Work loop: claim functions and match them byte for byte.")

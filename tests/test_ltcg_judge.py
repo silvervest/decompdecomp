@@ -217,3 +217,33 @@ def test_two_jump_tables_and_a_byte_table_relocate_each_entry_once():
     offs = [o for o, *_ in fn.relocs]
     assert offs == [3, 10, 17, 0x1A, 0x1E, 0x22, 0x26, 0x2A]  # the tables' addresses, then each entry once
     assert (fn.size, fn.pad) == (0x32, 4)  # the byte table is the function's, the int3s after it aren't
+
+
+def _cut(tmp_path: Path, source: str, obj: str) -> dict:
+    """dll2coff on one function G (`ret`) at 0x11000, ours at 0x10001000 from map object `obj`, the unit's source
+    `source` (u.cpp): its .ltcg.json."""
+    exe = b"\xc3".ljust(0x40, b"\xcc")
+    (tmp_path / "game.bin").write_bytes(exe)
+    units = {"u": [{"name": "?G@@YAXXZ", "addr": 0x11000, "offset": 0, "size": 1, "relocs": []}]}
+    (tmp_path / "functions.json").write_text(json.dumps({"exe": str(tmp_path / "game.bin"),
+                                                         "sha1": hashlib.sha1(exe).hexdigest(), "units": units}))
+    (tmp_path / "u.dll").write_bytes(_pe([(".text", 0x1000, b"\xc3" + b"\xcc" * 4)], []))
+    (tmp_path / "u.map").write_text(" Address         Publics by Value              Rva+Base       Lib:Object\n\n"
+                                    f" 0001:00000000       ?G@@YAXXZ                  10001000 f   {obj}\n")
+    (tmp_path / "u.cpp").write_text(source)
+    out = tmp_path / "u.obj"
+    subprocess.run([sys.executable, str(TOOLS / "dll2coff.py"), str(tmp_path / "functions.json"), "u",
+                    str(tmp_path / "u.dll"), str(tmp_path / "u.map"), str(out), "u.cpp"], check=True, cwd=tmp_path)
+    return json.loads(out.with_suffix(".ltcg.json").read_text())
+
+
+def test_a_helper_between_the_annotation_and_its_function_doesnt_lose_the_function(tmp_path):
+    # `// FUNCTION:`, then an inline helper (inlined, so not in the map), then the function: the annotation named
+    # the helper, the function wasn't cut out, the object only called it, and its diff read 100% against nothing
+    source = ("// FUNCTION: 0x11000\nstatic inline int Tail(int x)\n{\n    return x;\n}\nvoid G()\n{\n}\n")
+    side = _cut(tmp_path, source, "00_u.obj")
+    assert "?G@@YAXXZ" in side["functions"] and side["problems"] == []
+    # the original's name from a stand-in (another object of the harness) isn't the unit's function
+    side = _cut(tmp_path, source, "01_u_standins.obj")
+    assert "?G@@YAXXZ" not in side["functions"]
+    assert side["problems"] == ["0x00011000 ?Tail@@ isn't in the map (not called from the driver, or inlined everywhere)"]

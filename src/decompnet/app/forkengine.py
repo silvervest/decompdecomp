@@ -2187,9 +2187,14 @@ class ForkEngine:
         elif unit is None:
             mode = []
         else:
-            mode = [f"- {unit} isn't in harness mode yet (harness/{unit}.drv.cpp doesn't define HarnessEntry): "
-                    "compiles here are plain, without /GL, so functions with a register convention can't match "
-                    "until the driver exists (standins_for writes a starting point)."]
+            # Burnout 3's voice-chat wrapper (/O2 code the game built without /GL) went from 20 matches to 7 in harness
+            # mode, and agents released its functions as "needs the LTCG harness driver" because this said so
+            mode = [f"- {unit} builds plain, without /GL (harness/{unit}.drv.cpp doesn't define HarnessEntry). That's "
+                    "right for code the game itself built without link-time code generation (a library or C runtime "
+                    "piece, a file built /O2): there VC 7.1 gives a register convention only to a function nobody "
+                    "outside the file calls, so write such a function `static` (no __fastcall) and it gets one; "
+                    "compile it as plain C. Only if this code was built with LTCG (its callers in other files pass it "
+                    "registers) does the unit need a driver first (standins_for writes a starting point)."]
         return ["", "### Calling convention in the original (link-time code generation: the linker picked it for "
                 "its callers; harness/ must call it the same way, standins_for writes a starting point)",
                 *mode, *[f"- {line}" if not line.startswith("  ") else line for line in found]]

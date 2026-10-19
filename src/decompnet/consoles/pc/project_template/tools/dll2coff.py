@@ -407,13 +407,17 @@ def same_constants(fn: dict, exe: bytes, code: bytes, relocs: list) -> tuple[lis
 
 
 def unresolved_as_original(fn: dict, relocs: list, targets: list[tuple[int, int, int]],
-                           image_base: int) -> tuple[list, set[int]]:
+                           image_base: int, headers: int = 1) -> tuple[list, set[int]]:
     """References the harness link left unresolved (/FORCE:UNRESOLVED puts them at the DLL's image base: functions
     of the unit nobody has written yet, or what only they call), written as the original's reference at the same
-    place. They can't be checked, so the mapping and data checks leave them out (as the LTCG harness does), and
-    the function lists them (`unresolved`). Returns (relocations, their offsets)."""
+    place. A field of an unresolved global (`D_x.y`, `D_x[2]`) lands past the base by its offset, inside the DLL's
+    headers (`headers`: where its first section starts), where nothing of ours is: two such fields at the same offset
+    of two globals would otherwise read as one of ours mapped to two of the original's. They can't be checked, so
+    the mapping and data checks leave them out (as the LTCG harness does), and the function lists them
+    (`unresolved`). Whether one changes the code around it is another matter: the brief and compile_and_diff say
+    which can (callees the original passes registers or inlines). Returns (relocations, their offsets)."""
     orig = {off: (rtype, name, addend) for off, rtype, name, addend in fn["relocs"]}
-    wild = {off for off, _, value in targets if value == image_base}
+    wild = {off for off, _, value in targets if image_base <= value < image_base + max(1, headers)}
     out = []
     for r in relocs:
         off, rtype = r[0], r[1]
@@ -634,6 +638,7 @@ def main() -> None:
         return None if raw is None else struct.unpack("<I", raw)[0]
 
     folded = vtable_fold(original_vtables(Path(config)), set(unit_of), word, name_of)
+    headers = min((s[1] for s in img.sections), default=img.base + 0x1000) - img.base  # where nothing of ours is
     cuts, report = [], {"unit": unit, "dll": dll, "functions": {}, "problems": problems}
     for addr in sorted(found):
         sym, start = found[addr]
@@ -644,7 +649,7 @@ def main() -> None:
         relocs, constants = same_constants(fn, exe, code, relocs)
         relocs = in_original_terms(md, code[:code_end(md, img, start, end) - start], start, fn, exe, relocs,
                                    annotated)
-        relocs, wild = unresolved_as_original(fn, relocs, targets, img.base)
+        relocs, wild = unresolved_as_original(fn, relocs, targets, img.base, headers)
         cuts.append({"name": fn["name"], "addr": addr, "offset": img.offset(start), "size": end - start,
                      "relocs": relocs})
         known = [t for t in targets if t[0] not in wild]
@@ -659,8 +664,13 @@ def main() -> None:
         found_unresolved = sorted(set(UNRESOLVED.findall(log.read_text(encoding="utf-8", errors="replace"))))
         if found_unresolved:
             report["unresolved"] = found_unresolved
-            print(f"{unit}: not built yet, so the harness link left them unresolved (write them in the unit, or stand "
-                  f"them in in harness/{unit}.<name>.cpp): {', '.join(found_unresolved[:12])}")
+            print(f"{unit}: nothing in the harness link defines these yet, so it left them unresolved: "
+                  f"{', '.join(found_unresolved[:12])}{' ...' if len(found_unresolved) > 12 else ''}. The judge writes "
+                  "the original's reference in their place and leaves them out of the address checks, so data (globals, "
+                  "pool constants) and callees the original calls with a standard convention are harmless: no reason "
+                  "to stop. Only a callee the original passes arguments in registers (LTCG) or inlines changes the "
+                  "code that uses it, until a definition is in the link (in the unit, or a stand-in shaped like the "
+                  f"original's in harness/{unit}.<name>.cpp); the brief and compile_and_diff say which those are.")
     data = delink.coff(cuts, img.data)
     path = Path(out)
     path.parent.mkdir(parents=True, exist_ok=True)

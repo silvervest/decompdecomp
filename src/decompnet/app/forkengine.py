@@ -43,6 +43,7 @@ def _path_glob(glob: str) -> str:
     return re.sub(r"\*\*(?=[^/])", "**/*", glob)
 
 
+_HARNESS_ENTRY = re.compile(r'^[ \t]*extern[ \t]+"C"[^\n;]*\bHarnessEntry[ \t]*\(', re.M)  # tools/ltcg.py's ENTRY
 _CHEAT = re.compile(r"\b(__asm__|__asm|asm|_asm)\b|INCLUDE_ASM|GLOBAL_ASM|INCLUDE_RODATA|\.incbin|#\s*include\s*[\"<][^\">]*\.(s|S|asm|bin|inc\.c)[\">]")
 
 
@@ -1931,9 +1932,28 @@ class ForkEngine:
             found.insert(1, f"`this` arrives in {g.methods[addr]}: it's the base of the fields this function uses, "
                             f"so it looks like a member function of {g.keyword} {g.name} (below); declare it as one "
                             f"and the linker still passes `this` there")
+        unit = fn["unit"] if "unit" in fn.keys() else None
+        driver = fp.root / "harness" / f"{unit}.drv.cpp" if unit else None
+        try:
+            harnessed = driver is not None and bool(_HARNESS_ENTRY.search(driver.read_text(errors="replace",
+                                                                                         encoding="utf-8")))
+        except OSError:
+            harnessed = False
+        if harnessed:  # agents released these unworked, taking the convention for a reason a compile can't match
+            mode = [f"- Your compile already goes through the harness: {unit} is built with /GL and linked with "
+                    f"/LTCG with harness/{unit}.drv.cpp, whose calls make the linker pick these registers. Write the "
+                    "function as ordinary C/C++ (a normal member function for `this`, normal parameters) and "
+                    "compile it: the convention is not a reason to release it. If what differs is the convention "
+                    "itself, make the driver's call (or a stand-in) look like the original's call site below."]
+        elif unit is None:
+            mode = []
+        else:
+            mode = [f"- {unit} isn't in harness mode yet (harness/{unit}.drv.cpp doesn't define HarnessEntry): "
+                    "compiles here are plain, without /GL, so functions with a register convention can't match "
+                    "until the driver exists (standins_for writes a starting point)."]
         return ["", "### Calling convention in the original (link-time code generation: the linker picked it for "
                 "its callers; harness/ must call it the same way, standins_for writes a starting point)",
-                *[f"- {line}" if not line.startswith("  ") else line for line in found]]
+                *mode, *[f"- {line}" if not line.startswith("  ") else line for line in found]]
 
     @staticmethod
     def _objects(fp: ForkProject):

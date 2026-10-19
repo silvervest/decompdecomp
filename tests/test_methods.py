@@ -151,6 +151,13 @@ def test_briefs_and_standins_say_which_struct_a_function_belongs_to(tmp_path):
     fp = SimpleNamespace(root=root, manifest=manifest)
     conv = "\n".join(ForkEngine._convention_brief(fp, {"symbol": "_Add2"}, {"name": "Add2"}))
     assert "`this` arrives in esi: it's the base of the fields this function uses" in conv
+    # whether the agent's compile goes through the harness (agents released LTCG functions untried, as "plain")
+    unit_fn = {"name": "Add2", "unit": "u"}
+    assert "isn't in harness mode yet" in "\n".join(ForkEngine._convention_brief(fp, {"symbol": "_Add2"}, unit_fn))
+    (root / "harness").mkdir()
+    (root / "harness" / "u.drv.cpp").write_text('extern "C" __declspec(dllexport) void HarnessEntry(void) {}\n')
+    assert "Your compile already goes through the harness" in "\n".join(
+        ForkEngine._convention_brief(fp, {"symbol": "_Add2"}, unit_fn))
     brief = "\n".join(ForkEngine._method_brief(fp, {"symbol": "_Add2"}, {"name": "Add2"}))
     assert "### Looks like a member function of struct" in brief
     assert ForkEngine._method_brief(SimpleNamespace(root=root, manifest={**manifest, "platform": "gc"}),

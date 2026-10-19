@@ -48,8 +48,13 @@ Link-time code generation (LTCG)
   without the usual prologue for their argument count.
 - The import tells from the program (its log and `.decomp.wtf.json`'s `ltcg_detected` say why); the user can
   also choose (the import's LTCG setting, or `DECOMP_XBOX_LTCG=1/0`).
-- Plain compiles can't match those functions. In a project made without the LTCG mode, note it ("LTCG register
-  convention") and release it.
+- In a project made without the LTCG mode (its `.decomp.wtf.json` has no `"ltcg": true`), plain compiles can't
+  match those functions: note it ("LTCG register convention") and release it. Only there.
+- In an LTCG project, a unit whose driver defines HarnessEntry (the brief says so) is always compiled with /GL and
+  linked with /LTCG through its harness: your compile_and_diff goes through it, and the linker picks the registers
+  from the driver's calls. Write ordinary C/C++ (a normal member function, normal parameters) and compile. A
+  register convention is never a reason to release such a function untried: when the convention itself differs,
+  fix the driver's call or a stand-in so it looks like the original's call site.
 - In an LTCG project (its `.decomp.wtf.json` says `"ltcg": true`), the brief shows each function's convention in
   the original: the registers it reads before writing (its register parameters), its stack arguments, `ret N`, the
   registers it saves, and a few call sites with what they load just before the call.

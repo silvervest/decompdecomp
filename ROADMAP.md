@@ -51,6 +51,17 @@ Where to start on a gap:
 
 ## Recently done
 
+- **Agents try before they release, and say what a function waits for.** On a real LTCG Xbox game agents released
+  functions seconds after claiming them, untried (12,565 releases, median 5 s), reading the harness link's
+  unresolved names as a to-do. Measured on demo_ltcg, each reference left unresolved and then defined: data and
+  callees with a standard convention change nothing (the judge writes the original's references in their place);
+  callees the original passes registers or inlines do (RunAccum 83% -> match with two stand-ins), and library
+  code must stay unresolved (sprintf stood in: 100% -> 89%). Briefs and compile_and_diff now split a function's
+  unresolved names into those (`forks/unresolved.py`), and a field of an unresolved global no longer reads as an
+  address conflict. release_function answers a release before compile_and_diff's move-on rule once with what to
+  do; a release without a compile doesn't count against the session; `needs=<function>` records a prerequisite:
+  the function waits (claimed last), the one it needs goes first and is handed over, and the match brings the
+  waiting one back first. Notes saying "already matched" on a function that doesn't match are marked out of date.
 - **Matches stay matched on PC and Xbox.** A free function that another function of its file calls was listed twice
   by objdiff (the delinked original carried an undefined copy of its name), and the unscored copy set the match back
   to open at the next attempt in the file. Each function now counts once, and delink.py refers to the definition.

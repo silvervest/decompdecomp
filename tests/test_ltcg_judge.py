@@ -131,6 +131,18 @@ def test_references_the_link_left_unresolved_are_the_originals_and_unchecked(tmp
     assert report["unresolved"] == ["?func_00011100@@YAXXZ", "_func_00011130@8"]
 
 
+def test_unresolved_references_with_an_offset_are_unresolved_too(tmp_path):
+    # mov eax, [A+4]; mov ecx, [B+4] with neither global defined yet: /FORCE:UNRESOLVED puts both at the image base,
+    # so both read BASE+4. Read as an address of ours, one of ours paired with two of the original's (a conflict
+    # for a function written right); they are the original's references, unchecked, like those at the base itself
+    orig = bytes.fromhex("a1 04f20100" "8b0d 04300200" "c3")
+    ours = bytes.fromhex("a1 04000010" "8b0d 04000010" "c3")
+    relocs = [[1, DIR32, "_D_0001F200", 4], [7, DIR32, "_D_00023000", 4]]
+    got, side = _judge(tmp_path, orig, relocs, ours, [0x1001, 0x1007], [])
+    assert side["conflicts"] == [] and side["unpaired"] == [] and side["unresolved"] == ["+0x1", "+0x7"]
+    assert [(o, n, a) for o, n, _, a in got] == [(1, "_D_0001F200", 4), (7, "_D_00023000", 4)]
+
+
 def test_the_harness_link_goes_on_when_only_symbols_are_unresolved(tmp_path):
     ltcg_tool = _tool("ltcg")
     assert "/FORCE:UNRESOLVED" in ltcg_tool.LINK_FLAGS

@@ -41,10 +41,11 @@ from ..forks import (
     scratch_pe,
     scratch_xbe,
     standins,
+    unresolved,
 )
 from ..forks.objdiff import MappingConflict, ObjdiffError
 from ..forks.project import EDITABLE, STATE, ForkError, ForkProject
-from ..network import Agent, Network, NetworkError
+from ..network import Agent, Network, NetworkError, stale_note
 from ..scoring import percent_text
 from ..textedit import replace_once
 
@@ -1780,22 +1781,43 @@ class ForkEngine:
                       + ", ".join(r["name"] for r in done)]
         if (hint := _naming_hint(meta, fn)):
             lines += ["", hint]
-        if unit.base is not None and (missing := _unresolved(unit.base)):
-            lines += ["", f"### Not built yet in {unit.name}'s harness link",
-                      "Its link left these unresolved (/FORCE:UNRESOLVED): references to them aren't checked until "
-                      f"they're written in the unit or stood in in harness/{unit.name}.<name>.cpp: "
-                      + ", ".join(missing[:16])]
+        if (found := self._unresolved_lines(fp, meta, fn, unit, src_text[span[0]:span[1]] if span else None)):
+            lines += ["", f"### Unresolved in {unit.name}'s harness link (nothing in it defines them yet)", *found]
         why = (cfg.get("link_failed") or {}).get(unit.source or "")
         if why and not unit.complete:
             lines += ["", f"### {unit.source} didn't link yet (file_status shows its data)", why]
+        lines += self.net.dependency_brief(fn)
         notes = self.net.store.all("SELECT n.text, a.name FROM notes n LEFT JOIN agents a ON a.id=n.agent_id "
                                    "WHERE n.function_id=? ORDER BY n.id DESC LIMIT 6", fn["id"])
         if notes:
-            lines += ["", "### Notes"] + [f"- ({n['name']}) {n['text']}" for n in notes]
+            lines += ["", "### Notes"] + [f"- ({n['name']}) {stale_note(n['text'], fn['status'])}" for n in notes]
         lines += ["", "Send compile_and_diff the complete function definition (same name and signature as the original), "
                       "with any #include \"...\", prototypes or #pragma lines it needs. Structs, globals and helper "
                       "functions go in with edit_file."]
         return "\n".join(lines)
+
+    def _unresolved_lines(self, fp: ForkProject, meta: dict, fn, unit, code: str | None,
+                          only_mattering: bool = False) -> list[str]:
+        """For a brief, a compile result or a release: the names the unit's last harness link left unresolved that
+        this function's code uses, which of them can change its code (forks/unresolved.py) and which are harmless.
+        Agents read the bare list as a to-do and released functions for data references that change nothing."""
+        if unit.base is None or not (missing := _unresolved(unit.base)):
+            return []
+        prog, caller, library = None, None, set()
+        manifest = fp.manifest or {}
+        if manifest.get("platform") in ("win32", "xbox"):
+            try:
+                prog = convention.load(fp.root, manifest)
+                caller = prog.find(meta.get("symbol") or fn["name"])
+                library = {prog.by_name[s] for s in _set_aside(fp) if s in prog.by_name}
+            except (OSError, KeyError, ValueError, ForkError):
+                prog = None
+        used = unresolved.used_by(code, missing) if code else []
+        found = [unresolved.classify(prog, caller, s, library) for s in used]
+        if only_mattering:
+            found = [u for u in found if u.matters is not False]
+            return unresolved.summary(found, unit.name) if found else []
+        return unresolved.summary(found, unit.name, len(missing) - len(used))
 
     def standins_for(self, agent: Agent | None, slug: str, what: str) -> str:
         """Stand-in and driver skeletons for a unit of a PC or Xbox project (forks/standins.py): a unit, its source
@@ -2225,9 +2247,12 @@ class ForkEngine:
                                                     f"Decompiled by {agent.name} with decompdecomp.")
                 return {"text": f"✅ MATCH! {fn['name']} is 100% identical to the original. Committed to git in the "
                                 f"project. Call claim_function for the next one.{_renamed_note(d)}"
+                                f"{self.net.dependents_note(fn['id'])}"
                                 f"{self._file_done(slug, proj, fp, unit, d.unit_scores, agent)}", "score": 0,
                         "matched": True}
         stall = self.net.stall_note(fn["id"], agent.id)
+        found = self._unresolved_lines(fp, meta, fn, unit, code)
+        stall = ("\n\n" + "\n".join(found) if found else "") + stall
         if d.literals:
             return {"text": f"score {score} (0 = identical). {d.literals_note()}{stall}", "score": score, "matched": False}
         return {"text": f"{percent_text(pct)} match (score {score}; 0 = identical).\n{d.render()}{stall}", "score": score,
@@ -2329,6 +2354,34 @@ class ForkEngine:
             except NetworkError:
                 pass
         return Network.release(self.net, agent, function, notes, slug)
+
+    def release_exempt(self, slug: str, fn) -> str | None:
+        """Why compiling can't help with this function (release_function lets such a release through at once), or
+        None: its unit has no source file, or its identical twin elsewhere is hand-written assembly."""
+        proj, fp, _ = self.get(slug)
+        if not fp.unit(fn["unit"]).source:
+            return "its unit has no source file"
+        try:
+            twin = self.net.twins.twin_of(proj, fn["id"])
+            if twin is not None and self.is_asm(proj, self.net.store.one("SELECT * FROM functions WHERE id=?", twin)):
+                return "its twin is hand-written assembly"
+        except Exception:  # a heuristic: never in the way of a release
+            return None
+        return None
+
+    def release_hints(self, slug: str, fn) -> list[str]:
+        """For a release pushed back in an LTCG project: the unresolved names that change this function's code (to do
+        now), and that the rest are no reason to stop."""
+        _, fp, _ = self.get(slug)
+        if not (fp.manifest or {}).get("ltcg"):
+            return []
+        unit = fp.unit(fn["unit"])
+        if unit.base is None or not _unresolved(unit.base):
+            return []
+        found = self._unresolved_lines(fp, self._meta(fn), fn, unit, self._current_source(fp, fn), only_mattering=True)
+        return ["Unresolved names in the harness link are no reason to stop: data and callees the original calls with "
+                "a standard convention change nothing (the judge writes the original's references in their place).",
+                *found]
 
     def read_file(self, slug: str, path: str, start: int = 1, count: int = 200) -> str:
         _, fp, _ = self.get(slug)

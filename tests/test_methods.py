@@ -153,7 +153,9 @@ def test_briefs_and_standins_say_which_struct_a_function_belongs_to(tmp_path):
     assert "`this` arrives in esi: it's the base of the fields this function uses" in conv
     # whether the agent's compile goes through the harness (agents released LTCG functions untried, as "plain")
     unit_fn = {"name": "Add2", "unit": "u"}
-    assert "isn't in harness mode yet" in "\n".join(ForkEngine._convention_brief(fp, {"symbol": "_Add2"}, unit_fn))
+    plain = "\n".join(ForkEngine._convention_brief(fp, {"symbol": "_Add2"}, unit_fn))
+    # a plain unit can be right (code the game built without /GL): it says how to get a register convention there
+    assert "builds plain, without /GL" in plain and "`static`" in plain and "can't match" not in plain
     (root / "harness").mkdir()
     (root / "harness" / "u.drv.cpp").write_text('extern "C" __declspec(dllexport) void HarnessEntry(void) {}\n')
     assert "Your compile already goes through the harness" in "\n".join(

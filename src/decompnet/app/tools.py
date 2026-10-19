@@ -133,8 +133,9 @@ neighbours may come along in one claim; one function back is normal.)
 6. compile_and_diff says when to move on ({budget}): then
    release_function with precise notes (what you tried, what is left) and claim the next. Before that,
    compile the next step instead of releasing. Very large functions: get the structure right first; a near miss
-   is worth the extra compiles. Another function of the game it needs done first (a callee, an inlined
-   helper): release_function(needs=that one) hands it to you.
+   is worth the extra compiles. What the function needs in harness/ (a stand-in, a driver call) you write
+   yourself with edit_file in the same claim; another function of the game it needs done first (a callee, an
+   inlined helper): release_function(needs=that one) hands it to you.
 
 Rules: C/C++ only (no inline asm, asm functions or asm includes); don't touch targets, configs or build
 scripts (the tools refuse). Write code a human would have written: match the file's style and names.

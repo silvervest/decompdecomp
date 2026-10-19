@@ -71,6 +71,12 @@ Where to start on a gap:
   against the session; `needs=<function>` records a prerequisite: the function waits (claimed last), the one it
   needs goes first and is handed over, and the match brings the waiting one back first. Notes saying "already
   matched" on a function that doesn't match are marked out of date.
+- **Unresolved names in an LTCG harness link, sorted by whether they matter.** Measured on an XDK test program, each
+  reference left unresolved and then defined: data and callees with a standard convention change nothing (the judge
+  writes the original's references in their place); callees the original passes registers or inlines do (83% ->
+  match with two stand-ins), and library code must stay unresolved (sprintf stood in: 100% -> 89%). Briefs,
+  compile_and_diff and a pushed-back release split a function's unresolved names into those (`forks/unresolved.py`),
+  and a field of an unresolved global no longer reads as an address conflict.
 - **Structs and classes for PC and Xbox** (MSVC, fork mode, `forks/methods.py`). A function that uses `this` (ecx
   under __thiscall; under LTCG the register the convention evidence finds) as the base of field accesses is a member
   function; functions called on one global object, local or returned pointer, passing `this` on, or sitting in a

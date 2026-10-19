@@ -156,8 +156,9 @@ neighbours may come along in one claim; one function back is normal.)
    assembly): not_c=true, saying why. Part of another function the analysis cut (no prologue, registers
    the code before set, a switch's cases in the next symbol)? join_functions(it, the other part, why), so it
    becomes one whole function. Very large functions: get the structure right first; a near miss
-   is worth the extra compiles. Another function of the game it needs done first (a callee, an inlined
-   helper): release_function(needs=that one) hands it to you.
+   is worth the extra compiles. What the function needs in harness/ (a stand-in, a driver call) you write
+   yourself with edit_file in the same claim; another function of the game it needs done first (a callee, an
+   inlined helper): release_function(needs=that one) hands it to you.
 
 Rules: C/C++ only (no inline asm, asm functions or asm includes); don't touch targets, configs or build
 scripts (the tools refuse). Never fetch or copy code from outside this project (another repository, a

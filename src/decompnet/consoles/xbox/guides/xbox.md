@@ -80,6 +80,27 @@ Link-time code generation (LTCG)
   - `// HARNESS-LINK: <flags>` adds linker flags for the unit (`d3d8ltcg.lib` when it inlines Direct3D calls);
   - functions are found by func_<address> in their names, or by `// FUNCTION: 0x<address> [map symbol]` before
     the definition (needed for constructors, destructors and operators).
+- Unresolved names: the harness link goes on when something the unit uses isn't defined anywhere in it yet
+  (`/FORCE:UNRESOLVED`), and the judge writes the original's reference in its place. Measured on a small LTCG
+  title (each reference left unresolved, then defined in the link):
+  - data (a global, a D_<address>, a pool constant, a global's field or its address): harmless, the code is the
+    same. Don't release or wait for it, and don't stand data in just to have it defined;
+  - a callee the original calls with a standard convention (__cdecl, __stdcall, __thiscall: `ecx` and the
+    stack): harmless;
+  - a callee the original passes arguments in other registers (LTCG's own convention): the call site differs
+    (pushes instead of register loads) until a definition is in the link, since LTCG picks the convention from
+    the definition. Write a stand-in shaped like the original's in `harness/<unit>.<name>.cpp` (standins_for has
+    a starting point) yourself, in the same claim: RunAccum went from 83% to a match that way;
+  - a callee the original inlines (no call to it in the target): its body must be in the link (the unit, or a
+    stand-in with the original's body), else yours calls it;
+  - library code (XDK, C runtime): leave it unresolved, declared as its header has it. A `/GL` stand-in of a
+    library function changes the calls to it (sprintf: a match unresolved, 89% stood in); if one is needed,
+    `<name>.nogl.cpp`.
+  The brief and compile_and_diff list the unresolved names a function uses, split into these. One thing they
+  don't do: an unresolved D_<address> isn't checked, so a wrong address there only shows once it's defined.
+- Pool constants (floats the compiler made, `__real@...`): write the literal (`0.5f`), not `extern const float
+  D_<address>`: a load from an extern is scheduled differently from a literal's (ParticleStep: 96% with the
+  extern, a match with the literal), defined or not.
 - A unit's function can read 100% and still not be a match: its references must map one to one onto the
   original's (one original global is always the same one of yours), and a reference that says which original
   address it means (a `D_<address>` or `func_<address>` name, or a global with `// GLOBAL: 0x<address>` on the line

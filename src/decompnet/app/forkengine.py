@@ -1903,9 +1903,16 @@ class ForkEngine:
 
     @staticmethod
     def _missing_note(unit, fn) -> str:
-        """What to tell an agent whose compile built, but whose unit's object has no such function."""
-        return (f"\n\nNOT IN YOUR BUILD: {unit.name} compiled, but its object doesn't define {fn['name']}, so there "
-                "is nothing to compare yet.")
+        """What to tell an agent whose compile built, but whose unit's object has no such function: what the
+        build said about its address (an LTCG harness's <object>.ltcg.json problems)."""
+        at = f"0x{fn['vram']:08X}" if fn["vram"] else None
+        said = [p for p in objdiff.ltcg_problems(unit.base) if at and at.lower() in p.lower()]
+        note = (f"\n\nNOT IN YOUR BUILD: {unit.name} compiled, but its object doesn't define {fn['name']}, so there "
+                "is nothing to compare yet")
+        if not said:
+            return note + "."
+        return (note + ":\n" + "\n".join(f"- {p}" for p in said[:4]) + "\nIf a helper sits between the function's "
+                "`// FUNCTION:` annotation and its definition, move the helper above the annotation (edit_file).")
 
     def _apply_scores(self, proj, unit: str, scores: dict[str, float | None], skip: int | None = None,
                       agent: Agent | None = None, text: str | None = None, via: str = "unit diff") -> None:

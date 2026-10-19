@@ -205,6 +205,18 @@ def _sidecar(base: Path) -> dict:
         return {}
 
 
+def ltcg_problems(base: Path | None) -> list[str]:
+    """What dll2coff said about an LTCG unit's harness link (<object>.ltcg.json `problems`: a function it couldn't
+    find in the map, an annotation of another unit's function...); none for other units."""
+    if base is None:
+        return []
+    try:
+        found = json.loads(base.with_suffix(".ltcg.json").read_text(encoding="utf-8")).get("problems") or []
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [str(p) for p in found]
+
+
 def mapping_conflicts(base: Path | None, symbol: str | None) -> list[MappingConflict]:
     """The address mapping and data checks dll2coff wrote next to an LTCG unit's object (<object>.ltcg.json), for
     a function."""

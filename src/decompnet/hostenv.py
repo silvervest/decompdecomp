@@ -9,6 +9,7 @@ and most of their code served the agent bridge that went with it.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -34,9 +35,21 @@ def in_old_windows_install() -> bool:
     return wsl and (os.environ.get("WSL_DISTRO_NAME") == WSL_DISTRO or Path.home() == Path("/home") / WSL_USER)
 
 
+def in_wsl() -> bool:
+    """Running inside WSL (how decompdecomp runs on Windows from 1.0.4)."""
+    try:
+        return "microsoft" in KERNEL_RELEASE.read_text(encoding="utf-8").lower()
+    except OSError:
+        return False
+
+
 def local_path(text: str) -> Path:
-    """A file path the user gave (in a form, or pasted with quotes around it), as a path."""
-    return Path(text.strip().strip('"').strip("'")).expanduser()
+    """A file path the user gave (in a form, or pasted with quotes around it), as a path. In WSL, a Windows path
+    (C:\\XDK, copied from Explorer) is the same folder under /mnt (/mnt/c/XDK)."""
+    text = text.strip().strip('"').strip("'")
+    if (m := re.fullmatch(r"([A-Za-z]):(?:[\\/](.*))?", text)) and in_wsl():
+        return Path("/mnt", m.group(1).lower(), *[p for p in re.split(r"[\\/]", m.group(2) or "") if p])
+    return Path(text).expanduser()
 
 
 def shown_path(path: Path | str) -> str:

@@ -76,6 +76,12 @@ class Xbox(Console):
 
         return scratch.read_data(fp.root, fp.manifest or {}, name, length)
 
+    def data_bytes(self, fp, addr: int, length: int) -> bytes | None:
+        """The XBE's bytes at an address, for diffs to show the float constants the target loads (as on PC)."""
+        from ..pc import scratch
+
+        return scratch.data_bytes(fp.root, fp.manifest or {}, addr, length)
+
     def refresh_project(self, fp, log=print) -> list[str]:
         """The project's tools/ brought up to the PC template it was made from (consoles/pc/scratch.py)."""
         from ..pc import scratch

@@ -21,6 +21,7 @@ is something the judge trusts: it is where agents start, and every match is stil
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -483,7 +484,31 @@ def _why(g: Group) -> list[str]:
 
 
 def _c_name(symbol: str) -> str:
-    return symbol.lstrip("_@").split("@", 1)[0]
+    """A function's name as source writes it: `_func_X@8` -> func_X, `?Update@C_vt_003A94FC@@UAEX...` -> Update
+    (the `?` of a C++ name used to stay: a brief told an agent to write `Struct_0015F270::?Update`)."""
+    return symbol.lstrip("?_@").split("@", 1)[0]
+
+
+# MSVC's undecorated name of a member function: "public: virtual void __thiscall C_vt_003A94FC::Update(struct
+# CCamOut *,float)"
+_DEMANGLED_METHOD = re.compile(r"^(?:(?:public|protected|private): )?(?:(virtual|static) )?(.*?)\s*"
+                               r"(?:__thiscall|__cdecl|__stdcall|__fastcall)\s+([\w:<>~]+)::(~?\w+)\((.*)\)"
+                               r"(\s*const)?\s*$")
+
+
+def known_signature(demangled: str | None) -> tuple[str, str] | None:
+    """(class, declaration) of a member function whose symbol says its real signature: the brief gives that, not a
+    guess from the registers (it suggested `int Struct_0015F270::?Update(int, int)` for what the symbol said was
+    `virtual void C_vt_003A94FC::Update(CCamOut *, float)`)."""
+    m = _DEMANGLED_METHOD.match((demangled or "").strip())
+    if m is None:
+        return None
+    virt, ret, cls, name, args, const = m.groups()
+    args = re.sub(r"\b(?:struct|class|enum|union) ", "", args)
+    args = ", ".join(re.sub(r"\s*\*", " *", a.strip()) for a in args.split(",")) if args.strip() not in ("", "void") else ""
+    ret = re.sub(r"\b(?:struct|class|enum|union) ", "", ret).strip()
+    head = f"{virt + ' ' if virt else ''}{ret + ' ' if ret else ''}"
+    return cls, f"{head}{cls}::{name}({args}){' const' if const else ''}"
 
 
 def params(prog: Program, addr: int, this: str | None) -> str:
@@ -557,8 +582,15 @@ def describe(prog: Program, g: Group, focus: int | None = None) -> str:
     return "\n".join(lines)
 
 
-def brief(prog: Program, objs: Objects, addr: int, ltcg: bool) -> list[str]:
-    """For get_function and claims: whether the function looks like a member function, of what, and how to write it."""
+def brief(prog: Program, objs: Objects, addr: int, ltcg: bool, demangled: str | None = None) -> list[str]:
+    """For get_function and claims: whether the function looks like a member function, of what, and how to write it.
+    `demangled`: the function's undecorated name, when its symbol has one: then its real class and signature."""
+    known = known_signature(demangled)
+    if known is not None:
+        cls, decl = known
+        return ["", f"### A member function of {cls}",
+                f"- its symbol gives its real signature: write it as `{decl}`, with {cls} declared in a header "
+                f"(edit_file) if it isn't yet. The types are the original's; the parameters' names are yours."]
     if addr in objs.ambiguous:
         regs = objs.ambiguous[addr]
         return ["", "### Two objects alike", f"- it uses {' and '.join(regs)} as bases of the same fields: a function "

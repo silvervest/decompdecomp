@@ -172,3 +172,21 @@ def test_briefs_and_standins_say_which_struct_a_function_belongs_to(tmp_path):
         in s["standins"]
     assert "### Structs and classes its functions and callees look like member functions of" \
         in standins.render(prog, "u")
+    # a symbol that says the real signature wins over the guess from the registers
+    meta = {"symbol": "_Add2", "demangled": "public: virtual void __thiscall C_vt_003A94FC::Update(struct CCamOut *,float)"}
+    brief = "\n".join(ForkEngine._method_brief(fp, meta, {"name": "Add2"}))
+    assert "`virtual void C_vt_003A94FC::Update(CCamOut *, float)`" in brief and "Struct_" not in brief
+
+
+def test_a_member_functions_known_signature_is_read_from_its_undecorated_name():
+    """Burnout 3: a brief suggested `int Struct_0015F270::?Update(int arg1, int arg2)` for a function whose symbol
+    said `public: virtual void __thiscall C_vt_003A94FC::Update(struct CCamOut *, float)`."""
+    assert methods.known_signature("public: virtual void __thiscall C_vt_003A94FC::Update(struct CCamOut *,float)") \
+        == ("C_vt_003A94FC", "virtual void C_vt_003A94FC::Update(CCamOut *, float)")
+    assert methods.known_signature("public: int __thiscall Accum::Get(void)const") \
+        == ("Accum", "int Accum::Get() const")
+    assert methods.known_signature("public: __thiscall CFoo::CFoo(class CBar &)") == ("CFoo", "CFoo::CFoo(CBar &)")
+    assert methods.known_signature("void __cdecl Free(int)") is None  # not a member function
+    assert methods.known_signature(None) is None
+    assert methods._c_name("?Update@C_vt_003A94FC@@UAEXPAUCCamOut@@M@Z") == "Update"
+    assert methods._c_name("_func_000115A0@8") == "func_000115A0"

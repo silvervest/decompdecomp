@@ -575,3 +575,38 @@ def test_standins_are_written_from_the_units_references_with_their_conventions(t
     assert drv.startswith('extern "C" __declspec(dllexport) void HarnessEntry(void)')
     assert "//   _func_10001010+0x7 (u): mov esi, 0x10002000; push 5 -> call" in drv
     assert "harness/v.standins.cpp" in standins.render(prog, "v")
+
+
+def test_a_reference_the_link_left_unresolved_is_named_by_what_the_function_uses(tmp_path):
+    """Burnout 3's diffs showed `mulss xmm0, [$A10000000]` (the DLL's image base, where /FORCE:UNRESOLVED puts every
+    unresolved reference) against the original's `[_D_003A1248]`: the agent couldn't tell which name it was. The
+    link's LNK2019 lines say which function uses which name."""
+    said = ('u.obj : error LNK2019: unresolved external symbol _D_003A1248 referenced in function "public: void '
+            '__thiscall A::f(float)" (?f@A@@QAEXM@Z)\n'
+            'u.obj : error LNK2019: unresolved external symbol "float g_scale" (?g_scale@@3MA) referenced in function '
+            '"public: void __thiscall A::f(float)" (?f@A@@QAEXM@Z)\n'
+            "u.obj : error LNK2019: unresolved external symbol _func_00011130@8 referenced in function _G\n")
+    by_fn = dll2coff.unresolved_by_function(said)
+    assert by_fn == {"?f@A@@QAEXM@Z": ["_D_003A1248", "?g_scale@@3MA"], "_G": ["_func_00011130@8"]}
+    assert dll2coff.unresolved_name(by_fn["?f@A@@QAEXM@Z"]) == "$unresolved:D_003A1248|g_scale"
+    assert dll2coff.unresolved_name(by_fn["_G"]) == "$unresolved:func_00011130"
+    assert dll2coff.unresolved_name([]) == "$unresolved"
+    # a $ name never reads as an original address for the export
+    assert not dll2coff.ADDRESS_NAME.match("$unresolved:D_003A1248")
+
+
+def test_an_unresolved_reference_in_a_cut_function_carries_that_name(tmp_path):
+    src, info = _project(tmp_path)
+    # where the original has no reference at the same place (so it isn't written as the original's)
+    info["units"]["u"][0]["relocs"] = [r for r in info["units"]["u"][0]["relocs"] if r[0] != 1]
+    (tmp_path / "functions.json").write_text(json.dumps(info))
+    dll = bytearray(_dll())
+    struct.pack_into("<I", dll, 0x400 + 1, BASE + 0x10)  # F1's first load: left unresolved, inside the headers
+    (tmp_path / "u.dll").write_bytes(bytes(dll))
+    (tmp_path / "u.map.link.txt").write_text("error LNK2019: unresolved external symbol _D_00030000 referenced in "
+                                             "function ?F1@@YAHXZ\n")
+    data, _ = _run_dll2coff(tmp_path, src)
+    sections, names = _coff(data)
+    first = sections[0][1][0]
+    assert first[0] == 1 and names[first[1]] == "$unresolved:D_00030000"
+    assert not any(n.startswith("$A") for n in names)

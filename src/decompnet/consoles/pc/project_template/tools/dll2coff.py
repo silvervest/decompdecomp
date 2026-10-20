@@ -100,7 +100,11 @@ TARGET = re.compile(r"//[ \t]*TARGET[ \t]+(0x[0-9a-fA-F]+)[ \t]+(\S+)")
 GLOBAL = re.compile(r"//[ \t]*GLOBAL:[ \t]*(0x[0-9a-fA-F]+)(?:[ \t]+(\S+))?[^\n]*\n"
                     r"((?:[ \t]*//(?![ \t]*GLOBAL:)[^\n]*\n|[ \t]*\n)*)((?![ \t]*//)[^\n;={(\[]*)?")
 UNRESOLVED = re.compile(r"unresolved external symbol (?:\"[^\"]*\" \()?([^\s()\"]+)\)?")  # tools/ltcg.py's
-LITERAL = re.compile(r"__real@([0-9a-fA-F]{8}|[0-9a-fA-F]{16})$")
+# LNK2019: "... unresolved external symbol _D_003A1248 referenced in function "public: void __thiscall A::f(void)"
+# (?f@A@@QAEXXZ)": which function of ours uses which name the link left unresolved
+REFERENCED = re.compile(r"unresolved external symbol (?:\"[^\"]*\" \()?([^\s()\"]+)\)? referenced in function "
+                        r"(?:\"[^\"]*\" \()?([^\s()\"]+)\)?")
+LITERAL =re.compile(r"__real@([0-9a-fA-F]{8}|[0-9a-fA-F]{16})$")
 MAP_LINE = re.compile(r"^\s*([0-9a-fA-F]{4}):([0-9a-fA-F]{8})\s+(\S+)\s+([0-9a-fA-F]{8})\s")
 
 
@@ -171,6 +175,29 @@ class Program:
             if start <= va and va + n <= start + size:
                 return self.data[offset + va - start:offset + va - start + n]
         return None
+
+
+def unresolved_by_function(link_said: str) -> dict[str, list[str]]:
+    """What the harness link said, as each function of ours (its decorated name) -> the names it left unresolved
+    that the function uses."""
+    out: dict[str, list[str]] = {}
+    for name, function in REFERENCED.findall(link_said):
+        if name not in out.setdefault(function, []):
+            out[function].append(name)
+    return out
+
+
+def unresolved_name(symbols: list[str]) -> str:
+    """What a reference the link left unresolved is called in the diff: the source name of what the function uses
+    unresolved (`$unresolved:D_003A1248`; several: `$unresolved:D_003A1248|D_003A1250`), never an address. It read
+    `$A10000000` (the DLL's image base, where /FORCE:UNRESOLVED puts them all), and agents couldn't tell which global
+    or constant a row meant. (A `$` name never stands for an original address: export.py's ADDRESS_NAME.)"""
+    shown = []
+    for s in symbols:
+        s = s[1:].split("@", 1)[0] if s.startswith("?") else re.sub(r"@\d+$", "", s[1:] if s[:1] in "_@" else s)
+        if s and s not in shown:
+            shown.append(s)
+    return "$unresolved:" + "|".join(shown[:4]) if shown else "$unresolved"
 
 
 def map_symbols(path: Path) -> dict[str, int]:
@@ -595,9 +622,16 @@ def main() -> None:
             found[addr] = (sym, syms[sym])
     ours_name = {sva: functions[a]["name"] for a, (_, sva) in found.items()}
 
-    def name_of(va: int) -> tuple[str, int]:
+    headers = min((s[1] for s in img.sections), default=img.base + 0x1000) - img.base  # where nothing of ours is
+    log = Path(f"{mapf}.link.txt")  # what the harness link said (tools/ltcg.py link)
+    link_said = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+    referenced = unresolved_by_function(link_said)
+
+    def name_of(va: int, function: str | None = None) -> tuple[str, int]:
         if va in ours_name:
             return ours_name[va], 0
+        if img.base <= va < img.base + headers:  # left unresolved: the names the link says this function uses
+            return unresolved_name(referenced.get(function or "", [])), va - img.base
         i = bisect.bisect_right(addrs, va) - 1
         if i < 0:
             return f"$A{va:08X}", 0
@@ -659,12 +693,11 @@ def main() -> None:
         return None if raw is None else struct.unpack("<I", raw)[0]
 
     folded = vtable_fold(original_vtables(Path(config)), set(unit_of), word, name_of)
-    headers = min((s[1] for s in img.sections), default=img.base + 0x1000) - img.base  # where nothing of ours is
     cuts, report = [], {"unit": unit, "dll": dll, "functions": {}, "problems": problems}
     for addr in sorted(found):
         sym, start = found[addr]
         end = extent(img, start, starts)
-        relocs, notes, targets = cut(md, img, start, end, name_of)
+        relocs, notes, targets = cut(md, img, start, end, lambda va, sym=sym: name_of(va, sym))
         fn = functions[addr]
         code = img.read(start, end - start)
         relocs, constants = same_constants(fn, exe, code, relocs)
@@ -680,9 +713,8 @@ def main() -> None:
         check |= data_check(fn, exe, program, known, start, end, claim, literal, bounds(md, img, start, end))
         report["functions"][fn["name"]] = {"orig": f"0x{addr:08X}", "ours": f"0x{start:08X}", "symbol": sym,
                                            "size": end - start, "orig_size": fn["size"], "notes": notes, **check}
-    log = Path(f"{mapf}.link.txt")  # what the harness link said (tools/ltcg.py link)
-    if log.is_file():
-        found_unresolved = sorted(set(UNRESOLVED.findall(log.read_text(encoding="utf-8", errors="replace"))))
+    if link_said:
+        found_unresolved = sorted(set(UNRESOLVED.findall(link_said)))
         if found_unresolved:
             report["unresolved"] = found_unresolved
             print(f"{unit}: nothing in the harness link defines these yet, so it left them unresolved: "

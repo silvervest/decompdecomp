@@ -23,3 +23,9 @@ def test_unresolved_data_isnt_called_harmless_and_volatile_in_the_harness_is_for
     assert "Define it, with its real type, in the unit or a harness file" in text
     assert "`volatile` in a harness driver or stand-in, to steer the compiler, is forbidden" in text
     assert "only as a documented exception" in text
+
+
+def test_adding_a_helper_or_call_site_says_to_check_the_convention_again():
+    text = _xbox()
+    assert "Adding a helper function or a call site changes conventions under LTCG" in text
+    assert "a single call site" in text and "check the convention evidence again" in text

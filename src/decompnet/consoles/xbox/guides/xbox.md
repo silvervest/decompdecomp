@@ -80,6 +80,13 @@ Link-time code generation (LTCG)
   - `// HARNESS-LINK: <flags>` adds linker flags for the unit (`d3d8ltcg.lib` when it inlines Direct3D calls);
   - functions are found by func_<address> in their names, or by `// FUNCTION: 0x<address> [map symbol]` before
     the definition (needed for constructors, destructors and operators).
+- Adding a helper function or a call site changes conventions under LTCG. The linker specialises a callee by its
+  callers: one with a single call site gets a custom convention fitted to it (arguments left where the caller has
+  them, saves dropped), and a second caller (a helper you added, a driver call, a stand-in) can turn it back into
+  a standard one, or the other way round. So after adding a helper, a call or a stand-in, check the convention
+  evidence again: the brief's "Calling convention in the original" (registers read, stack arguments, `ret N`)
+  against what your compile_and_diff now shows for the function and its callees. The original's number of call
+  sites to each function is what the harness must keep.
 - Unresolved names: the harness link goes on when something the unit uses isn't defined anywhere in it yet
   (`/FORCE:UNRESOLVED`), and the judge writes the original's reference in its place. What each kind does:
   - data (a global, a D_<address>, a pool constant, a global's field or its address): not always harmless. Under

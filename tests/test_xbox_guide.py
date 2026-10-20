@@ -29,3 +29,15 @@ def test_adding_a_helper_or_call_site_says_to_check_the_convention_again():
     text = _xbox()
     assert "Adding a helper function or a call site changes conventions under LTCG" in text
     assert "a single call site" in text and "check the convention evidence again" in text
+
+
+def test_the_xbox_up_front_material_is_lean_and_x86_only_material_stays_on_x86():
+    """An Xbox LTCG helper's first prompt was 19 KB, with GameCube material and repetition in the Xbox guide."""
+    assert len(tools.guide_text("xbox", "xbox").encode()) < 8000
+    assert len(tools.up_front("xbox", "fork", "").encode()) < 13000
+    assert "Struct_00011570" in tools.guide_text("cpp", "xbox")
+    assert "Struct_00011570" not in tools.guide_text("cpp", "gc")
+    text = _xbox()
+    for kept in ("HarnessEntry", "standins_for", "`// FUNCTION: 0x<address>", "<name>.nogl.cpp", "HARNESS-LINK",
+                 "Two objects alike", "LTCG register convention"):
+        assert kept in text, kept

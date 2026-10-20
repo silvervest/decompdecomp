@@ -719,11 +719,12 @@ def main() -> None:
             report["unresolved"] = found_unresolved
             print(f"{unit}: nothing in the harness link defines these yet, so it left them unresolved: "
                   f"{', '.join(found_unresolved[:12])}{' ...' if len(found_unresolved) > 12 else ''}. The judge writes "
-                  "the original's reference in their place and leaves them out of the address checks, so data (globals, "
-                  "pool constants) and callees the original calls with a standard convention are harmless: no reason "
-                  "to stop. Only a callee the original passes arguments in registers (LTCG) or inlines changes the "
-                  "code that uses it, until a definition is in the link (in the unit, or a stand-in shaped like the "
-                  f"original's in harness/{unit}.<name>.cpp); the brief and compile_and_diff say which those are.")
+                  "the original's reference in their place and leaves them out of the address checks. Callees the "
+                  "original calls with a standard convention are harmless. Data (globals, pool constants) can still "
+                  "change the code around it under LTCG: define it with its real type. A callee the original passes "
+                  "arguments in registers (LTCG) or inlines changes the code that uses it until a definition is in "
+                  f"the link (in the unit, or a stand-in shaped like the original's in harness/{unit}.<name>.cpp); "
+                  "the brief and compile_and_diff say which those are.")
     data = delink.coff(cuts, img.data)
     path = Path(out)
     path.parent.mkdir(parents=True, exist_ok=True)

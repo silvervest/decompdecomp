@@ -1,6 +1,6 @@
 """Which unresolved names in an LTCG harness link can change a function's code (forks/unresolved.py). Measured on
-demo_ltcg (each reference left unresolved, then defined in the link): data and standard-convention callees change
-nothing; callees the original passes registers or inlines do; library code must stay unresolved."""
+demo_ltcg (each reference left unresolved, then defined in the link): standard-convention callees change nothing;
+callees the original passes registers or inlines do; library code must stay unresolved; data may (Burnout 3)."""
 
 from decompnet.consoles.pc.scratch import DIR32, REL32
 from decompnet.forks import convention, unresolved
@@ -49,8 +49,10 @@ def test_names_as_source_writes_them():
 def test_which_unresolved_names_change_the_code():
     prog = _program()
     kind = lambda s, lib=frozenset(): unresolved.classify(prog, 0x11000, s, lib)  # noqa: E731
-    assert (kind("_D_0001F200").kind, kind("_D_0001F200").matters) == ("data", False)
-    assert kind("?D_003B168C@@3MB").kind == "data" and kind("?g_3EAD58@@3MA").matters is False
+    # data may change the code under LTCG (Burnout 3): define it with its real type, never volatile
+    assert (kind("_D_0001F200").kind, kind("_D_0001F200").matters) == ("data", None)
+    assert "real type" in kind("_D_0001F200").why and "volatile" in kind("_D_0001F200").why
+    assert kind("?D_003B168C@@3MB").kind == "data" and kind("?g_3EAD58@@3MA").matters is None
     a = kind("?func_00011100@@YAXXZ")  # the original passes it esi
     assert (a.kind, a.matters) == ("register", True) and "esi" in a.why and "standins_for" in a.why
     b = kind("?func_00011200@Accum@@QAEHH@Z")  # __thiscall: ecx is `this`
@@ -75,6 +77,7 @@ def test_a_summary_names_what_to_do_first_and_says_the_rest_is_harmless():
     assert lines[0].startswith("Unresolved in the harness link and changing this function's code (do it now, in this "
                                "claim: edit_file harness/u.<name>.cpp")
     assert "- func_00011100 (the original passes it esi" in text
-    assert "harmless (no reason to stop or release" in text and "func_00011200, D_0001F200" in text
+    assert "harmless (no reason to stop or release" in text and "func_00011200" in text
+    assert "Unresolved, may change this function's code:\n- D_0001F200 (data:" in text
     assert "1 more unresolved names are used by other functions of u" in text
     assert unresolved.summary([], "u") == []

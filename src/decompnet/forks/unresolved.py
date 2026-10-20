@@ -3,9 +3,12 @@ and which can't, for briefs, compile_and_diff and release_function (tools/dll2co
 
 What an experiment on a small LTCG Xbox title showed (decompdecomp's demo_ltcg; the same function judged with each
 reference left unresolved and with it defined in the link):
-- Data (globals, pool constants, a global's fields or address): no difference. A load from an extern is the same
-  instruction whether the link defines it or not, and dll2coff writes the original's reference in its place.
-  (It isn't checked either: a D_<address> that names the wrong address only shows once something defines it.)
+- Data (globals, pool constants, a global's fields or address): no difference on demo_ltcg's small functions, but
+  not on Burnout 3: under LTCG the compiler sees (or doesn't see) a global's definition, its type and whether it's
+  const, and that can change the scheduling and code around its loads. So data counts as "may matter": define it
+  with its real type in the unit or a harness file before tuning the code. Steering codegen instead (a `volatile`
+  in the harness) is never the fix. (An unresolved D_<address> isn't checked either: one that names the wrong
+  address only shows once something defines it.)
 - A callee the original calls with a standard convention (__cdecl, __stdcall, __thiscall: `ecx` and the stack):
   no difference. The call is the same, and its target is written as the original's.
 - A callee the original passes arguments in other registers (LTCG's own convention): the caller's code differs
@@ -100,8 +103,9 @@ def classify(prog: Program | None, caller: int | None, symbol: str, library: set
         data = True  # the D_<address> / g_ names data gets
     function = prog is not None and addr is not None and addr in prog.functions
     if data or (data is None and addr is not None and not function):
-        return Unresolved(symbol, name, "data", False, "data: harmless, the judge writes the original's reference "
-                          "there", addr)
+        return Unresolved(symbol, name, "data", None, "data: may change this function's code under LTCG (the "
+                          "compiler can't see its definition or type); define it with its real type in the unit or "
+                          "harness/, never steer the code with volatile", addr)
     if addr is None or prog is None:
         if not symbol.startswith("?"):
             return Unresolved(symbol, name, "unknown", None, "a C name with no address: library code (XDK, C "
@@ -157,7 +161,7 @@ def summary(found: list[Unresolved], unit: str, others: int = 0) -> list[str]:
                    "unit; standins_for writes a starting point):")
         out += [f"- {u.line()}" for u in matters]
     if unknown:
-        out.append("Unresolved, can't tell whether it matters:")
+        out.append("Unresolved, may change this function's code:")
         out += [f"- {u.line()}" for u in unknown]
     if harmless:
         out.append("Unresolved and harmless (no reason to stop or release: the judge writes the original's reference in "

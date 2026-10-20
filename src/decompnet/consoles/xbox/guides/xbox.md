@@ -98,9 +98,13 @@ Link-time code generation (LTCG)
     `<name>.nogl.cpp`.
   The brief and compile_and_diff list the unresolved names a function uses, split into these. One thing they
   don't do: an unresolved D_<address> isn't checked, so a wrong address there only shows once it's defined.
-- Pool constants (floats the compiler made, `__real@...`): write the literal (`0.5f`), not `extern const float
-  D_<address>`: a load from an extern is scheduled differently from a literal's (ParticleStep: 96% with the
-  extern, a match with the literal), defined or not.
+- Float constants the target loads by address (the diff shows their values): try both forms, the literal (`0.5f`)
+  and an `extern const float D_<address>`, and keep the better score. A load from an extern is scheduled
+  differently from a literal's, and either can win: ParticleStep matched only with the literal (96% with the
+  extern), while on Burnout 3 an agent following "always the literal" got 59.1% where the externs gave 65.8%. On
+  equal scores prefer the literal: the game's own literal lives in .rdata, and a named D_ extern doesn't port.
+  Sometimes the matching form is a folded expression (`1.0f - 1.3f`, not `-0.3f`): the compiler pooled the
+  result of an expression the original wrote out.
 - A unit's function can read 100% and still not be a match: its references must map one to one onto the
   original's (one original global is always the same one of yours), and a reference that says which original
   address it means (a `D_<address>` or `func_<address>` name, or a global with `// GLOBAL: 0x<address>` on the line

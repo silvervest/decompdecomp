@@ -1,125 +1,70 @@
 # Original Xbox (XDK, Visual C++ 7.1)
 
-An Xbox game is a Windows-style x86 program. It was built with Visual C++ from Microsoft's Xbox Development Kit
-(the XDK) and packed as an XBE. Read the x86 guide first: registers, calling conventions and frames are the same.
-This guide is what differs.
+An Xbox game is an x86 program built with Visual C++ 7.1 from Microsoft's XDK and packed as an XBE. Registers,
+calling conventions and frames are as in the x86 guide; this is what differs.
 
-The compiler and the headers
-- The compiler is Visual C++ 7.1 (XDK 5849 ships build 13.10.3077). The project builds with the same files.
-- The headers are the user's own XDK (`xtl.h`, the Xbox `d3d8.h`, the XDK's C runtime). Include `<xtl.h>` when you
-  need Xbox types. Never copy XDK headers into the project.
-- The default flags are `/O2 /G6 /GF /Gy /arch:SSE /D_XBOX`. The project's tools/configure.py holds them.
-- `/Gy` gives every function its own section. The linker pads functions to 16 bytes with int3 (0xCC). That padding
-  isn't part of a function: don't try to match it.
-
-Kernel calls
-- There is no import table. The kernel thunk table is a list of slots, one per xboxkrnl.exe export. The loader
-  fills each slot with the kernel function's address.
-- A kernel call is `call dword ptr [slot]`. The project names each slot `__imp__<Name>`, as a Windows import:
-  `__imp__NtClose`, `__imp__KeQueryPerformanceCounter`.
-- In C, declare the kernel function as an import: `extern "C" __declspec(dllimport) LONG NTAPI NtClose(HANDLE);`.
-  Most of them are declared by `xtl.h` already. Kernel data (`KeTickCount`) is read through its slot too.
-
-Visual C++ 7.1 with /arch:SSE
-- Floats still mostly use x87 (`fld`, `fstp`). With /arch:SSE the compiler also uses SSE for some float code:
-  `movss`, `addss`, `mulss`, `comiss`, and `cvttss2si` for float to int instead of a call to `_ftol`.
-- Compares through SSE end in `comiss xmm0, xmm1` and a jump on the flags. Compares through x87 still use
-  `fcomp` + `fnstsw ax` + `test ah, N`.
-- `__declspec(align(16))` locals give an aligned frame: `push ebp; mov ebp, esp; and esp, -16`. Arguments are then
-  read through ebp and locals through esp.
-- 7.1 schedules more freely than 6.0: statement order changes less of the output, types and declarations more.
-- Intrinsics (`memcpy`, `memset`, `strlen`, `abs`, `fabs`, `sqrt`) are expanded inline at /O2.
-- Direct3D calls are often inlined push-buffer writes from the XDK's `d3d8.h`: stores to a buffer pointer and a
-  compare against its end, with a call to make room. Write the D3D call; don't spell out the stores.
-
-Library code set aside
-- Much of an XBE is the XDK's own code: Direct3D, DirectSound, XNet, XOnline, the media and sound libraries, the C
-  runtime and XAPI. It's Microsoft's, not the game's.
-- decompdecomp leaves the XDK's library sections out of the project. It matches the user's XDK libraries against
-  `.text` and sets those functions aside, as hand-written assembly is set aside. You don't get them.
-- Library code the matcher missed can still reach you (a hotfix build of a library, a function too short to match
-  safely). If a function looks like CRT or XAPI code (`_memcpy`, `_strcmp`, `XapiInitProcess`, `__security_check`),
-  say so with a note and release it.
+The compiler, headers and kernel
+- Visual C++ 7.1 (XDK 5849: 13.10.3077), default flags `/O2 /G6 /GF /Gy /arch:SSE /D_XBOX` (tools/configure.py).
+  The headers are the user's own XDK: include `<xtl.h>` for Xbox types; never copy XDK headers into the project.
+- `/Gy` pads functions to 16 bytes with int3: that padding isn't part of a function.
+- Kernel calls are `call dword ptr [__imp__<Name>]` (the kernel thunk table, named like Windows imports). Declare
+  them as imports (`extern "C" __declspec(dllimport) LONG NTAPI NtClose(HANDLE);`); `xtl.h` declares most.
+- /arch:SSE: floats are mostly x87 (`fld`, `fcomp` + `fnstsw ax`), some SSE (`movss`, `mulss`, `comiss`,
+  `cvttss2si` instead of `_ftol`). `__declspec(align(16))` locals give `and esp, -16` frames. Intrinsics
+  (`memcpy`, `strlen`, `fabs`, `sqrt`) are inline at /O2. Direct3D calls are often inlined push-buffer writes from
+  `d3d8.h`: write the D3D call, not the stores.
+- The XDK's own code (Direct3D, DirectSound, XNet, the C runtime, XAPI) is set aside and never reaches you. If a
+  function still looks like CRT or XAPI code (`_memcpy`, `XapiInitProcess`), say so in a note and release it.
 
 Link-time code generation (LTCG)
-- Some games were built with `/GL` and linked with `/LTCG`. Then functions take arguments and `this` in eax, esi,
-  edi or ebx, with no standard convention, and code is inlined across files.
-- Signs: a call right after loading eax/esi/edi/ebx, in a callee that reads them without saving them, and callees
-  without the usual prologue for their argument count.
-- The import tells from the program (its log and `.decomp.wtf.json`'s `ltcg_detected` say why); the user can
-  also choose (the import's LTCG setting, or `DECOMP_XBOX_LTCG=1/0`).
-- In a project made without the LTCG mode (its `.decomp.wtf.json` has no `"ltcg": true`), plain compiles can't
-  match those functions: note it ("LTCG register convention") and release it. Only there.
-- In an LTCG project, a unit whose driver defines HarnessEntry (the brief says so) is always compiled with /GL and
-  linked with /LTCG through its harness: your compile_and_diff goes through it, and the linker picks the registers
-  from the driver's calls. Write ordinary C/C++ (a normal member function, normal parameters) and compile. A
-  register convention is never a reason to release such a function untried: when the convention itself differs,
-  fix the driver's call or a stand-in so it looks like the original's call site.
-- In an LTCG project (its `.decomp.wtf.json` says `"ltcg": true`), the brief shows each function's convention in
-  the original: the registers it reads before writing (its register parameters), its stack arguments, `ret N`, the
-  registers it saves, and a few call sites with what they load just before the call.
-- `standins_for(unit)` writes a starting point for a unit's harness from the original's references: stand-ins for
-  the data and functions it uses from elsewhere (each with its convention), a HarnessEntry with the call sites of
-  each of the unit's functions, the declarations its source needs, and the structs and classes its functions and
-  callees look like member functions of (with their fields). Write them with edit_file, then shape them.
-- Member functions under LTCG: `this` can arrive in any register (Accum::Add gets it in esi). The register is the
-  linker's choice, not the source's, so write a member function when the brief says the function is one
-  ("`this` arrives in esi: it's the base of the fields this function uses"); it still matches. The linker moves a
-  free function's pointer argument into a register the same way, so the code alone can't always tell a member
-  function from a free function taking a pointer: prefer the member function when its struct has other member
-  functions (`get_class`), and a free function when its name or callers say so. A function that uses two registers
-  at the same offsets (`Dot(a, b)`) is a function of two objects: the brief says "Two objects alike".
-- A unit is linked in harness mode once its driver `harness/<unit>.drv.cpp` defines
-  `extern "C" __declspec(dllexport) void HarnessEntry(...)`:
-  - the driver calls the unit's functions the way the original's call sites do: look at a caller's code right
-    before the call (what eax/esi/edi/ebx/ecx hold, which pushes are constants) and write a call that gives the
-    linker the same facts;
-  - `harness/<unit>.<name>.cpp` hold stand-ins for what the unit calls or reads elsewhere, shaped like the real
-    ones (which registers they read, preserve and return). `<name>.nogl.cpp` compiles without `/GL`, for code the
-    game's link couldn't see into (middleware, XDK libraries);
-  - `// HARNESS-LINK: <flags>` adds linker flags for the unit (`d3d8ltcg.lib` when it inlines Direct3D calls);
-  - functions are found by func_<address> in their names, or by `// FUNCTION: 0x<address> [map symbol]` before
-    the definition (needed for constructors, destructors and operators).
-- Adding a helper function or a call site changes conventions under LTCG. The linker specialises a callee by its
-  callers: one with a single call site gets a custom convention fitted to it (arguments left where the caller has
-  them, saves dropped), and a second caller (a helper you added, a driver call, a stand-in) can turn it back into
-  a standard one, or the other way round. So after adding a helper, a call or a stand-in, check the convention
-  evidence again: the brief's "Calling convention in the original" (registers read, stack arguments, `ret N`)
-  against what your compile_and_diff now shows for the function and its callees. The original's number of call
-  sites to each function is what the harness must keep.
-- Unresolved names: the harness link goes on when something the unit uses isn't defined anywhere in it yet
-  (`/FORCE:UNRESOLVED`), and the judge writes the original's reference in its place. What each kind does:
-  - data (a global, a D_<address>, a pool constant, a global's field or its address): not always harmless. Under
-    LTCG the compiler sees a global's definition, type and constness, and an unresolved one can change the
-    scheduling and code around its loads. Define it, with its real type, in the unit or a harness file; don't
-    release or wait for it;
-  - a callee the original calls with a standard convention (__cdecl, __stdcall, __thiscall: `ecx` and the
-    stack): harmless;
-  - a callee the original passes arguments in other registers (LTCG's own convention): the call site differs
-    (pushes instead of register loads) until a definition is in the link, since LTCG picks the convention from
-    the definition. Write a stand-in shaped like the original's in `harness/<unit>.<name>.cpp` (standins_for has
-    a starting point) yourself, in the same claim: RunAccum went from 83% to a match that way;
-  - a callee the original inlines (no call to it in the target): its body must be in the link (the unit, or a
-    stand-in with the original's body), else yours calls it;
-  - library code (XDK, C runtime): leave it unresolved, declared as its header has it. A `/GL` stand-in of a
-    library function changes the calls to it (sprintf: a match unresolved, 89% stood in); if one is needed,
-    `<name>.nogl.cpp`.
-  The brief and compile_and_diff list the unresolved names a function uses, split into these. One thing they
-  don't do: an unresolved D_<address> isn't checked, so a wrong address there only shows once it's defined.
+Games built with `/GL` and `/LTCG` pass arguments and `this` in eax, esi, edi or ebx, with no standard convention,
+and inline across files. In a project made without the LTCG mode (no `"ltcg": true` in `.decomp.wtf.json`), plain
+compiles can't match those functions: note "LTCG register convention" and release. In an LTCG project:
+- A unit whose driver `harness/<unit>.drv.cpp` defines `extern "C" __declspec(dllexport) void HarnessEntry(...)` is
+  compiled with /GL and linked with /LTCG through that harness; your compile_and_diff goes through it, and the
+  linker picks the registers from the driver's calls. Write ordinary C/C++ and compile: a register convention is
+  never a reason to release such a function untried.
+  - The driver calls the unit's functions the way the original's call sites do: what eax/esi/edi/ebx/ecx hold
+    right before the call, which pushes are constants.
+  - `harness/<unit>.<name>.cpp` holds stand-ins for what the unit calls or reads elsewhere, shaped like the real
+    ones (registers read, preserved, returned); `<name>.nogl.cpp` compiles without /GL (code the game's link
+    couldn't see into: middleware, XDK libraries). `// HARNESS-LINK: <flags>` adds linker flags (`d3d8ltcg.lib`).
+  - Functions are found by func_<address> in their names or `// FUNCTION: 0x<address> [map symbol]` before the
+    definition (needed for constructors, destructors and operators).
+  - `standins_for(unit)` writes a starting point: stand-ins with their conventions, a HarnessEntry with each
+    function's call sites, declarations, and the structs its functions look like members of.
+- The brief shows each function's convention in the original: registers read before written, stack arguments,
+  `ret N`, registers saved, and call sites with what they load before the call. When yours differs, fix the
+  driver's call or a stand-in so it looks like the original's call site.
+- Adding a helper function or a call site changes conventions under LTCG. The linker specialises a callee with
+  a single call site (arguments left where that caller has them, saves dropped); a second caller (a helper, a
+  driver call, a stand-in) can make it standard again, or the reverse. After adding one, check the convention
+  evidence again (the brief's convention against your compile's), and keep the original's number of call sites.
+- Member functions: `this` can arrive in any register (Accum::Add gets it in esi); write a member function when
+  the brief says the function is one, and it still matches. A free function's pointer can arrive the same way:
+  prefer a member function when its struct has other member functions (`get_class`). A function using two
+  registers at the same offsets is a function of two objects ("Two objects alike").
+- Unresolved names: the harness link goes on without them (`/FORCE:UNRESOLVED`) and the judge writes the
+  original's reference in their place. The brief and compile_and_diff list them by kind:
+  - data (a global, a D_<address>, a pool constant): not always harmless. Under LTCG the compiler sees a
+    global's definition, type and constness, and an unresolved one can change scheduling and code around its
+    loads. Define it, with its real type, in the unit or a harness file; don't release or wait for it. An
+    unresolved D_<address> isn't checked, so a wrong address only shows once it's defined;
+  - a callee called with a standard convention (__cdecl, __stdcall, __thiscall): harmless;
+  - a callee passed arguments in other registers: the call differs until a definition is in the link. Write a
+    stand-in shaped like the original's yourself, in the same claim (RunAccum: 83% to a match that way);
+  - a callee the original inlines (no call to it in the target): its body must be in the link;
+  - library code (XDK, C runtime): leave it unresolved, declared as its header has it; a /GL stand-in changes
+    the calls to it (sprintf: a match unresolved, 89% stood in). If one is needed, `<name>.nogl.cpp`.
 - Float constants the target loads by address (the diff shows their values): try both forms, the literal (`0.5f`)
-  and an `extern const float D_<address>`, and keep the better score. A load from an extern is scheduled
-  differently from a literal's, and either can win: ParticleStep matched only with the literal (96% with the
-  extern), while on Burnout 3 an agent following "always the literal" got 59.1% where the externs gave 65.8%. On
-  equal scores prefer the literal: the game's own literal lives in .rdata, and a named D_ extern doesn't port.
-  Sometimes the matching form is a folded expression (`1.0f - 1.3f`, not `-0.3f`): the compiler pooled the
-  result of an expression the original wrote out.
-- A unit's function can read 100% and still not be a match: its references must map one to one onto the
-  original's (one original global is always the same one of yours), and a reference that says which original
-  address it means (a `D_<address>` or `func_<address>` name, or a global with `// GLOBAL: 0x<address>` on the line
-  before its declaration) must mean the one the original uses there; floats and strings must have its values. The
-  judge says so when they don't, and progress doesn't count the function.
+  and an `extern const float D_<address>`, and keep the better score; the loads schedule differently and either
+  can win (ParticleStep matched only with the literal; on Burnout 3 the literal gave 59.1%, the externs 65.8%).
+  On equal scores prefer the literal: the game's literal lives in .rdata, and a named D_ extern doesn't port.
+  Sometimes the matching form is a folded expression (`1.0f - 1.3f`, not `-0.3f`).
+- 100% isn't a match until the references map one to one onto the original's, a name that says an address
+  (`D_<address>`, `func_<address>`, a global with `// GLOBAL: 0x<address>` before it) means the original's, and
+  floats and strings have its values. The judge says so when they don't.
 - `volatile` in a harness driver or stand-in, to steer the compiler, is forbidden. The harness must reproduce the
-  original's call sites and callees faithfully: on Burnout 3, harness contexts that didn't (a callee shaped wrong,
-  a call the original doesn't make) gave false MATCHes the final link then lost. In the game's own source,
-  `volatile` is allowed only as a documented exception, with a comment saying why, when it's the only form that
-  matches.
+  original's call sites and callees faithfully: on Burnout 3, unfaithful harness contexts gave false MATCHes the
+  final link lost. In the game's own source, `volatile` is allowed only as a documented exception (a comment
+  saying why) when it's the only form that matches.

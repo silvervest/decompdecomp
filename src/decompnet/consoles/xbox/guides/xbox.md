@@ -81,10 +81,11 @@ Link-time code generation (LTCG)
   - functions are found by func_<address> in their names, or by `// FUNCTION: 0x<address> [map symbol]` before
     the definition (needed for constructors, destructors and operators).
 - Unresolved names: the harness link goes on when something the unit uses isn't defined anywhere in it yet
-  (`/FORCE:UNRESOLVED`), and the judge writes the original's reference in its place. Measured on a small LTCG
-  title (each reference left unresolved, then defined in the link):
-  - data (a global, a D_<address>, a pool constant, a global's field or its address): harmless, the code is the
-    same. Don't release or wait for it, and don't stand data in just to have it defined;
+  (`/FORCE:UNRESOLVED`), and the judge writes the original's reference in its place. What each kind does:
+  - data (a global, a D_<address>, a pool constant, a global's field or its address): not always harmless. Under
+    LTCG the compiler sees a global's definition, type and constness, and an unresolved one can change the
+    scheduling and code around its loads. Define it, with its real type, in the unit or a harness file; don't
+    release or wait for it;
   - a callee the original calls with a standard convention (__cdecl, __stdcall, __thiscall: `ecx` and the
     stack): harmless;
   - a callee the original passes arguments in other registers (LTCG's own convention): the call site differs
@@ -110,3 +111,8 @@ Link-time code generation (LTCG)
   address it means (a `D_<address>` or `func_<address>` name, or a global with `// GLOBAL: 0x<address>` on the line
   before its declaration) must mean the one the original uses there; floats and strings must have its values. The
   judge says so when they don't, and progress doesn't count the function.
+- `volatile` in a harness driver or stand-in, to steer the compiler, is forbidden. The harness must reproduce the
+  original's call sites and callees faithfully: on Burnout 3, harness contexts that didn't (a callee shaped wrong,
+  a call the original doesn't make) gave false MATCHes the final link then lost. In the game's own source,
+  `volatile` is allowed only as a documented exception, with a comment saying why, when it's the only form that
+  matches.

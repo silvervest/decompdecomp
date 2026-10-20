@@ -181,6 +181,11 @@ class Console:
         """A data symbol's bytes, when the project's objects don't hold the game's data; None: they do."""
         return None
 
+    def data_bytes(self, fp, addr: int, length: int) -> bytes | None:
+        """The raw bytes at an address of the user's copy (for diffs to show the constants an instruction loads), or
+        None where the project can't tell."""
+        return None
+
     # for agents
 
     def asm_reason(self, code: bytes) -> str | None:

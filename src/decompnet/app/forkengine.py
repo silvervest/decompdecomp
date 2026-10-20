@@ -2011,7 +2011,7 @@ class ForkEngine:
                 return []
             prog, objs, ltcg = found
             addr = prog.find(meta.get("symbol") or fn["name"])
-            return methods.brief(prog, objs, addr, ltcg) if addr is not None else []
+            return methods.brief(prog, objs, addr, ltcg, meta.get("demangled")) if addr is not None else []
         except Exception:  # a heuristic: it never stands between an agent and the function
             logging.getLogger("decompdecomp").exception("finding member functions failed")
             return []

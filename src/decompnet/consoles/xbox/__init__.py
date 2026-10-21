@@ -36,6 +36,7 @@ class Xbox(Console):
     compiler_guide = "xbox"  # given up front; it starts by pointing at the x86 guide, which holds what PC shares
     ram = (0x00010000, 0x80000000)  # an XBE loads at 0x10000; the kernel lives above 0x80000000
     import_options = ("ltcg",)  # built with link-time code generation or not (None: told from the program)
+    sets_aside = True  # the XDK's own code (its library sections, its functions in .text): the import asks the scope
     own_features = frozenset({REBUILD_CHECK})  # `ninja export` relinks the XBE (pc/project_template/tools/export.py)
 
     def sniff(self, head: bytes, file) -> bool:
@@ -54,11 +55,12 @@ class Xbox(Console):
         return ""  # the program's library version table says which XDK, so which Visual C++, built it
 
     def create_project(self, root: Path, game: Path, *, compiler: str | None = None, ltcg: bool | None = None,
-                       log=print) -> dict:
-        """`ltcg`: the user's choice of link-time code generation (None: told from the program)."""
+                       scope: str = "game", log=print) -> dict:
+        """`ltcg`: the user's choice of link-time code generation (None: told from the program). `scope`: "program"
+        brings the XDK's library sections in too, set aside like its other code (forks/project.py SCOPES)."""
         from . import scratch
 
-        return scratch.create(root, game, compiler=compiler, ltcg=ltcg, log=log)
+        return scratch.create(root, game, compiler=compiler, ltcg=ltcg, scope=scope, log=log)
 
     def game_info(self, game: Path) -> dict:
         from . import scratch

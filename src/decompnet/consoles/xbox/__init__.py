@@ -39,6 +39,37 @@ class Xbox(Console):
     sets_aside = True  # the XDK's own code (its library sections, its functions in .text): the import asks the scope
     own_features = frozenset({REBUILD_CHECK})  # `ninja export` relinks the XBE (pc/project_template/tools/export.py)
 
+    def unanalysed(self, fp) -> str | None:
+        """The XDK's library sections with x86 code that an older import left out (scratch.unanalysed_sections)."""
+        from . import scratch
+
+        names = scratch.unanalysed_sections(fp.root, fp.manifest or {})
+        return f"the XDK's library sections ({len(names)} not analysed yet: {', '.join(names)})" if names else None
+
+    def analyse_unanalysed(self, net, slug: str, log=print) -> str | None:
+        """Those sections analysed now (scratch.analyse_library_sections), through forkengine.reanalyse: configured
+        and rebuilt again, the change taken back if it breaks an identical rebuild, and committed. Once it's kept (or
+        there was nothing to bring in), the manifest lists the sections analysed, so Settings stops offering it."""
+        from . import scratch
+
+        ran: dict = {}
+
+        def step(fp):
+            ran["said"], ran["sections"] = scratch.analyse_library_sections(fp.root, log=log)
+            return ran["said"]
+        said = net.forks.reanalyse(slug, step, paths=("config",), fix=True, log=log)
+        if "sections" not in ran or (said is None and ran["said"] is not None):
+            return None  # the analysis failed, or was taken back: the project's feed says why, and it can run again
+        fp = net.forks.get(slug)[1]
+        manifest = fp.manifest or {}
+        listed = f"config/{manifest['version']}/set_aside.json"
+        lists = "set_aside" not in manifest and (fp.root / listed).exists()  # (an import that set nothing aside)
+        fp.update_manifest(library_sections=ran["sections"], set_aside_unimported=None,
+                           **({"set_aside": listed} if lists else {}))
+        if lists:
+            net.forks.sync(slug, log=log)  # measured again, the new functions set aside
+        return said
+
     def sniff(self, head: bytes, file) -> bool:
         from . import scratch, xdvdfs
 
@@ -56,8 +87,8 @@ class Xbox(Console):
 
     def create_project(self, root: Path, game: Path, *, compiler: str | None = None, ltcg: bool | None = None,
                        scope: str = "game", log=print) -> dict:
-        """`ltcg`: the user's choice of link-time code generation (None: told from the program). `scope`: "program"
-        brings the XDK's library sections in too, set aside like its other code (forks/project.py SCOPES)."""
+        """`ltcg`: the user's choice of link-time code generation (None: told from the program). `scope` doesn't
+        change what's analysed: the XDK's library sections with x86 code always are, their functions set aside."""
         from . import scratch
 
         return scratch.create(root, game, compiler=compiler, ltcg=ltcg, scope=scope, log=log)

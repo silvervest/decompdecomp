@@ -21,7 +21,10 @@ the [msvc] pack's Visual C++ 7.1 (the XDK's own compiler) against the headers of
 from __future__ import annotations
 
 import bisect
+import copy
+import dataclasses
 import hashlib
+import json
 import os
 import re
 import struct
@@ -29,6 +32,8 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import capstone
 
 from ... import toolchains
 from ...forks import convention
@@ -255,6 +260,17 @@ def memory_image(xbe: XBE) -> bytes:
     return bytes(image)
 
 
+def _plausible_start(xbe: XBE, code: list[Section], target: int) -> bool:
+    """`target` sits where a function can start in one of the `code` sections: at the section's start, or after
+    padding or a ret, and not on padding or zeros itself."""
+    t = next((c for c in code if c.va <= target < c.va + c.size), None)
+    if t is None:
+        return False
+    at = target - t.va + t.offset
+    before = xbe.data[at - 1] if target > t.va else None
+    return (before is None or before in (0xCC, 0x90, 0xC3)) and xbe.data[at] not in (0x00, 0xCC)
+
+
 def function_starts(xbe: XBE, skip: frozenset[str] = frozenset()) -> list[int]:
     """Where functions start, as the code itself shows it: the entry point, and every `call rel32` target in a code
     section that sits where a function can start (at the section's start, or after padding or a ret). Ghidra
@@ -267,14 +283,10 @@ def function_starts(xbe: XBE, skip: frozenset[str] = frozenset()) -> list[int]:
     code = [s for s in xbe.sections if s.code and s.name not in skip]
 
     def plausible(target: int) -> bool:
-        t = next((c for c in code if c.va <= target < c.va + c.size), None)
-        if t is None:
-            return False
-        at = target - t.va + t.offset
-        before = xbe.data[at - 1] if target > t.va else None
-        return (before is None or before in (0xCC, 0x90, 0xC3)) and xbe.data[at] not in (0x00, 0xCC)
+        return _plausible_start(xbe, code, target)
 
-    found = {xbe.entry}
+    # (the entry point only where it's analysed: a new analysis of the library sections alone leaves .text as data)
+    found = {xbe.entry} if any(c.va <= xbe.entry < c.va + c.size for c in code) else set()
     for s in code:
         data = xbe.data[s.offset:s.offset + s.size]
         for op in (b"\xe8", b"\xe9"):  # calls, and jumps: a tail call can be the only way to a function
@@ -309,11 +321,15 @@ def vtable_targets(xbe: XBE, plausible, skip: frozenset[str] = frozenset()) -> s
 
 
 def ghidra_layout(xbe: XBE, skip: frozenset[str] = frozenset()) -> str:
-    """The DecompWtfLayout pre-script's lines: the headers and every section as blocks (sections in `skip`, the
-    XDK's own libraries, are left as data so the analysis doesn't spend its time there), and the entry points."""
+    """The DecompWtfLayout pre-script's lines: the headers and every section as blocks (sections that aren't code,
+    and those in `skip`, are left as data so the analysis doesn't spend its time there), and the entry points."""
     lines = [f"block XBE_HEADERS {xbe.image_base:X} {xbe.image_base + _u32(xbe.data, 0x108):X} rw"]
+    seen: Counter = Counter()
     for s in xbe.sections:
         name = re.sub(r"[^A-Za-z0-9_.$]", "_", s.name) or "section"
+        seen[name] += 1
+        if seen[name] > 1:  # a library section's data after its code (analysis_view): a block of its own
+            name = f"{name}_{seen[name]}"
         lines.append(f"block {name} {s.va:X} {s.va + max(s.vsize, s.size):X} "
                      f"{'x' if s.code and s.name not in skip else 'rw'}")
     lines += [f"entry {a:X}" for a in function_starts(xbe, skip)]
@@ -369,13 +385,12 @@ def tool_args(log=lambda *_: None) -> list[str]:
 
 
 def library_code(xbe: XBE, xdk: Path | None) -> tuple[dict[int, xdklib.LibraryFunction], list[Path]]:
-    """(address -> library function, the libraries matched): the XDK's own functions in the code sections that
-    aren't set aside whole, as the user's own XDK libraries match them byte for byte (xdklib). Nothing without an
+    """(address -> library function, the libraries matched): the XDK's own functions in every code section (.text
+    and the library sections), as the user's own XDK libraries match them byte for byte (xdklib). Nothing without an
     XDK folder."""
     if xdk is None:
         return {}, []
-    skip = xdklib.library_sections([s.name for s in xbe.sections], [lib.name for lib in xbe.libraries])
-    regions = [(s.va, xbe.data[s.offset:s.offset + s.size]) for s in xbe.sections if s.code and s.name not in skip]
+    regions = [(s.va, xbe.data[s.offset:s.offset + s.size]) for s in xbe.sections if s.code]
     libs = xdklib.libraries(xdk / "lib", [lib.name for lib in xbe.libraries])
     return xdklib.match(regions, libs), libs
 
@@ -414,9 +429,104 @@ def set_aside(xbe: XBE, functions: list[scratch_pe.Function], hits: dict[int, xd
     return {f.addr: every[f.addr] for f in functions if f.addr in every}
 
 
+# ---------------------------------------------------------------------------------------------------- library sections
+#
+# The XDK's big libraries link into sections of their own (xdklib.library_sections: XMV, DSOUND, WMADEC, XONLINE,
+# XNET, D3D, XGRPH, XPP, DOLBY...). Every one carries the executable flag (imagebld marks every section so), and their
+# flags vary (on a retail game most are 0x7, XONLINE and DOLBY 0x26), so neither the flags nor the names tell what
+# they hold. What they hold, on a retail game:
+# - x86 code, then the library's constant data (tables, strings, wave formats) after it in the same section: 128 KiB
+#   of XMV's 160 KiB, 57 KiB of WMADEC's 104 KiB, the last 7 KiB of DSOUND, a few KiB of D3D, XNET and XGRPH;
+# - no x86 at all: DOLBY is the audio processor's program (another instruction set). Its bytes don't even decode as
+#   x86 in places, none of the XDK's x86 library functions match in it, and no x86 call reaches into it.
+# The rule, by evidence rather than by name: a library section holds x86 code when the user's XDK libraries match one
+# of their i386 functions in it byte for byte (xdklib.match), or when at least MIN_CALLED places in it are each called
+# (`call rel32`) from two or more sites at a plausible function start (DOLBY: none; the smallest x86 one, XGRPH: 15).
+# Its code ends past the last function that evidence vouches for (a matched library function's end, or a called
+# start's own flow with its jump and byte tables), then the int3 padding after it; the rest of the section is data.
+# Sections without x86 code, and the data after the code, stay data whatever the project's scope: Ghidra gets them
+# as data blocks (analysis_view), so no function is made of them, and the export carries their bytes as they are.
+# shortcut: a function after the last vouched-for one that only a pointer reaches is left in the data part.
+MIN_CALLED = 2
+
+
+def call_sites(xbe: XBE) -> dict[int, set[int]]:
+    """Plausible function start -> the `call rel32` sites in the program's code sections that call it."""
+    code = [s for s in xbe.sections if s.code]
+    out: dict[int, set[int]] = {}
+    for s in code:
+        data = xbe.data[s.offset:s.offset + s.size]
+        i = data.find(b"\xe8")
+        while 0 <= i <= len(data) - 5:
+            target = (s.va + i + 5 + struct.unpack_from("<i", data, i + 1)[0]) & 0xFFFFFFFF
+            if target in out or _plausible_start(xbe, code, target):
+                out.setdefault(target, set()).add(s.va + i)
+            i = data.find(b"\xe8", i + 1)
+    return out
+
+
+def _code_end(md, xbe: XBE, start: int, limit: int) -> int:
+    """Where the function at `start` ends, by its own flow, with its switch's jump table and the byte table that
+    indexes it. (A byte table without a jump table has no end the code shows: the data after the function would
+    all be taken for it, so it's left out.)"""
+    flow = scratch_pe._flow_end(md, xbe, start, limit)
+    _, data_end, entries = scratch_pe._tables(md, xbe, start, flow, limit)
+    return max(flow, data_end) if entries else flow
+
+
+def library_code_ends(xbe: XBE, sections: frozenset[str], hits: dict[int, xdklib.LibraryFunction]) -> dict[str, int]:
+    """The library `sections` that hold x86 code -> where their code ends (the rule above); a section left out holds
+    none (another processor's program)."""
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+    md.detail = True
+    called = [a for a, sites in call_sites(xbe).items() if len(sites) >= 2]
+    out = {}
+    for s in xbe.sections:
+        if s.name not in sections or not s.code:
+            continue
+        lo, hi = s.va, s.va + s.size
+        matched = [a + h.size for a, h in hits.items() if lo <= a < hi]
+        starts = [a for a in called if lo <= a < hi]
+        if not matched and len(starts) < MIN_CALLED:
+            continue
+        ends = matched + [_code_end(md, xbe, a, hi) for a in starts]
+        end = min(max(ends), hi)
+        while end < hi and xbe.data[s.offset + end - lo] == 0xCC:  # the last function's padding
+            end += 1
+        out[s.name] = end
+    return out
+
+
+def analysis_view(xbe: XBE, sections: frozenset[str], ends: dict[str, int]) -> XBE:
+    """The program as the analysis sees it: each library section holding x86 code cut in two, its code and the data
+    after it (a section of the same name, not code), and the library sections holding none marked as data."""
+    view = copy.copy(xbe)
+    view.sections = []
+    for s in xbe.sections:
+        if s.name in sections and s.code and s.name not in ends:
+            view.sections.append(dataclasses.replace(s, code=False))
+        elif s.name in ends and ends[s.name] < s.va + s.size:
+            n = ends[s.name] - s.va
+            view.sections += [dataclasses.replace(s, vsize=n, size=n),
+                              dataclasses.replace(s, va=s.va + n, vsize=max(s.vsize, s.size) - n, offset=s.offset + n,
+                                                  size=s.size - n, code=False)]
+        else:
+            view.sections.append(s)
+    return view
+
+
+def _say_library_sections(sections: frozenset[str], ends: dict[str, int], log) -> None:
+    if ends:
+        log("the XDK's library sections with x86 code are analysed and their functions set aside as the XDK's (the "
+            "project's scope decides whether agents work on them): "
+            + ", ".join(f"{n} (code to 0x{e:08X})" for n, e in sorted(ends.items(), key=lambda kv: kv[1])))
+    if rest := sorted(sections - set(ends)):
+        log(f"no x86 code in {', '.join(rest)} (another processor's program, say): kept as data")
+
+
 def in_library_sections(xbe: XBE, functions: list[scratch_pe.Function], sections: frozenset[str]) -> dict[int, str]:
-    """Address -> why, for the analysed functions in the XDK's library sections (an import of the whole program
-    analyses those too, and sets their functions aside like the XDK's other code)."""
+    """Address -> why, for the analysed functions in the XDK's library sections (every import analyses those, and
+    sets their functions aside like the XDK's other code)."""
     out = {}
     for f in functions:
         if (s := xbe.section_at(f.addr)) is not None and s.name in sections:
@@ -424,22 +534,9 @@ def in_library_sections(xbe: XBE, functions: list[scratch_pe.Function], sections
     return out
 
 
-def create(root: Path, game: Path, *, compiler: str | None = None, ltcg: bool | None = None, scope: str = GAME,
-           log=print) -> dict:
-    """Make the project in `root` (which must not exist yet) and build it once, as scratch_pe does for a PC game:
-    Ghidra finds the functions (from the XBE's memory image, ghidra_layout), the XDK's own code is set aside (its
-    functions in .text by matching the user's XDK libraries; its library sections are left out outright, unless the
-    project covers the whole program (`scope`), when their functions are found and set aside too), and the rest is
-    grouped into source files compiled with Visual C++ 7.1 against the XDK's headers. Returns facts about the game."""
+def _ensure_ghidra(log) -> None:
     from ...forks import ghidra
 
-    info = game_info(game)
-    compiler = (compiler or f"MSVC/{info['compiler'] or DEFAULT_COMPILER}").removeprefix("MSVC/")
-    if info["compiler"] is None:
-        log(f"{info['compiler_why']}: trying Visual C++ {compiler}")
-    args = tool_args(log)
-    if not (toolchains.path("msvc") / compiler).is_dir():
-        raise ForkError(f"Visual C++ {compiler} isn't in the installed compiler pack")
     if not ghidra.available():  # as for a PC game: a JDK of decompdecomp's own where the computer has none
         if ghidra.java_home() is not None and toolchains.installed("jdk") is None:
             log("installing a Java development kit for Ghidra (200 MB, once): this computer has none of its own")
@@ -447,25 +544,39 @@ def create(root: Path, game: Path, *, compiler: str | None = None, ltcg: bool | 
         if toolchains.installed("ghidra") is None:
             log("installing Ghidra (540 MB, once): it finds the functions in Xbox programs")
             toolchains.ensure("ghidra", log=log)
+
+
+def create(root: Path, game: Path, *, compiler: str | None = None, ltcg: bool | None = None, scope: str = GAME,
+           log=print) -> dict:
+    """Make the project in `root` (which must not exist yet) and build it once, as scratch_pe does for a PC game:
+    Ghidra finds the functions (from the XBE's memory image, ghidra_layout) in .text and in every library section
+    holding x86 code, the XDK's own code is set aside (the library sections' functions, and its functions in .text
+    by matching the user's XDK libraries), and the rest is grouped into source files compiled with Visual C++ 7.1
+    against the XDK's headers. The same is analysed whatever the project's `scope`: it only decides, when the
+    project is measured, whether what's set aside is worked on and counted. Returns facts about the game."""
+    info = game_info(game)
+    compiler = (compiler or f"MSVC/{info['compiler'] or DEFAULT_COMPILER}").removeprefix("MSVC/")
+    if info["compiler"] is None:
+        log(f"{info['compiler_why']}: trying Visual C++ {compiler}")
+    args = tool_args(log)
+    if not (toolchains.path("msvc") / compiler).is_dir():
+        raise ForkError(f"Visual C++ {compiler} isn't in the installed compiler pack")
+    _ensure_ghidra(log)
     data = program_bytes(game)
     xbe = read_xbe(data)
     sections = frozenset(xdklib.library_sections([s.name for s in xbe.sections], [lib.name for lib in xbe.libraries]))
-    # the game's own code: the XDK's library sections stay out of the project (Ghidra doesn't spend its time there);
-    # the whole program: they're analysed too, and their functions set aside like the XDK's code in .text
-    skip = sections if scope == GAME else frozenset()
-    if skip:
-        log(f"the XDK's library sections are left out: {', '.join(sorted(skip))}")
-    elif sections:
-        log(f"the XDK's library sections are analysed too (the whole program): {', '.join(sorted(sections))}")
+    hits, libs = library_code(xbe, Path(args[args.index("--xdk") + 1]))
+    ends = library_code_ends(xbe, sections, hits)
+    view = analysis_view(xbe, sections, ends)
+    _say_library_sections(sections, ends, log)
 
     log(f"analysing {xbe.title or game.name} with Ghidra (finds every function; a big game takes a few minutes)")
-    found = find_functions(xbe, f"{info['id']}.xbe", skip)
+    found = find_functions(view, f"{info['id']}.xbe")
     if not found:
         raise ForkError("Ghidra found no functions in this program (did its analysis fail or time out?)")
-    found = [r for r in found if (s := xbe.section_at(r["entry"])) is not None and s.name not in skip]
-    hits, libs = library_code(xbe, Path(args[args.index("--xdk") + 1]))
-    functions = scratch_pe.analyse(xbe, with_library_code(found, hits), linker_padding=True)
-    aside = in_library_sections(xbe, functions, sections) | set_aside(xbe, functions, hits, libs)
+    found = [r for r in found if (s := view.section_at(r["entry"])) is not None and s.code]
+    functions = scratch_pe.analyse(view, with_library_code(found, hits), linker_padding=True)
+    aside = in_library_sections(view, functions, frozenset(ends)) | set_aside(view, functions, hits, libs)
     game_fns = [f for f in functions if f.addr not in aside]
     library = [f for f in functions if f.addr in aside]
     groups = scratch_pe.units(game_fns)
@@ -487,12 +598,108 @@ def create(root: Path, game: Path, *, compiler: str | None = None, ltcg: bool | 
         else {"cl_flags": CL_FLAGS, "manifest": evidence}
     if ltcg:
         log("link-time code generation: units are built in harness mode once their driver (harness/) calls them")
-    if skip:  # what covering the whole program later can't bring in (Settings says so)
-        lt["manifest"]["set_aside_unimported"] = f"the XDK's library sections ({', '.join(sorted(skip))})"
+    lt["manifest"]["library_sections"] = sorted(ends)  # analysed (a project made before lacks it: Console.unanalysed)
     return scratch_pe.write_project(
         root, game if is_xbe_file(game) else data, info=info, compiler=compiler, args=args,
         pe=xbe, groups=groups, platform="xbox", suffix=".xbe", what="your copy of the game's program (default.xbe)",
         set_aside={f.name: aside[f.addr] for f in library}, log=log, **lt)
+
+
+# ---------------------------------------------------------------------------------------------------- older projects
+#
+# Imports before every one analysed the library sections left them out of a project covering the game's own code
+# (their manifests may say so as `set_aside_unimported`). A new analysis of those sections alone brings them in
+# (Xbox.analyse_unanalysed, through forkengine.reanalyse): the project's existing functions and source files stay as
+# they are, and the new functions get source files of their own, set aside like the XDK's other code.
+
+_UNANALYSED: dict[tuple, list[str]] = {}  # (program, its mtime, functions.json's mtime) -> unanalysed_sections()
+
+
+def _functions_json(root: Path, manifest: dict) -> Path:
+    return root / "config" / manifest["version"] / "functions.json"
+
+
+def unanalysed_sections(root: Path, manifest: dict) -> list[str]:
+    """The XDK's library sections holding x86 code that a project made before they were always analysed has no
+    functions in ([]: none, or a project whose import analysed them: its manifest lists `library_sections`). Quick
+    (Settings asks): x86 code is told by its calls alone here, without matching the XDK's libraries; cached."""
+    if manifest.get("platform") != "xbox" or manifest.get("created") != "from scratch" or \
+            "library_sections" in manifest or "version" not in manifest:
+        return []
+    program, functions = root / manifest["game"]["path"], _functions_json(root, manifest)
+    key = (str(program), program.stat().st_mtime_ns, functions.stat().st_mtime_ns)
+    if key not in _UNANALYSED:
+        xbe = read_xbe(program.read_bytes())
+        sections = frozenset(xdklib.library_sections([s.name for s in xbe.sections], [lib.name for lib in xbe.libraries]))
+        have = {s.name for fns in json.loads(functions.read_text(encoding="utf-8"))["units"].values() for f in fns
+                if (s := xbe.section_at(f["addr"])) is not None}
+        _UNANALYSED.clear()
+        _UNANALYSED[key] = sorted(set(library_code_ends(xbe, sections, {})) - have,
+                                  key=lambda n: next(s.va for s in xbe.sections if s.name == n))
+    return list(_UNANALYSED[key])
+
+
+def _xdk_folder(manifest: dict) -> Path | None:
+    """The user's XDK, for matching its libraries: the one the project is configured with, else Setup's."""
+    for cmd in manifest.get("setup", [])[:1]:
+        if "--xdk" in cmd[:-1] and Path(cmd[cmd.index("--xdk") + 1]).is_dir():
+            return Path(cmd[cmd.index("--xdk") + 1])
+    try:
+        return toolchains.local_folder("xdk")
+    except toolchains.ToolchainError:
+        return None
+
+
+def analyse_library_sections(root: Path, log=print) -> tuple[str | None, list[str]]:
+    """Bring the library sections holding x86 code that the project has no functions in into it: Ghidra analyses
+    those sections alone (.text and the rest stay data blocks, so it's quick), their functions get source files of
+    their own (xdk_<address>) and are set aside as the XDK's library code; references to the project's existing
+    functions name them (scratch_pe.analyse's `known`). Changes config/ and src/auto/ only. Returns (what it did, as a
+    sentence, None when there was nothing to do; the library sections with x86 code, all analysed now)."""
+    manifest = json.loads((root / ".decomp.wtf.json").read_text(encoding="utf-8"))
+    version = manifest["version"]
+    xbe = read_xbe((root / manifest["game"]["path"]).read_bytes())
+    path = _functions_json(root, manifest)
+    info = json.loads(path.read_text(encoding="utf-8"))
+    known = {f["addr"]: f["name"] for fns in info["units"].values() for f in fns}
+    sections = frozenset(xdklib.library_sections([s.name for s in xbe.sections], [lib.name for lib in xbe.libraries]))
+    hits, libs = library_code(xbe, _xdk_folder(manifest))
+    ends = library_code_ends(xbe, sections, hits)
+    view = analysis_view(xbe, sections, ends)
+    have = {s.name for a in known if (s := view.section_at(a)) is not None}
+    todo = frozenset(ends) - have
+    if not todo:
+        return None, sorted(ends)
+    _say_library_sections(sections, {n: e for n, e in ends.items() if n in todo}, log)
+    _ensure_ghidra(log)
+    log(f"analysing the library sections {', '.join(sorted(todo))} with Ghidra (the rest of the program stays as it is)")
+    skip = frozenset(s.name for s in view.sections if s.code and s.name not in todo)  # (data sections: seeds)
+
+    def new(a: int) -> bool:
+        return a not in known and (s := view.section_at(a)) is not None and s.code and s.name in todo
+    found = [r for r in find_functions(view, f"{version}.xbe", skip) if new(r["entry"])]
+    if not found:
+        raise ForkError("Ghidra found no functions in the library sections (did its analysis fail or time out?)")
+    mine = {a: h for a, h in hits.items() if new(a)}
+    functions = [f for f in scratch_pe.analyse(view, with_library_code(found, mine), linker_padding=True, known=known)
+                 if new(f.addr)]
+    aside = in_library_sections(view, functions, todo) | set_aside(view, functions, mine, libs)
+    groups = {f"xdk_{u.removeprefix('text_')}": fns for u, fns in scratch_pe.units(functions).items()}
+    if clash := set(groups) & set(info["units"]):
+        raise ForkError(f"the project already has units named {', '.join(sorted(clash))}")
+    info["units"].update({u: [scratch_pe.function_entry(view, f) for f in fns] for u, fns in groups.items()})
+    path.write_text(json.dumps(info, indent=1), encoding="utf-8")
+    listed = root / manifest.get("set_aside", f"config/{version}/set_aside.json")
+    old = json.loads(listed.read_text(encoding="utf-8")) if listed.exists() else {}
+    listed.write_text(json.dumps(old | {f.name: aside[f.addr] for f in functions}, indent=1), encoding="utf-8")
+    for u, fns in groups.items():
+        src = root / "src" / "auto" / f"{u}.cpp"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text(scratch_pe.source_stub(fns), encoding="utf-8")
+    matched = sum(1 for f in functions if f.addr in mine)
+    return (f"{len(functions)} functions in the XDK's library sections {', '.join(sorted(todo))} are in "
+            f"{len(groups)} new source file{'s' if len(groups) != 1 else ''}, set aside as the XDK's library code "
+            f"({matched} of them matched to its libraries by their bytes)"), sorted(ends)
 
 
 def is_xbe_file(path: Path) -> bool:

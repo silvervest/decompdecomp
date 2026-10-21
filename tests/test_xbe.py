@@ -32,7 +32,7 @@ ENTRY, HELPER, PUSHES = (demo.FUNCTIONS[k] for k in ("entry", "helper", "pushes_
 def _ghidra_rows(*starts: int) -> list[dict]:
     """What Ghidra's function list says about the demo (where each function's last instruction ends)."""
     ends = {ENTRY: ENTRY + 0x16, HELPER: HELPER + 0x0D, PUSHES: PUSHES + 0x10}
-    return [{"entry": s, "end": ends[s], "name": f"FUN_{s:08x}", "source": "DEFAULT", "convention": "__cdecl",
+    return [{"entry": s, "end": ends.get(s, s + 1), "name": f"FUN_{s:08x}", "source": "DEFAULT", "convention": "__cdecl",
              "purge": 0, "params": 0} for s in starts]
 
 
@@ -400,34 +400,250 @@ def test_xdk_sections_are_set_aside_by_name():
                                                                               "XACTENG"}
 
 
-@pytest.mark.parametrize("scope", ["game", "program"])
-def test_the_whole_program_brings_the_xdks_library_sections_in_set_aside(scope, tmp_path, monkeypatch):
-    """The game's own code: the XDK's library sections stay out of the project, and the manifest says so (Settings
-    tells the user that covering the whole program later can't bring them in). The whole program: Ghidra analyses
-    them too, and their functions get source files and are set aside like the XDK's code in .text. (The demo's .text
-    plays a library section here.)"""
+LIB = demo.LIBRARY  # xbe(libraries=True): XPP's functions ("d" and "a" called by nobody), its data at demo.TABLE
+LIB_FNS = sorted(LIB.values())
+
+
+def test_library_sections_hold_x86_code_by_evidence_not_by_name():
+    """XPP holds x86 code (two of its starts are each called from two places), then data; DOLBY holds another
+    processor's program (no call reaches into it, and no XDK library function matches in it): it stays data. A
+    library function matched by its bytes is evidence enough on its own."""
+    xbe = scratch_xbe.read_xbe(demo.xbe(libraries=True))
+    names = frozenset(xdklib.library_sections([s.name for s in xbe.sections], [lib.name for lib in xbe.libraries]))
+    assert names == {"XPP", "DOLBY"} and all(s.code for s in xbe.sections if s.name in names)  # (the flags say code)
+    sites = scratch_xbe.call_sites(xbe)
+    assert sites[LIB["b"]] == {LIB["a"], LIB["c"]} and sites[LIB["c"]] == {LIB["d"] + 5, LIB["a"] + 5}
+    assert scratch_xbe.library_code_ends(xbe, names, {}) == {"XPP": demo.TABLE}  # past b's padding: the data
+    hit = xdklib.LibraryFunction(demo.DSP, 16, "_f", "x.lib", "x.obj")
+    assert scratch_xbe.library_code_ends(xbe, names, {demo.DSP: hit}) == {"XPP": demo.TABLE, "DOLBY": demo.DSP + 16}
+
+
+def test_the_analysis_sees_a_library_sections_data_and_another_processors_program_as_data():
+    xbe = scratch_xbe.read_xbe(demo.xbe(libraries=True))
+    view = scratch_xbe.analysis_view(xbe, frozenset({"XPP", "DOLBY"}), {"XPP": demo.TABLE})
+    assert [(s.name, s.va, s.size, s.code) for s in view.sections[3:]] == [
+        ("XPP", demo.LIB, 0x40, True), ("XPP", demo.TABLE, 0x40, False), ("DOLBY", demo.DSP, 0x40, False)]
+    assert view.read(demo.TABLE, 4) == bytes.fromhex("80000000") and xbe.sections[3].size == 0x80  # (a copy)
+    layout = scratch_xbe.ghidra_layout(view).splitlines()
+    assert {"block XPP 14000 14040 x", "block XPP_2 14040 14080 rw", "block DOLBY 15000 15040 rw"} <= set(layout)
+    # seeds: the called starts, never the data; analyse() makes no function of the table, which a sweep would take
+    starts = scratch_xbe.function_starts(view)
+    assert {LIB["b"], LIB["c"]} <= set(starts) and not [a for a in starts if a >= demo.TABLE]
+    fns = scratch_pe.analyse(view, _ghidra_rows(ENTRY, HELPER, LIB["d"], LIB["b"]), linker_padding=True)
+    assert [f.addr for f in fns] == [ENTRY, HELPER, PUSHES, *LIB_FNS]
+    b = next(f for f in fns if f.addr == LIB["b"])
+    assert (b.size, b.relocs) == (6, [(1, DIR32, f"_D_{demo.TABLE:08X}", 0)])
+    # the whole section as code: the sweep made functions of the table
+    whole = scratch_pe.analyse(xbe, _ghidra_rows(ENTRY, HELPER, LIB["d"], LIB["b"]), linker_padding=True)
+    assert [f.addr for f in whole if f.addr >= demo.TABLE]
+
+
+def _importing(tmp_path, monkeypatch, rows):
+    """create() as far as writing the project, Ghidra's rows given (`rows`); returns (what's written, Ghidra's calls,
+    the log)."""
     game = tmp_path / "default.xbe"
-    game.write_bytes(demo.xbe())
+    game.write_bytes(demo.xbe(libraries=True))
     (tmp_path / "msvc" / "7.1").mkdir(parents=True)
     monkeypatch.setattr(scratch_xbe, "tool_args", lambda log: ["--msvc", str(tmp_path / "msvc"), "--xdk", str(tmp_path)])
     monkeypatch.setattr(scratch_xbe.toolchains, "path", lambda name: tmp_path / "msvc")
     monkeypatch.setattr(ghidra, "available", lambda: True)
-    monkeypatch.setattr(xdklib, "library_sections", lambda sections, libs: {".text"})
-    skipped = []
-    monkeypatch.setattr(scratch_xbe, "find_functions", lambda xbe, name, skip=frozenset(): skipped.append(skip)
-                        or _ghidra_rows(ENTRY, HELPER, PUSHES))
+    calls = []
+    monkeypatch.setattr(scratch_xbe, "find_functions", lambda xbe, name, skip=frozenset(): calls.append((xbe, skip))
+                        or rows)
     monkeypatch.setattr(scratch_xbe, "library_code", lambda xbe, xdk: ({}, []))
-    written = {}
+    written, said = {}, []
     monkeypatch.setattr(scratch_pe, "write_project", lambda root, game, **kw: written.update(kw) or {})
-    scratch_xbe.create(tmp_path / "p", game, compiler="MSVC/7.1", ltcg=False, scope=scope, log=lambda *_: None)
-    if scope == "game":
-        assert skipped == [frozenset({".text"})] and written["groups"] == {} and not written["set_aside"]
-        assert written["manifest"]["set_aside_unimported"] == "the XDK's library sections (.text)"
-    else:
-        assert skipped == [frozenset()] and list(written["groups"]) == [f"xdk_{ENTRY:08X}"]
-        assert set(written["set_aside"].values()) == {"XDK library code: the .text section"}
-        assert len(written["set_aside"]) == 3 and "set_aside_unimported" not in written["manifest"]
+    return game, written, calls, said
+
+
+@pytest.mark.parametrize("scope", ["game", "program"])
+def test_every_import_analyses_the_library_sections_with_x86_code_and_sets_them_aside(scope, tmp_path, monkeypatch):
+    """Whatever the scope: Ghidra gets XPP's code (its data and DOLBY as data blocks), and XPP's functions get a
+    source file of their own and are set aside as the XDK's; the scope only decides that when the project is
+    measured. The manifest lists the sections analysed, and never says anything was left out."""
+    rows = _ghidra_rows(ENTRY, HELPER, PUSHES, LIB["d"], LIB["b"], demo.TABLE + 4, demo.DSP)  # (two in data)
+    game, written, calls, said = _importing(tmp_path, monkeypatch, rows)
+    scratch_xbe.create(tmp_path / "p", game, compiler="MSVC/7.1", ltcg=False, scope=scope, log=said.append)
+    (view, skip), = calls
+    assert skip == frozenset() and [s.name for s in view.sections if not s.code][-2:] == ["XPP", "DOLBY"]
+    assert {u: [f.addr for f in fns] for u, fns in written["groups"].items()} == {
+        f"text_{ENTRY:08X}": [ENTRY, HELPER, PUSHES], f"xdk_{LIB['d']:08X}": LIB_FNS}
+    assert written["set_aside"] == {f.name: "XDK library code: the XPP section" for f in written["groups"][
+        f"xdk_{LIB['d']:08X}"]}
+    assert written["manifest"]["library_sections"] == ["XPP"] and "set_aside_unimported" not in written["manifest"]
+    assert any("XPP (code to 0x00014040)" in s for s in said) and any("no x86 code in DOLBY" in s for s in said)
+    # the library code refers to the game's functions by their names: a callback pushed, a tail call
+    d = written["groups"][f"xdk_{LIB['d']:08X}"][0]
+    assert [r[2] for r in d.relocs] == [f"_func_{ENTRY:08X}", f"_func_{LIB['c']:08X}", f"_func_{HELPER:08X}"]
     assert consoles.get("xbox").sets_aside and consoles.get("xbox").describe()["sets_aside"]
+
+
+def test_an_ltcg_import_gives_library_units_no_harness_driver(tmp_path, monkeypatch):
+    """Library code isn't the game's link-time code generation: its units build as plain units, with no driver."""
+    from decompnet.forks import ltcg as ltcg_mode
+
+    game, written, _, _ = _importing(tmp_path, monkeypatch, _ghidra_rows(ENTRY, HELPER, LIB["d"], LIB["b"]))
+    scratch_xbe.create(tmp_path / "p", game, compiler="MSVC/7.1", ltcg=True, log=lambda *_: None)
+    assert written["prepare"] is ltcg_mode.prepare and written["manifest"]["ltcg"] is True
+    root = tmp_path / "proj"
+    (root / "tools").mkdir(parents=True)
+    (root / "tools" / "configure.py").write_text("LTCG = False\n")
+    written["prepare"](root, list(written["groups"]))
+    assert sorted(p.name for p in (root / "harness").iterdir()) == [f"text_{ENTRY:08X}.drv.cpp"]
+
+
+def _older_project(root: Path) -> dict:
+    """A project as an import before every one analysed the library sections made it: .text's functions only, and
+    a manifest saying the library sections were left out."""
+    import json
+
+    xbe = scratch_xbe.read_xbe(demo.xbe(libraries=True))
+    (root / "orig").mkdir(parents=True)
+    (root / "orig" / "demo.xbe").write_bytes(xbe.data)
+    fns = scratch_pe.analyse(xbe, _ghidra_rows(ENTRY, HELPER, PUSHES), linker_padding=True)
+    fns = [f for f in fns if f.addr < demo.TEXT + 0x1000]
+    conf = root / "config" / "demo"
+    conf.mkdir(parents=True)
+    units = {u: [scratch_pe.function_entry(xbe, f) for f in g] for u, g in scratch_pe.units(fns).items()}
+    (conf / "functions.json").write_text(json.dumps({"exe": "orig/demo.xbe", "image_base": xbe.image_base,
+                                                     "units": units}, indent=1))
+    manifest = {"created": "from scratch", "platform": "xbox", "version": "demo",
+                "game": {"path": "orig/demo.xbe"}, "setup": [["python", "tools/configure.py", "demo"]],
+                "set_aside_unimported": "the XDK's library sections (DOLBY, XPP)"}
+    (root / ".decomp.wtf.json").write_text(json.dumps(manifest))
+    return units
+
+
+def test_an_older_project_gets_the_library_sections_it_lacks_and_keeps_what_it_has(tmp_path, monkeypatch):
+    import json
+
+    from decompnet.forks.project import ForkProject
+
+    root = tmp_path / "p"
+    units = _older_project(root)
+    fp = ForkProject(root)
+    xbox = consoles.get("xbox")
+    assert scratch_xbe.unanalysed_sections(root, fp.manifest) == ["XPP"]
+    assert xbox.unanalysed(fp) == "the XDK's library sections (1 not analysed yet: XPP)"
+    monkeypatch.setattr(ghidra, "available", lambda: True)
+    monkeypatch.setattr(scratch_xbe, "_xdk_folder", lambda manifest: None)
+    calls = []
+    rows = _ghidra_rows(ENTRY, LIB["d"], LIB["b"], demo.TABLE + 4)  # (Ghidra's entry point row, one in data)
+    monkeypatch.setattr(scratch_xbe, "find_functions", lambda xbe, name, skip=frozenset(): calls.append(skip) or rows)
+    said, sections = scratch_xbe.analyse_library_sections(root, log=lambda *_: None)
+    assert sections == ["XPP"] and said.startswith("4 functions in the XDK's library sections XPP are in 1 new source "
+                                                   "file, set aside")
+    assert calls == [frozenset({".text"})]  # Ghidra analyses only the sections it lacks
+    info = json.loads((root / "config" / "demo" / "functions.json").read_text())
+    assert {u: info["units"][u] for u in units} == units  # what the project had stays as it was
+    new = info["units"][f"xdk_{LIB['d']:08X}"]
+    assert [f["addr"] for f in new] == LIB_FNS
+    # references to the project's own functions name them, as an import of everything at once would
+    assert [r[2] for r in new[0]["relocs"]] == [f"_func_{ENTRY:08X}", f"_func_{LIB['c']:08X}", f"_func_{HELPER:08X}"]
+    aside = json.loads((root / "config" / "demo" / "set_aside.json").read_text())
+    assert aside == {f["name"]: "XDK library code: the XPP section" for f in new}
+    assert (root / "src" / "auto" / f"xdk_{LIB['d']:08X}.cpp").read_text().startswith("/* 4 functions from 0x00014000")
+    # again: nothing left to bring in
+    assert scratch_xbe.analyse_library_sections(root, log=lambda *_: None) == (None, ["XPP"])
+    assert scratch_xbe.unanalysed_sections(root, fp.manifest) == []
+
+
+needs_xbox_build = pytest.mark.skipif(
+    any(toolchains.installed(t) is None for t in ("msvc", "objdiff-cli", "xdk"))
+    or (sys.platform != "win32" and not toolchains.installed("wibo-xbox")),
+    reason="needs Visual C++ (msvc, proprietary), your own XDK set up in Setup, objdiff and wibo-xbox")
+
+
+@needs_xbox_build
+def test_an_older_project_brings_the_library_sections_in_from_settings_keeping_its_matches(tmp_path, monkeypatch):
+    """End to end, Ghidra's rows given: a project imported the way older imports did (no library sections), with a
+    match; Settings' analysis brings XPP in through reanalyse (configured, built and rebuilt again, committed), set
+    aside while the project covers the game's own code, and the match stays."""
+    import json
+    import subprocess
+
+    monkeypatch.setattr(ghidra, "available", lambda: True)
+    rows = _ghidra_rows(ENTRY, HELPER, PUSHES, LIB["d"], LIB["b"])
+    monkeypatch.setattr(scratch_xbe, "find_functions", lambda xbe, name, skip=frozenset(): rows)
+    ends = scratch_xbe.library_code_ends
+    monkeypatch.setattr(scratch_xbe, "library_code_ends", lambda *a: {})  # as older imports: none analysed
+    net = RomNetwork(tmp_path / "decomp.db", tmp_path / "ws")
+    (tmp_path / "ws").mkdir()
+    slug = net.import_rom(demo.xbe(libraries=True), name="default.xbe", confirmed=True, log=lambda *_: None)
+    root = Path(net.project_row(slug)["root"])
+    fp = net.forks.get(slug)[1]
+    fp.update_manifest(library_sections=None, set_aside_unimported="the XDK's library sections (DOLBY, XPP)")
+    monkeypatch.setattr(scratch_xbe, "library_code_ends", ends)
+    agent, _ = net.local_agent("xbox-agent")
+    helper = f"func_{HELPER:08X}"
+    decl = (f'extern "C" __declspec(dllimport) int KeQueryPerformanceCounter(void);\n'
+            f'extern "C" int D_{demo.GLOBAL:08X};\n')
+    assert net.forks.edit_file(agent, slug, "include/common.h", "", decl, "kernel").startswith("✅")
+    res = net.attempt(agent, f"_{helper}", f'extern "C" int {helper}(void) {{\n'
+                      f"    return KeQueryPerformanceCounter() + D_{demo.GLOBAL:08X};\n}}\n", slug)
+    assert res["matched"], res["text"]
+    assert net.overview(slug)["unanalysed"] == "the XDK's library sections (1 not analysed yet: XPP)"
+
+    said = net.forks.analyse_unanalysed(slug, log=lambda *_: None)
+    assert said and said.startswith("4 functions in the XDK's library sections XPP"), said
+    status = {r["name"]: r["status"] for r in net.store.all("SELECT name, status FROM functions")}
+    assert status[f"_{helper}"] == "matched"
+    assert {status[f"_func_{a:08X}"] for a in LIB_FNS} == {"asm"}  # set aside: the game's own code
+    manifest = json.loads((root / ".decomp.wtf.json").read_text())
+    assert manifest["library_sections"] == ["XPP"] and "set_aside_unimported" not in manifest
+    assert net.overview(slug)["unanalysed"] is None
+    log = subprocess.run(["git", "log", "--format=%s", "-1"], cwd=root, capture_output=True, text=True).stdout
+    assert log.startswith("Analyse the game again: 4 functions")
+    net.forks.set_scope(slug, "program", log=lambda *_: None)
+    status = {r["name"]: r["status"] for r in net.store.all("SELECT name, status FROM functions")}
+    assert {status[f"_func_{a:08X}"] for a in LIB_FNS} == {"open"} and status[f"_{helper}"] == "matched"
+
+
+class _Forks:
+    """forkengine's reanalyse and sync as Xbox.analyse_unanalysed uses them: `outcome` "kept" (the step's change
+    stays), "taken back" (the rebuild broke) or "failed" (the step raised)."""
+
+    def __init__(self, root: Path, outcome: str):
+        from decompnet.forks.project import ForkProject
+
+        self.fp, self.outcome, self.synced = ForkProject(root), outcome, 0
+
+    def reanalyse(self, slug, step, paths=("config",), fix=False, log=print):
+        assert paths == ("config",) and fix
+        try:
+            said = step(self.fp)
+        except ForkError:
+            return None
+        return said if self.outcome == "kept" else None
+
+    def get(self, slug):
+        return None, self.fp, {}
+
+    def sync(self, slug, log=print):
+        self.synced += 1
+
+
+@pytest.mark.parametrize("outcome", ["kept", "taken back", "failed"])
+def test_bringing_the_library_sections_in_is_recorded_once_it_is_kept(outcome, tmp_path, monkeypatch):
+    import json
+
+    root = tmp_path / "p"
+    _older_project(root)
+    monkeypatch.setattr(ghidra, "available", lambda: True)
+    monkeypatch.setattr(scratch_xbe, "_xdk_folder", lambda manifest: None)
+    rows = [] if outcome == "failed" else _ghidra_rows(LIB["d"], LIB["b"])
+    monkeypatch.setattr(scratch_xbe, "find_functions", lambda xbe, name, skip=frozenset(): rows)
+    net = type("Net", (), {"forks": _Forks(root, outcome)})()
+    said = consoles.get("xbox").analyse_unanalysed(net, "p", log=lambda *_: None)
+    manifest = json.loads((root / ".decomp.wtf.json").read_text())
+    if outcome == "kept":
+        assert said.startswith("4 functions") and manifest["library_sections"] == ["XPP"]
+        assert "set_aside_unimported" not in manifest and manifest["set_aside"] == "config/demo/set_aside.json"
+        assert net.forks.synced == 1  # measured again with the new functions set aside
+        assert consoles.get("xbox").unanalysed(net.forks.fp) is None
+    else:  # (reanalyse takes the files back itself) Settings goes on offering it
+        assert said is None and "library_sections" not in manifest and net.forks.synced == 0
+        assert manifest["set_aside_unimported"]
 
 
 def _fake_xdk(top: Path) -> Path:

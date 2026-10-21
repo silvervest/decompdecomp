@@ -41,6 +41,10 @@ SECTOR = 0x800
 FUNCTIONS = {"entry": TEXT, "helper": TEXT + 0x20, "pushes_global": TEXT + 0x30}
 GLOBAL = DATA
 SLOTS = {RDATA: "KeQueryPerformanceCounter", RDATA + 4: "NtClose"}
+# xbe(libraries=True): a library section of x86 code then data, and one of another processor's program
+LIB, DSP = 0x14000, 0x15000
+LIBRARY = {"d": LIB, "a": LIB + 0x10, "c": LIB + 0x20, "b": LIB + 0x30}  # library_code()'s functions
+TABLE = LIB + 0x40  # where its data starts
 
 
 def _rel32(at: int, size: int, target: int) -> bytes:
@@ -72,16 +76,51 @@ def text() -> bytes:
     return bytes(code.ljust(0x40, b"\xcc"))
 
 
-def xbe(keys: str = "retail") -> bytes:
-    """The program: headers in the first 0x1000 bytes, then one 0x1000-byte page per section."""
+def library_code() -> bytes:
+    """A library section as the XDK's big libraries link them (their own section, named after them): x86 code, then
+    the library's constant data. Four functions (the first and second called by nobody, the last two each from two
+    places, one reading the table), then a table whose bytes a linear sweep would take for code."""
+    f = LIBRARY
+    code = bytearray()
+    code += b"\x68" + struct.pack("<I", FUNCTIONS["entry"])             # push offset entry (a callback, in .text)
+    code += b"\xe8" + _rel32(f["d"] + 5, 5, f["c"])                     # call c
+    code += b"\x59"                                                     # pop ecx
+    code += b"\xe9" + _rel32(f["d"] + 11, 5, FUNCTIONS["helper"])       # jmp helper (in .text: a tail call)
+    code = code.ljust(f["a"] - LIB, b"\xcc")
+    code += b"\xe8" + _rel32(f["a"], 5, f["b"])                         # call b
+    code += b"\xe8" + _rel32(f["a"] + 5, 5, f["c"])                     # call c
+    code += b"\xc3"                                                     # ret
+    code = code.ljust(f["c"] - LIB, b"\xcc")
+    code += b"\xe8" + _rel32(f["c"], 5, f["b"])                         # call b
+    code += b"\xc3"                                                     # ret
+    code = code.ljust(f["b"] - LIB, b"\xcc")
+    code += b"\xa1" + struct.pack("<I", TABLE)                          # mov eax, [table]
+    code += b"\xc3"                                                     # ret
+    code = code.ljust(TABLE - LIB, b"\xcc")
+    return bytes(code) + struct.pack("<16I", *(0x80 * (k + 1) for k in range(16)))
+
+
+def dsp_program() -> bytes:
+    """A section holding another processor's program, as the audio processor's (DOLBY) is: 24-bit words that aren't
+    x86 code, though some of their bytes are x86 opcodes (a `call rel32` going nowhere near the program)."""
+    return bytes.fromhex("080c0500000000000100000001000000" + "e8123456ffffff00c3cc00e8a5a5a500" * 3)
+
+
+def xbe(keys: str = "retail", libraries: bool = False) -> bytes:
+    """The program: headers in the first 0x1000 bytes, then one 0x1000-byte page per section. `libraries`: two
+    library sections after .data, XPP (x86 code, then data: library_code) and DOLBY (dsp_program)."""
     entry_key, thunk_key = KEYS[keys]
     head = bytearray(0x1000)
     cert, sections_at, names_at, libs_at, strings_at = 0x184, 0x360, 0x400, 0x440, 0x480
     sections = [(".text", 0x6, TEXT, text()),                                                   # executable, preload
                 (".rdata", 0x2, RDATA, b"".join(struct.pack("<I", 0x80000000 | o) for o in KERNEL) + bytes(4)),
                 (".data", 0x3, DATA, struct.pack("<I", 0x12345678))]                            # writable, preload
+    if libraries:  # (two more section headers: the names and what follows them move up)
+        sections += [("XPP", 0x6, LIB, library_code()), ("DOLBY", 0x26, DSP, dsp_program())]
+        names_at, libs_at, strings_at = 0x480, 0x4C0, 0x500
     head[0:4] = b"XBEH"
-    struct.pack_into("<6I", head, 0x104, BASE, 0x1000, DATA + 0x1000 - BASE, 0x184, 0x41000000, BASE + cert)
+    end = sections[-1][2] + 0x1000
+    struct.pack_into("<6I", head, 0x104, BASE, 0x1000, end - BASE, 0x184, 0x41000000, BASE + cert)
     struct.pack_into("<3I", head, 0x11C, len(sections), BASE + sections_at, 0x5)  # count, headers, init flags
     struct.pack_into("<I", head, 0x128, FUNCTIONS["entry"] ^ entry_key)
     struct.pack_into("<I", head, 0x130, 0x10000)  # stack commit

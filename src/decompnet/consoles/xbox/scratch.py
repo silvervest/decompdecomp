@@ -33,7 +33,7 @@ from pathlib import Path
 from ... import toolchains
 from ...forks import convention
 from ...forks import ltcg as ltcg_mode
-from ...forks.project import ForkError
+from ...forks.project import GAME, ForkError
 from ..pc import scratch as scratch_pe
 from ..pc.scratch import PE, Section
 from . import xboxkrnl, xdklib, xdvdfs
@@ -414,11 +414,23 @@ def set_aside(xbe: XBE, functions: list[scratch_pe.Function], hits: dict[int, xd
     return {f.addr: every[f.addr] for f in functions if f.addr in every}
 
 
-def create(root: Path, game: Path, *, compiler: str | None = None, ltcg: bool | None = None, log=print) -> dict:
+def in_library_sections(xbe: XBE, functions: list[scratch_pe.Function], sections: frozenset[str]) -> dict[int, str]:
+    """Address -> why, for the analysed functions in the XDK's library sections (an import of the whole program
+    analyses those too, and sets their functions aside like the XDK's other code)."""
+    out = {}
+    for f in functions:
+        if (s := xbe.section_at(f.addr)) is not None and s.name in sections:
+            out[f.addr] = f"XDK library code: the {s.name} section"
+    return out
+
+
+def create(root: Path, game: Path, *, compiler: str | None = None, ltcg: bool | None = None, scope: str = GAME,
+           log=print) -> dict:
     """Make the project in `root` (which must not exist yet) and build it once, as scratch_pe does for a PC game:
     Ghidra finds the functions (from the XBE's memory image, ghidra_layout), the XDK's own code is set aside (its
-    sections outright, its functions in .text by matching the user's XDK libraries), and the rest is grouped into
-    source files compiled with Visual C++ 7.1 against the XDK's headers. Returns facts about the game."""
+    functions in .text by matching the user's XDK libraries; its library sections are left out outright, unless the
+    project covers the whole program (`scope`), when their functions are found and set aside too), and the rest is
+    grouped into source files compiled with Visual C++ 7.1 against the XDK's headers. Returns facts about the game."""
     from ...forks import ghidra
 
     info = game_info(game)
@@ -437,9 +449,14 @@ def create(root: Path, game: Path, *, compiler: str | None = None, ltcg: bool | 
             toolchains.ensure("ghidra", log=log)
     data = program_bytes(game)
     xbe = read_xbe(data)
-    skip = frozenset(xdklib.library_sections([s.name for s in xbe.sections], [lib.name for lib in xbe.libraries]))
+    sections = frozenset(xdklib.library_sections([s.name for s in xbe.sections], [lib.name for lib in xbe.libraries]))
+    # the game's own code: the XDK's library sections stay out of the project (Ghidra doesn't spend its time there);
+    # the whole program: they're analysed too, and their functions set aside like the XDK's code in .text
+    skip = sections if scope == GAME else frozenset()
     if skip:
-        log(f"the XDK's library sections are set aside: {', '.join(sorted(skip))}")
+        log(f"the XDK's library sections are left out: {', '.join(sorted(skip))}")
+    elif sections:
+        log(f"the XDK's library sections are analysed too (the whole program): {', '.join(sorted(sections))}")
 
     log(f"analysing {xbe.title or game.name} with Ghidra (finds every function; a big game takes a few minutes)")
     found = find_functions(xbe, f"{info['id']}.xbe", skip)
@@ -448,7 +465,7 @@ def create(root: Path, game: Path, *, compiler: str | None = None, ltcg: bool | 
     found = [r for r in found if (s := xbe.section_at(r["entry"])) is not None and s.name not in skip]
     hits, libs = library_code(xbe, Path(args[args.index("--xdk") + 1]))
     functions = scratch_pe.analyse(xbe, with_library_code(found, hits), linker_padding=True)
-    aside = set_aside(xbe, functions, hits, libs)
+    aside = in_library_sections(xbe, functions, sections) | set_aside(xbe, functions, hits, libs)
     game_fns = [f for f in functions if f.addr not in aside]
     library = [f for f in functions if f.addr in aside]
     groups = scratch_pe.units(game_fns)
@@ -470,6 +487,8 @@ def create(root: Path, game: Path, *, compiler: str | None = None, ltcg: bool | 
         else {"cl_flags": CL_FLAGS, "manifest": evidence}
     if ltcg:
         log("link-time code generation: units are built in harness mode once their driver (harness/) calls them")
+    if skip:  # what covering the whole program later can't bring in (Settings says so)
+        lt["manifest"]["set_aside_unimported"] = f"the XDK's library sections ({', '.join(sorted(skip))})"
     return scratch_pe.write_project(
         root, game if is_xbe_file(game) else data, info=info, compiler=compiler, args=args,
         pe=xbe, groups=groups, platform="xbox", suffix=".xbe", what="your copy of the game's program (default.xbe)",

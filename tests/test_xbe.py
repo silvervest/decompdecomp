@@ -400,6 +400,36 @@ def test_xdk_sections_are_set_aside_by_name():
                                                                               "XACTENG"}
 
 
+@pytest.mark.parametrize("scope", ["game", "program"])
+def test_the_whole_program_brings_the_xdks_library_sections_in_set_aside(scope, tmp_path, monkeypatch):
+    """The game's own code: the XDK's library sections stay out of the project, and the manifest says so (Settings
+    tells the user that covering the whole program later can't bring them in). The whole program: Ghidra analyses
+    them too, and their functions get source files and are set aside like the XDK's code in .text. (The demo's .text
+    plays a library section here.)"""
+    game = tmp_path / "default.xbe"
+    game.write_bytes(demo.xbe())
+    (tmp_path / "msvc" / "7.1").mkdir(parents=True)
+    monkeypatch.setattr(scratch_xbe, "tool_args", lambda log: ["--msvc", str(tmp_path / "msvc"), "--xdk", str(tmp_path)])
+    monkeypatch.setattr(scratch_xbe.toolchains, "path", lambda name: tmp_path / "msvc")
+    monkeypatch.setattr(ghidra, "available", lambda: True)
+    monkeypatch.setattr(xdklib, "library_sections", lambda sections, libs: {".text"})
+    skipped = []
+    monkeypatch.setattr(scratch_xbe, "find_functions", lambda xbe, name, skip=frozenset(): skipped.append(skip)
+                        or _ghidra_rows(ENTRY, HELPER, PUSHES))
+    monkeypatch.setattr(scratch_xbe, "library_code", lambda xbe, xdk: ({}, []))
+    written = {}
+    monkeypatch.setattr(scratch_pe, "write_project", lambda root, game, **kw: written.update(kw) or {})
+    scratch_xbe.create(tmp_path / "p", game, compiler="MSVC/7.1", ltcg=False, scope=scope, log=lambda *_: None)
+    if scope == "game":
+        assert skipped == [frozenset({".text"})] and written["groups"] == {} and not written["set_aside"]
+        assert written["manifest"]["set_aside_unimported"] == "the XDK's library sections (.text)"
+    else:
+        assert skipped == [frozenset()] and list(written["groups"]) == [f"xdk_{ENTRY:08X}"]
+        assert set(written["set_aside"].values()) == {"XDK library code: the .text section"}
+        assert len(written["set_aside"]) == 3 and "set_aside_unimported" not in written["manifest"]
+    assert consoles.get("xbox").sets_aside and consoles.get("xbox").describe()["sets_aside"]
+
+
 def _fake_xdk(top: Path) -> Path:
     """A folder shaped like an unpacked XDK (empty files with its names: no Microsoft code)."""
     xbox = top / "XDK" / "xbox"

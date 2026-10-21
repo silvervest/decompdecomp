@@ -23,6 +23,7 @@ from decompnet import toolchains
 from decompnet.consoles.pc import scratch as scratch_pe
 from decompnet.consoles.pc.scratch import DIR32, REL32
 from decompnet.consoles.xbox import scratch as scratch_xbe
+from decompnet.consoles.xbox import xdklib
 
 TOOLS = scratch_pe.TEMPLATE / "tools"
 
@@ -222,16 +223,19 @@ def _run(wibo: Path | None, exe: Path, args: list[str], cwd: Path) -> None:
     assert res.returncode == 0, res.stdout + res.stderr
 
 
-def _build(work: Path, xbox: bool, names: dict[str, str]) -> Path:
-    """The homemade program linked as a game would be (an Xbox one: then made an XBE by imagebld)."""
+def _build(work: Path, xbox: bool, names: dict[str, str], program: str = PROGRAM) -> Path:
+    """The homemade program linked as a game would be (an Xbox one: then made an XBE by imagebld). A `program` with
+    a library section (LIBRARY_PROGRAM) is compiled a second time without it into src.obj, as src/ compiles."""
     bin_, wibo = _msvc()
     xdk = _xdk() if xbox else None
     src = work / "game.c"  # C: the functions' symbols are the import's names as they are (_func_00401000)
-    src.write_text(PROGRAM.format(**names, kernel=KERNEL if xbox else "", call=" + (int)NtClose(0)" if xbox else ""),
+    src.write_text(program.format(**names, kernel=KERNEL if xbox else "", call=" + (int)NtClose(0)" if xbox else ""),
                    encoding="utf-8")
     # /Gy: a section per function; /Ob1: the calls stay calls (no function is inlined away)
     flags = [*(scratch_xbe.CL_FLAGS if xbox else ["/nologo", "/c", "/O2", "/Gy", "/W3"]), "/Ob1"]
-    _run(wibo, bin_ / "cl.exe", [*flags, "game.c", "/Fogame.obj"], work)
+    _run(wibo, bin_ / "cl.exe", [*flags, "/DLIBRARY_SECTION", "game.c", "/Fogame.obj"], work)
+    if program is not PROGRAM:
+        _run(wibo, bin_ / "cl.exe", [*flags, "game.c", "/Fosrc.obj"], work)
     entry = names["entry"]
     if xbox:
         wibo = toolchains.binary("wibo-xbox") if wibo else None
@@ -248,9 +252,13 @@ def _build(work: Path, xbox: bool, names: dict[str, str]) -> Path:
 
 
 def _project(work: Path, program: Path, xbox: bool) -> tuple[Path, list[scratch_pe.Function]]:
-    """config/game/functions.json for the program, as an import writes it (its functions found from its calls)."""
+    """config/game/functions.json for the program, as an import writes it (its functions found from its calls; an
+    XBE's library sections as the import sees them: their x86 code analysed, the data after it left as data)."""
     data = program.read_bytes()
     prog = scratch_xbe.read_xbe(data) if xbox else scratch_pe.read_pe(data)
+    if xbox:
+        names = frozenset(xdklib.library_sections([s.name for s in prog.sections], []))
+        prog = scratch_xbe.analysis_view(prog, names, scratch_xbe.library_code_ends(prog, names, {}))
     starts = scratch_xbe.function_starts(prog)
     fns = scratch_pe.analyse(prog, [{"entry": a} for a in starts], linker_padding=True)
     cfg = work / "config" / "game"
@@ -329,3 +337,47 @@ def test_a_function_the_ltcg_checks_fail_is_never_taken_from_src(tmp_path):
 @needs_xdk
 def test_an_xbox_program_rebuilds_byte_for_byte(tmp_path):
     _rebuilds(tmp_path, xbox=True)
+
+
+# An Xbox program with code in a library section of its own, as the XDK's big libraries link theirs (XPP here): two
+# functions there, each called from two places (what tells the import it's x86 code), called from .text.
+LIBRARY_PROGRAM = """int g_count = 3;
+#ifdef LIBRARY_SECTION
+#pragma code_seg("XPP")
+#endif
+int {lib1}(int x) {{ return x * g_count + 1; }}
+int {lib2}(int x) {{ return {lib1}(x) + {lib1}(x + 3); }}
+#ifdef LIBRARY_SECTION
+#pragma code_seg()
+#endif
+int {f1}(int k) {{ return {lib2}(k) + {lib2}(k * 2); }}
+{kernel}
+void {entry}(void) {{ g_count = {f1}(g_count){call}; }}
+"""
+
+
+@needs_xdk
+def test_an_xbox_program_with_code_in_a_library_section_rebuilds_byte_for_byte(tmp_path):
+    """Functions outside .text are pieces of their own section (its name, in the code group) like .text's, from
+    the delinked original or from what src/ compiles (into .text, as agents' C does)."""
+    first = tmp_path / "first"
+    first.mkdir()
+    program = _build(first, True, {"lib1": "one", "lib2": "two", "f1": "three", "entry": "start"}, LIBRARY_PROGRAM)
+    _, fns = _project(first, program, True)
+    xbe = scratch_xbe.read_xbe(program.read_bytes())
+    lib = [f for f in fns if xbe.section_at(f.addr).name == "XPP"]
+    text = [f for f in fns if xbe.section_at(f.addr).name == ".text"]
+    assert len(lib) == 2 and len(text) == 2, [(f.name, xbe.section_at(f.addr).name) for f in fns]
+    work = tmp_path / "game"
+    work.mkdir()
+    named = {k: f"func_{f.addr:08X}" for k, f in zip(["lib1", "lib2", "f1", "entry"], [*lib, *text])}
+    config, fns = _project(work, _build(work, True, named, LIBRARY_PROGRAM), True)
+    assert {f.name for f in fns} == {f"_{n}" for n in named.values()}
+
+    alone = _export(work, config, True, "--delinked")
+    assert alone["identical"], alone["differences"]
+    (work / "objdiff.json").write_text(json.dumps({"units": [{"name": "game", "base_path": "src.obj"}]}),
+                                       encoding="utf-8")
+    built = _export(work, config, True)
+    assert built["identical"], built["differences"]
+    assert sorted(built["compiled"]) == sorted(f"_{n}" for n in named.values()), built

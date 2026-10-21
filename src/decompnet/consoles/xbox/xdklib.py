@@ -4,7 +4,8 @@ agents shouldn't spend time decompiling it.
 Two kinds:
 
 - Whole sections. The XDK's big libraries link into sections of their own, named after them (D3D, DSOUND, XNET,
-  XONLINE, ...). Their code is set aside without looking at it.
+  XONLINE, ...). Every function the analysis finds in them is set aside; not every one holds x86 code, though, nor
+  only code (scratch.py, "library sections": the rule that tells, by evidence rather than by name).
 - Functions in .text: the C runtime (libcmt), XAPI (xapilib) and the smaller libraries link next to the game's code.
   They're found by matching the user's own XDK libraries against the program: every function in a library member
   (with /Gy, one code section per function) becomes a byte pattern in which the fields relocations fill in are

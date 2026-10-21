@@ -408,10 +408,15 @@ def _mid_code(pe: PE, value: int, starts, start: int, end: int) -> bool:
     return sec is not None and sec.code and value not in starts and not start <= value < end
 
 
-def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False, sweep: bool = True) -> list[Function]:
+def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False, sweep: bool = True,
+            known: dict[int, str] | None = None) -> list[Function]:
     """Every function's extent, name and relocations, from Ghidra's function list.
 
     A row with `exact` (library code matched byte for byte, scratch_xbe) keeps its extent as given.
+
+    `known`: address -> symbol of the functions a project already has, when only part of the program is analysed
+    (code an older import left out, scratch_xbe.analyse_library_sections): references to them name them, and an
+    immediate holding one's address is that function's, as if the whole program had been analysed at once.
 
     `sweep` (an import's full function list): code after the last row, to its section's end, is looked for missed
     functions too. A caller re-analysing a few functions passes False: the last row then ends with its own code
@@ -493,7 +498,7 @@ def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False, sweep: b
         extents[start] = (code_end, end, entries, pad)
         i += 1
 
-    names = {}
+    names = {a: n for a, n in (known or {}).items() if a not in rows}
     for start, r in rows.items():
         base = r.get("name", "")
         named = r.get("source") in ("IMPORTED", "USER_DEFINED") and _IDENT.fullmatch(base) and base != "entry"
@@ -766,6 +771,18 @@ def create(root: Path, game: Path, *, compiler: str | None = None, log=print) ->
     return write_project(root, game, info=info, compiler=compiler, args=args, pe=pe, groups=groups, log=log)
 
 
+def source_stub(fns: list[Function]) -> str:
+    """A new unit's source file: what it covers, and the project's header."""
+    return (f"/* {len(fns)} function{'s' if len(fns) != 1 else ''} from 0x{fns[0].addr:08X} to "
+            f"0x{fns[-1].addr + fns[-1].size:08X}, found by Ghidra. */\n#include \"common.h\"\n")
+
+
+def function_entry(pe: PE, f: Function) -> dict:
+    """A function as functions.json lists it."""
+    return {"name": f.name, "addr": f.addr, "offset": pe.offset(f.addr), "size": f.size,
+            "relocs": [list(r) for r in f.relocs]}
+
+
 def write_project(root: Path, game: Path | bytes, *, info: dict, compiler: str, args: list[str], pe: PE,
                   groups: dict[str, list[Function]], platform: str = "pc", suffix: str = ".exe",
                   what: str = "your copy of the game's program (.exe)", cl_flags: list[str] | None = None,
@@ -801,15 +818,12 @@ def write_project(root: Path, game: Path | bytes, *, info: dict, compiler: str, 
         (conf / "set_aside.json").write_text(json.dumps(set_aside, indent=1), encoding="utf-8")
     (conf / "functions.json").write_text(json.dumps({
         "exe": f"orig/{version}{suffix}", "sha1": info["sha1"], "image_base": pe.image_base,
-        "units": {u: [{"name": f.name, "addr": f.addr, "offset": pe.offset(f.addr), "size": f.size,
-                       "relocs": [list(r) for r in f.relocs]} for f in fns] for u, fns in groups.items()},
+        "units": {u: [function_entry(pe, f) for f in fns] for u, fns in groups.items()},
     }, indent=1), encoding="utf-8")
     for u, fns in groups.items():
         src = root / "src" / "auto" / f"{u}.cpp"  # C++, as PC games of the time were written (C compiles too)
         src.parent.mkdir(parents=True, exist_ok=True)
-        src.write_text(f"/* {len(fns)} function{'s' if len(fns) != 1 else ''} from 0x{fns[0].addr:08X} to "
-                       f"0x{fns[-1].addr + fns[-1].size:08X}, found by Ghidra. */\n#include \"common.h\"\n",
-                       encoding="utf-8")
+        src.write_text(source_stub(fns), encoding="utf-8")
     log(f"{len(groups)} source files for agents to write into")
     if prepare is not None:  # a mode's own files and settings before the first build (forks/ltcg.py)
         prepare(root, list(groups))

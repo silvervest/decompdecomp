@@ -13,8 +13,10 @@ The compiler, headers and kernel
   `cvttss2si` instead of `_ftol`). `__declspec(align(16))` locals give `and esp, -16` frames. Intrinsics
   (`memcpy`, `strlen`, `fabs`, `sqrt`) are inline at /O2. Direct3D calls are often inlined push-buffer writes from
   `d3d8.h`: write the D3D call, not the stores.
-- The XDK's own code (Direct3D, DirectSound, XNet, the C runtime, XAPI) is set aside and never reaches you. If a
-  function still looks like CRT or XAPI code (`_memcpy`, `XapiInitProcess`), say so in a note and release it.
+- The XDK's own code (Direct3D, DirectSound, XNet, the C runtime, XAPI) is set aside and never reaches you, unless
+  the project covers the whole program: then its functions (units named `xdk_<address>`) are yours too, built as
+  plain units (no harness driver is made for them). In a project of the game's own code, if a function still looks like CRT or XAPI code (`_memcpy`,
+  `XapiInitProcess`), say so in a note and release it.
 
 Link-time code generation (LTCG)
 Games built with `/GL` and `/LTCG` pass arguments and `this` in eax, esi, edi or ebx, with no standard convention,

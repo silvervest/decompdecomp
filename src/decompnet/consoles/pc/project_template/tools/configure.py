@@ -44,6 +44,10 @@ CONFIG = Path("config") / VERSION / "functions.json"
 BUILD = Path("build") / VERSION
 MSVC = Path(args.msvc) / MSVC_VERSION
 CL = next((p for p in (MSVC / "Bin" / "CL.EXE", MSVC / "Bin" / "cl.exe") if p.exists()), MSVC / "Bin" / "CL.EXE")
+# On Windows itself an Xbox game compiles with the XDK's own CL (bin/vc71, the same 13.10.3077): the portable 7.1's
+# cl.exe doesn't start there without the runtime DLLs wibo stands in for on Linux
+if args.xdk and sys.platform == "win32":
+    CL = next((p for p in (Path(args.xdk) / "bin" / "vc71" / n for n in ("CL.Exe", "cl.exe")) if p.exists()), CL)
 # the headers: Visual C++'s own for a PC game; for an Xbox game the XDK's (its C runtime and xtl.h replace them)
 INCLUDE = Path(args.xdk) / "include" if args.xdk else MSVC / "Include"
 WRAP = f'"{args.wibo}" ' if args.wibo and sys.platform != "win32" else ""  # (LTCG harness mode's rules)

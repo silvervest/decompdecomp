@@ -227,8 +227,11 @@ def test_the_unit_wide_scores_count_each_defined_function_once(monkeypatch):
          "instructions": ins},
         {"name": "_func_00401000", "kind": "SYMBOL_FUNCTION", "flags": {"global": True}},
         {"name": "_func_00402000", "kind": "SYMBOL_FUNCTION", "flags": {"global": True}}]}
-    right = {"symbols": [{"name": "_func_00401010", "kind": "SYMBOL_FUNCTION", "size": "11", "match_percent": 100.0},
-                         {"name": "_func_00401000", "kind": "SYMBOL_FUNCTION", "size": "1", "match_percent": 100.0}]}
+    # (built: with code, as objdiff lists a function the object defines)
+    right = {"symbols": [{"name": "_func_00401010", "kind": "SYMBOL_FUNCTION", "size": "11", "match_percent": 100.0,
+                          "instructions": ins},
+                         {"name": "_func_00401000", "kind": "SYMBOL_FUNCTION", "size": "1", "match_percent": 100.0,
+                          "instructions": ins}]}
     monkeypatch.setattr(objdiff, "_run", lambda *a, **k: json.dumps({"left": left, "right": right}))
     d = objdiff.diff(None, None, None, cwd=Path("."))
     assert d.unit_scores == {"_func_00401000": 100.0, "_func_00401010": 100.0}

@@ -73,6 +73,36 @@ def test_an_unreadable_harness_link_line_says_where_and_keeps_the_last_build_fil
     assert (root / "build.ninja").read_text() == before
 
 
+def test_a_units_code_split_over_files_links_in_its_link_order_and_only_there(tmp_path):
+    root = _project(tmp_path)
+    _entry(root)
+    auto = root / "src" / "auto"
+    (auto / "u.scores.cpp").write_text("int g;\n")
+    (auto / "u.main.cpp").write_text("void m() {}\n")
+    assert _configure(root).returncode == 0
+    ninja = _ninja(root)
+    # no LINK-ORDER line: the unit's source first, then its parts by name, then the driver
+    for obj, src in (("00_u", "u.cpp"), ("01_u_main", "u.main.cpp"), ("02_u_scores", "u.scores.cpp")):
+        assert f"build build/v/ltcg/u/{obj}.obj: ltcg_cc src/auto/{src}" in ninja
+    assert "build build/v/ltcg/u/03_u_drv.obj: ltcg_cc harness/u.drv.cpp" in ninja
+    assert "u.main.obj:" not in ninja and "u.scores.obj:" not in ninja  # never compiled on their own
+    # a new file in src/auto or harness (a part, a stand-in) makes ninja run configure again
+    assert re.search(r"^build build\.ninja: configure .* src/auto harness$", ninja, re.M)
+    body = (auto / "u.cpp").read_text()
+    (auto / "u.cpp").write_text("// LINK-ORDER: u.scores.cpp src/auto/u.cpp\n" + body)
+    assert _configure(root).returncode == 0
+    ninja = _ninja(root)
+    for obj, src in (("00_u_scores", "u.scores.cpp"), ("01_u", "u.cpp"), ("02_u_main", "u.main.cpp")):
+        assert f"build build/v/ltcg/u/{obj}.obj: ltcg_cc src/auto/{src}" in ninja
+    # a name that isn't one of the unit's files stops configure with where, and the last build.ninja stays
+    before = (root / "build.ninja").read_text()
+    (auto / "u.cpp").write_text("// LINK-ORDER: u.score.cpp u.cpp\n" + body)
+    res = _configure(root)
+    assert res.returncode != 0 and "Traceback" not in res.stderr
+    assert "u.cpp:1: LINK-ORDER names u.score.cpp, which isn't one of this unit's files" in res.stderr
+    assert (root / "build.ninja").read_text() == before
+
+
 def test_objects_depend_on_the_project_files_the_compiler_includes_and_nothing_else(tmp_path):
     root = _project(tmp_path)
     _entry(root)

@@ -41,7 +41,7 @@ folder, `src/decompnet/consoles/<id>/`; a new console adds a column (CONTRIBUTIN
 | Polish matched code (still matching) | ✓ | ✓ | ✓ | — | — | — | — | — |
 | Save and restore (`progress/`, Open a saved project) | ✓ | ✓ | ✓ | the project's git | the project's git | the project's git | the project's git | the project's git |
 | Rebuildable export | ✓ | ✓ | ✓ | the project | `ninja export` (homemade programs) | the project | `ninja export`: the game's linker and imagebld, LTCG units from their harness links | the project |
-| LTCG games (`/GL`: register conventions, cross-file inlining) | | | | | | | harness mode, detected at import (or chosen); convention evidence, stand-in drafts, data check | |
+| LTCG games (`/GL`: register conventions, cross-file inlining) | | | | | | | harness mode, detected at import (or chosen); convention evidence, stand-in drafts, data check; a unit's code split over files in link order | |
 | Rooms: decompile together | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
 
 Where to start on a gap:
@@ -68,6 +68,14 @@ Where to start on a gap:
 
 ## Recently done
 
+- **An LTCG unit's code can be split over files, in link order.** Under /LTCG the split into source files is part of
+  what the code compiles to. On the XDK test program built from known sources, main's three calls in one loop come
+  out in another order unless its two score helpers are in a file linked before the rest and main in one linked
+  after it. Agents tried it nearly 200 times as one file. A unit is a stretch of addresses, which can hold pieces of
+  several of the original's files, so its code can now be in `src/auto/<unit>.<part>.cpp` as well. Each file is its
+  own /GL object in the unit's harness link, in the order a `// LINK-ORDER:` line in the unit's source gives. The
+  engine rewrites a function in the file that has it, and an edit of a part rebuilds and protects that unit. The
+  agents' own C then matches all 33 functions of the unit, main too.
 - **Agents join what the rules miss** (project mode). `join_functions(function, with_function, reason)`: once 3
   agents of 2 models say two functions are one the analysis cut, the console joins them (DS: `recover.join_functions`,
   across two source files too), checked as an analysis is (the game rebuilt byte for byte, else taken back), never a

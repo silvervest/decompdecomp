@@ -122,8 +122,13 @@ def main() -> None:
                 cl_flags=CL_FLAGS, headers=headers)
             objs += [str(BUILD / Path(source_of(u)).with_suffix(".obj")) for u in sorted(harness_units)]
         # ---- end of LTCG harness mode
+        watch = []  # folders whose new files change the build: configure runs again when one is added
+        if LTCG:
+            watch = [d for d in ("src/auto", "harness") if Path(d).is_dir()]
         for src in files("src", (".c", ".cpp")):
             if src.parent == Path("src") / "auto" and src.stem in harness_units:
+                continue
+            if LTCG and ltcg.is_part(src, units):  # a unit's code split over files: only its harness link builds it
                 continue
             obj = BUILD / src.with_suffix(".obj")
             n.build(str(obj), "cl", str(src), implicit=[str(CONFIG), "tools/compile.py", "tools/names.py",
@@ -141,7 +146,7 @@ def main() -> None:
                 implicit=["tools/export.py", "objdiff.json"])
         n.build("export", "phony", [str(BUILD / "export" / "export.json")])
         n.build("build.ninja", "configure", ["tools/configure.py", str(CONFIG), *headers, *harness_files,
-                                             *[str(s) for s in files("src", (".c", ".cpp"))]])
+                                             *[str(s) for s in files("src", (".c", ".cpp"))], *watch])
         n.default(["prepare"])
     os.replace("build.ninja.tmp", "build.ninja")
 

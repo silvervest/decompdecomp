@@ -11,7 +11,13 @@ bytes depend on who calls it and on what it calls, and an object compiled on its
 
 The build links each source file in harness mode instead (tools/configure.py writes the rules from here):
 
-- src/auto/<unit>.cpp, the decompiled code;
+- src/auto/<unit>.cpp, the decompiled code, and src/auto/<unit>.<part>.cpp, more of it in files of its own. Under
+  LTCG the split into source files is part of what the code compiles to: a caller's call order and where it keeps
+  results can depend on whether its callees were in its own file, or in a file linked before or after it. A unit is a
+  stretch of the program's addresses, so it can hold pieces of several of the original's files. Each file is its own
+  /GL object in the unit's link. They link in the order a `// LINK-ORDER: <file> <file> ...` line in
+  src/auto/<unit>.cpp gives (file names; files it leaves out follow in name order), or else <unit>.cpp first, then the
+  parts in name order;
 - harness/<unit>.drv.cpp, the driver: `extern "C" __declspec(dllexport) void HarnessEntry(...)` calling the unit's
   functions the way the original's call sites do (which registers hold what, which constants are passed), so the
   linker gives them the original's conventions;
@@ -44,6 +50,7 @@ from pathlib import Path
 ENTRY = re.compile(r'^[ \t]*extern[ \t]+"C"[^\n;]*\bHarnessEntry[ \t]*\(', re.M)
 # a line of its own (a comment that only mentions the directive, as older driver skeletons did, isn't one)
 LINK_LINE = re.compile(r"^[ \t]*//[ \t]*HARNESS-LINK:[ \t]*([^\r\n]*)", re.M)
+ORDER_LINE = re.compile(r"^[ \t]*//[ \t]*LINK-ORDER:[ \t]*([^\r\n]*)", re.M)
 
 # What the compiler calls without the source asking for it (floating point, 64-bit arithmetic, stack probes,
 # pure virtual calls, structure copies). Builds link with /NODEFAULTLIB, so these stubs stand in for the C runtime:
@@ -81,6 +88,40 @@ def harness_files(unit: str, harness: Path = Path("harness")) -> tuple[Path, lis
     driver = harness / f"{unit}.drv.cpp"
     extras = sorted(p for p in harness.glob(f"{unit}.*.cpp") if p != driver)
     return driver, extras
+
+
+def unit_parts(src: Path) -> list[Path]:
+    """The other files of a unit's own code: <unit>.<part>.cpp beside its source <unit>.cpp, in name order."""
+    return sorted(p for p in src.parent.glob(f"{src.stem}.*{src.suffix}") if p != src)
+
+
+def is_part(path: Path, units) -> bool:
+    """Whether `path` is a part of one of `units` (src/auto/<unit>.<part>.cpp): built only into its unit's link."""
+    return path.parent == Path("src") / "auto" and "." in path.stem and path.stem.split(".")[0] in units
+
+
+def unit_sources(src: Path) -> list[Path]:
+    """A unit's own source files in link order: as the source's `// LINK-ORDER:` line names them (the last such line;
+    files it leaves out follow in name order), else the source first, then its parts in name order."""
+    files = [src, *unit_parts(src)]
+    try:
+        text = src.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return files
+    found = list(ORDER_LINE.finditer(text))
+    if not found:
+        return files
+    by_name = {p.name.lower(): p for p in files}
+    order: list[Path] = []
+    for name in found[-1].group(1).split():
+        p = by_name.get(Path(name).name.lower())
+        if p is None:  # a typo or a part not written yet: say where, configure stops with it
+            line = text.count("\n", 0, found[-1].start()) + 1
+            raise SystemExit(f"{src}:{line}: LINK-ORDER names {name}, which isn't one of this unit's files "
+                             f"({', '.join(p.name for p in files)})")
+        if p not in order:
+            order.append(p)
+    return order + [p for p in files if p not in order]
 
 
 def has_entry(driver: Path) -> bool:
@@ -134,7 +175,7 @@ def write_rules(n, *, units: list[str], source_of, build: Path, config: Path, cl
         src = Path(source_of(unit))
         if not src.exists() or not has_entry(driver):
             continue
-        sources = [src, driver, *extras]
+        sources = [*unit_sources(src), driver, *extras]
         objs = []
         for i, path in enumerate(sources):
             obj = out / unit / f"{i:02d}_{path.stem.replace('.', '_')}.obj"

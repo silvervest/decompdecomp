@@ -220,12 +220,18 @@ def map_objects(path: Path) -> dict[str, str]:
     return out
 
 
-def own_symbol(syms: dict[str, int], objects: dict[str, str], name: str, source: Path) -> str | None:
-    """`name` (a unit function's original, decorated name) when the map has it from the unit's own source's object
-    (ltcg.py's 00_<source>.obj), not from a stand-in: the function an annotation means when the definition right
-    after the annotation is something else, such as an inline helper written between the two."""
-    own = f"00_{source.stem.replace('.', '_')}.obj"
-    return name if name in syms and objects.get(name, "").endswith(own) else None
+def own_objects(sources: list[Path]) -> set[str]:
+    """The objects of the unit's own code in its harness link: ltcg.py's <NN>_<file>.obj of every source that isn't in
+    harness/ (the unit's source and the files its code is split into), numbered in link order as ltcg.py numbers them."""
+    return {f"{i:02d}_{p.stem.replace('.', '_')}.obj" for i, p in enumerate(sources)
+            if not p.parts or p.parts[0] != "harness"}
+
+
+def own_symbol(syms: dict[str, int], objects: dict[str, str], name: str, own: set[str]) -> str | None:
+    """`name` (a unit function's original, decorated name) when the map has it from one of the unit's own objects
+    (own_objects), not from a stand-in: the function an annotation means when the definition right after the
+    annotation is something else, such as an inline helper written between the two."""
+    return name if name in syms and any(objects.get(name, "").endswith(o) for o in own) else None
 
 
 def symbol_hint(decl: str) -> str | None:
@@ -615,7 +621,7 @@ def main() -> None:
             continue
         sym, why = find_symbol(syms, want)
         if sym is None:  # `// FUNCTION:`, then a helper inlined into the function, then the function itself
-            sym = own_symbol(syms, objects, fn["name"], sources[0]) if sources else None
+            sym = own_symbol(syms, objects, fn["name"], own_objects(sources))
         if sym is None:
             problems.append(f"0x{addr:08X} {want} {why}")
         else:

@@ -33,6 +33,9 @@ compiles can't match those functions: note "LTCG register convention" and releas
     couldn't see into: middleware, XDK libraries). `// HARNESS-LINK: <flags>` adds linker flags (`d3d8ltcg.lib`).
   - Functions are found by func_<address> in their names or `// FUNCTION: 0x<address> [map symbol]` before the
     definition (needed for constructors, destructors and operators).
+  - Which file a function is in changes its callers' code. When every callee matches but a caller's call order or
+    result registers don't, split the unit: `src/auto/<unit>.<part>.cpp`, keeping the includes (headers count), in
+    the order of a `// LINK-ORDER: <files>` line in `<unit>.cpp`.
   - `standins_for(unit)` writes a starting point: stand-ins with their conventions, a HarnessEntry with each
     function's call sites, declarations, and the structs its functions look like members of.
 - The brief shows each function's convention in the original: registers read before written, stack arguments,

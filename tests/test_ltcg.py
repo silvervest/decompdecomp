@@ -329,6 +329,46 @@ def test_a_unit_joins_harness_mode_once_its_driver_defines_harness_entry(tmp_pat
     assert template_ltcg.link_flags([driver, *extras]) == ["d3d8ltcg.lib", "/d2:-inlT56"]
 
 
+def test_a_units_own_objects_are_its_files_in_link_order_and_not_the_harness():
+    sources = [Path("src/auto/u.scores.cpp"), Path("src/auto/u.cpp"), Path("harness/u.drv.cpp"),
+               Path("harness/u.x.nogl.cpp")]
+    assert dll2coff.own_objects(sources) == {"00_u_scores.obj", "01_u.obj"}
+    objects = {"?f@@YAXXZ": "01_u.obj", "?g@@YAXXZ": "02_u_drv.obj"}
+    syms = {"?f@@YAXXZ": 0x10001000, "?g@@YAXXZ": 0x10001010}
+    own = dll2coff.own_objects(sources)
+    assert dll2coff.own_symbol(syms, objects, "?f@@YAXXZ", own) == "?f@@YAXXZ"
+    assert dll2coff.own_symbol(syms, objects, "?g@@YAXXZ", own) is None  # a stand-in's, not the unit's
+
+
+def test_an_ltcg_units_parts_belong_to_it_and_a_function_is_rewritten_where_it_is(tmp_path):
+    from decompnet.app.forkengine import ForkEngine
+    from decompnet.forks.project import ForkProject
+
+    root = tmp_path / "p"
+    (root / "src" / "auto").mkdir(parents=True)
+    (root / ".decomp.wtf.json").write_text(json.dumps({"ltcg": True}))
+    (root / "objdiff.json").write_text(json.dumps({"units": [{
+        "name": "u", "target_path": "build/target/u.obj", "base_path": "build/src/auto/u.obj",
+        "metadata": {"source_path": "src/auto/u.cpp"}}]}))
+    (root / "src" / "auto" / "u.cpp").write_text("int func_00011000(int x)\n{\n    return x;\n}\n")
+    scores = "int func_00011210(int x)\n{\n    return x * 3;\n}\n"
+    (root / "src" / "auto" / "u.scores.cpp").write_text(scores)
+    (root / "src" / "auto" / "u.main.cpp").write_text("void func_000117F0(void)\n{\n}\n")
+    fp = ForkProject(root)
+    unit = fp.unit("u")
+    assert [u.name for u in fp.units_for("src/auto/u.scores.cpp")] == ["u"]
+    assert fp.units_for("harness/u.drv.cpp") == []
+    assert fp.unit_files(unit) == ["src/auto/u.cpp", "src/auto/u.main.cpp", "src/auto/u.scores.cpp"]
+    engine = ForkEngine.__new__(ForkEngine)  # (_home reads files, nothing of the engine's state)
+    assert engine._home(fp, unit, ["func_00011210"]) == ("src/auto/u.scores.cpp", scores)
+    assert engine._home(fp, unit, ["func_00099999"])[0] == "src/auto/u.cpp"  # a new function: the source file
+    assert "func_000117F0" in engine._unit_text(fp, unit) and "x * 3" not in engine._unit_text(
+        fp, unit, "src/auto/u.scores.cpp", "")
+    # without LTCG a file named like a part is no unit's: every file builds on its own there
+    (root / ".decomp.wtf.json").write_text(json.dumps({"ltcg": False}))
+    assert fp.units_for("src/auto/u.scores.cpp") == [] and fp.unit_files(unit) == ["src/auto/u.cpp"]
+
+
 def _xdk_tools() -> tuple[Path, Path, Path | None] | None:
     """(Visual C++ pack, the user's XDK folder, wibo-xbox or None on Windows), or None when any is missing."""
     try:

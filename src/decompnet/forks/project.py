@@ -503,9 +503,27 @@ class ForkProject:
         return found
 
     def units_for(self, rel: str) -> list[Unit]:
-        """The units whose source file is `rel` (relative to the project root)."""
+        """The units whose source file is `rel` (relative to the project root), or, in an LTCG project, whose code
+        `rel` holds part of (unit_files)."""
         want = Path(rel).as_posix()
-        return [u for u in self.units() if u.source and Path(u.source).as_posix() == want]
+        found = [u for u in self.units() if u.source and Path(u.source).as_posix() == want]
+        p = Path(want)
+        if found or "." not in p.stem or not (self.manifest or {}).get("ltcg"):
+            return found
+        main = (p.parent / (p.stem.split(".")[0] + p.suffix)).as_posix()
+        return [u for u in self.units() if u.source and Path(u.source).as_posix() == main]
+
+    def unit_files(self, unit: Unit) -> list[str]:
+        """A unit's source files, relative to the root: its source file, then in an LTCG project the files its code is
+        split into, <unit>.<part>.cpp beside it (the template's tools/ltcg.py links them all into the unit's harness:
+        under LTCG which file a function is in changes what its callers compile to)."""
+        if not unit.source:
+            return []
+        src = Path(unit.source)
+        if not (self.manifest or {}).get("ltcg"):
+            return [src.as_posix()]
+        parts = sorted(p for p in (self.root / src.parent).glob(f"{src.stem}.*{src.suffix}") if p.is_file())
+        return [src.as_posix(), *((src.parent / p.name).as_posix() for p in parts)]
 
     def diff_options(self, unit: Unit) -> dict:
         """What every diff of this unit is judged by: the progress report's rules with the project's and unit's options."""

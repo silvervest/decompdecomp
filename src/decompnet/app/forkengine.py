@@ -1825,8 +1825,9 @@ class ForkEngine:
         if not unit.source or not (fp.root / unit.source).exists():
             return None
         names = self._names(self._meta(fn), fn)
-        todo, seen = [fp.root / unit.source], set()
-        while todo and len(seen) < 6:
+        todo, seen = [fp.root / r for r in fp.unit_files(unit)], set()  # (the files an LTCG unit is split over)
+        limit = 6 + len(todo)
+        while todo and len(seen) < limit:
             path = todo.pop(0)
             if path in seen:
                 continue
@@ -2063,6 +2064,34 @@ class ForkEngine:
                 return n, span
         return None, None
 
+    def _home(self, fp: ForkProject, unit, names: list[str]) -> tuple[str, str]:
+        """(file, its text): the unit's file that defines one of `names` now, else its source file. An LTCG unit's code
+        can be split over files (ForkProject.unit_files); a function is rewritten where it is, never defined twice."""
+        texts = []
+        for rel in fp.unit_files(unit):
+            try:
+                text = (fp.root / rel).read_text(errors="replace", encoding="utf-8")
+            except OSError:
+                text = ""
+            if self._find(text, names)[1]:
+                return rel, text
+            texts.append(text)
+        return unit.source, texts[0] if texts else ""
+
+    @staticmethod
+    def _unit_text(fp: ForkProject, unit, rel: str | None = None, text: str | None = None) -> str:
+        """All of a unit's files' text (unit_files), with `rel`'s replaced by `text`: what to look for its functions in."""
+        out = []
+        for r in fp.unit_files(unit):
+            if r == rel and text is not None:
+                out.append(text)
+                continue
+            try:
+                out.append((fp.root / r).read_text(errors="replace", encoding="utf-8"))
+            except OSError:
+                pass
+        return "\n".join(out)
+
     def _held(self, proj, unit: str, text: str | None = None) -> set[str]:
         """Functions of a unit whose source is still the very text judged to load the wrong constants: objdiff's
         progress rules count them, decompdecomp doesn't (see forks/literals.py)."""
@@ -2072,8 +2101,8 @@ class ForkEngine:
             return set()
         if text is None:
             try:
-                u = ForkProject(Path(proj["root"])).unit(unit)
-                text = (Path(proj["root"]) / u.source).read_text(errors="replace", encoding="utf-8") if u.source else ""
+                fp = ForkProject(Path(proj["root"]))
+                text = self._unit_text(fp, fp.unit(unit))
             except (ForkError, OSError):
                 return set()
         out = set()
@@ -2224,8 +2253,10 @@ class ForkEngine:
             lines.append(f"source file: {unit.source}")
             if own := consoles.get(cfg.get("platform")).file_compiler(fp, unit.source):
                 lines.append(f"this file's compiler: {own} (try_compiler(\"{fn['name']}\", \"all\") tries the others)")
-            p = fp.root / unit.source
-            src_text = p.read_text(errors="replace", encoding="utf-8") if p.exists() else None
+            home, src_text = self._home(fp, unit, self._names(meta, fn))
+            if len(files := fp.unit_files(unit)) > 1:
+                lines.append(f"the unit's code is split over {', '.join(files)}; this function is in {home}")
+            src_text = src_text or None
         else:
             lines.append("this unit has no source file yet, so it can't be decompiled from here")
         try:
@@ -2648,11 +2679,8 @@ class ForkEngine:
         unit = fp.unit(fn["unit"])
         if not unit.source:
             raise NetworkError(f"unit {unit.name} has no source file, so there's nowhere to write it")
-        try:
-            have = (fp.root / unit.source).read_text(errors="replace", encoding="utf-8")
-        except OSError:
-            have = ""
-        includes, before_lines, after_lines = _around(source, span, have, unit.source)
+        home, have = self._home(fp, unit, names)  # (one of the files an LTCG unit's code is split over)
+        includes, before_lines, after_lines = _around(source, span, have, home)
         with self.net.store.tx() as db:  # claim bookkeeping, as for ROM projects
             self.net._expire_claims(db)
             claim = db.execute("SELECT agent_id FROM claims WHERE function_id=?", (fn["id"],)).fetchone()
@@ -2663,7 +2691,7 @@ class ForkEngine:
                 db.execute("INSERT INTO claims VALUES(?,?,?,?)", (fn["id"], agent.id, now, now + self.net.claim_ttl))
             elif claim is not None:
                 db.execute("UPDATE claims SET expires_at=? WHERE function_id=?", (now + self.net.claim_ttl, fn["id"]))
-        path = fp.safe_path(unit.source, write=True)
+        path = fp.safe_path(home, write=True)
         symbol = meta.get("symbol") or fn["name"]
         linked = unit.complete and fp.linkable()  # the game is built from this file: changes must keep it identical
         with self._tree(proj).exclusive() if linked else self._tree(proj).shared(), self._unit_lock(proj, unit.name):
@@ -2671,9 +2699,10 @@ class ForkEngine:
             # What matches in the file as it is now is what this change must keep (not the database's idea of it,
             # which a change outside decompdecomp or a different measurement can leave behind)
             scores, builds = self._baseline(proj, fp, unit, before)
-            held = self._held(proj, unit.name, before)
+            held = self._held(proj, unit.name, self._unit_text(fp, unit, home, before))
             if scores is not None:
-                self._apply_scores(proj, unit.name, scores, text=before, via="unit diff before a compile")
+                self._apply_scores(proj, unit.name, scores, text=self._unit_text(fp, unit, home, before),
+                                   via="unit diff before a compile")
                 protected = {n for n, pct in scores.items()
                              if n != symbol and n not in held and pct is not None and pct >= 100}
                 was_matched = (scores.get(symbol) or 0) >= 100 and symbol not in held
@@ -2757,7 +2786,7 @@ class ForkEngine:
                 undo()
                 if quiet is None:
                     self.net._record(fn, agent, None, code, 0, compiled=True)
-                return {"text": f"❌ REJECTED and undone: {unit.source} is linked into the game, and with your change "
+                return {"text": f"❌ REJECTED and undone: {home} is linked into the game, and with your change "
                                 f"the game no longer builds byte for byte:\n{_tail(ok[1])}", "score": None,
                         "matched": False}
             pct = d.match_percent if d.match_percent is not None else 0.0
@@ -2767,7 +2796,7 @@ class ForkEngine:
                 undo()
                 if quiet is None or score < quiet:
                     self.net._record(fn, agent, score, code, 0, compiled=True)
-                return {"text": f"{percent_text(pct)} match (score {score}); not kept in {unit.source}", "score": score,
+                return {"text": f"{percent_text(pct)} match (score {score}); not kept in {home}", "score": score,
                         "matched": False, "percent": pct}
             best = fn["best_score"]
             if (not matched and not was_matched and d.match_percent is not None and best is not None
@@ -2779,7 +2808,7 @@ class ForkEngine:
                     self.net._record(fn, agent, score, code, 0, compiled=True)
                 stall = self.net.stall_note(fn["id"], agent.id)
                 text = remembered(f"{percent_text(pct)} match (score {score}), worse than the best so far (score "
-                                  f"{best}), so {unit.source} keeps what it had; your attempt is recorded.\n"
+                                  f"{best}), so {home} keeps what it had; your attempt is recorded.\n"
                                   f"{d.render()}", score)
                 return {"text": text + stall, "score": score, "matched": False, "percent": pct}
             self._keep_scores(proj, unit, after, d.unit_scores)
@@ -2794,17 +2823,18 @@ class ForkEngine:
                     return {"text": f"❌ {fn['name']} already matches; your version {why}, so the matching one was "
                                     "kept. Call claim_function for a function that still needs work.",
                             "score": score, "matched": False}
-                self._commit(proj, fp, unit.source, f"Tidy {meta.get('demangled') or symbol} (still matches)\n\n"
-                                                    f"Edited by {agent.name} with decompdecomp.")
+                self._commit(proj, fp, home, f"Tidy {meta.get('demangled') or symbol} (still matches)\n\n"
+                                             f"Edited by {agent.name} with decompdecomp.")
                 return {"text": f"✅ {fn['name']} still matches; your tidier version is committed.{_renamed_note(d)}",
                         "score": 0, "matched": True}
             self.net._record(fn, agent, score, code, 0, matched=matched)
-            self._apply_scores(proj, fn["unit"], d.unit_scores, skip=fn["id"], agent=agent, text=after,
+            self._apply_scores(proj, fn["unit"], d.unit_scores, skip=fn["id"], agent=agent,
+                               text=self._unit_text(fp, unit, home, after),
                                via=f"unit diff after a compile of {fn['name']}")
             self._remember(proj, fp, unit, d)
             if matched:
-                self._commit(proj, fp, unit.source, f"Match {meta.get('demangled') or symbol}\n\n"
-                                                    f"Decompiled by {agent.name} with decompdecomp.")
+                self._commit(proj, fp, home, f"Match {meta.get('demangled') or symbol}\n\n"
+                                             f"Decompiled by {agent.name} with decompdecomp.")
                 return {"text": f"✅ MATCH! {fn['name']} is 100% identical to the original. Committed to git in the "
                                 f"project. Call claim_function for the next one.{_renamed_note(d)}"
                                 f"{self.net.dependents_note(fn['id'])}"
@@ -3318,7 +3348,8 @@ class ForkEngine:
             for u in units:
                 if after[u.name] is not None:
                     self._keep_scores(proj, u, updated, after[u.name])
-                    self._apply_scores(proj, u.name, after[u.name], agent=agent, text=updated,
+                    self._apply_scores(proj, u.name, after[u.name], agent=agent,
+                                       text=self._unit_text(fp, u, rel, updated),
                                        via=f"unit diff after an edit of {rel}")
             self._commit(proj, fp, rel, f"{message.strip()}\n\nEdited by {agent.name} with decompdecomp.")
             with self.net.store.tx() as db:

@@ -41,7 +41,8 @@ folder, `src/decompnet/consoles/<id>/`; a new console adds a column (CONTRIBUTIN
 | The game's own debug symbols: names, types, prototypes | — | — | ✓ symbol table, STABS; the compiler of each object file | — | — | — | — | — |
 | Twins across your games | ✓ | ✓ | ✓ | — | — | — | — | — |
 | Shared knowledge (two models agree) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Polish matched code (still matching) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
+| Polish matched code (still matching) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ LTCG units too | ✓ |
+| Tidy each source file once it's polished (shared types in one header, names, dead declarations) | — | — | — | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
 | Real names for the game's symbols (`rename_symbol`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ as PC; LTCG units too | dtk and ds-decomp projects |
 | Save and restore (`progress/`, Open a saved project) | ✓ | ✓ | ✓ | the project's git; best attempts saved | the project's git; best attempts saved | the project's git; best attempts saved | the project's git; best attempts saved | the project's git; best attempts saved |
 | Reimport: a new split, matched work kept (Settings) | ✓ | ✓ | ✓ | — | — | — | — | — |
@@ -64,6 +65,9 @@ Where to start on a gap:
   link-time code generation is rebuilt from each unit's harness link; a whole-program /LTCG link of the matched
   source needs all of the game's code as source.
 - **Function-end reports** cut MIPS functions (`engine._cut`).
+- **Tidying a ROM project**: its C is the database's, one function at a time, with one shared header per segment
+  (`edit_context`), so there's no file to tidy (`app/readable.py`, `_untidy`). The header is the place to start: its
+  types and names, then the functions' C that uses them, each still matching.
 - **Xbox**: rooms haven't been run on Xbox. Twins and the permuter have only been seen on a small test program built
   with the XDK, not on a real game yet.
 - **Struct layouts** read MIPS loads and stores (`arch/mips_fields.py`); another processor adds its reader as its
@@ -75,6 +79,12 @@ Where to start on a gap:
 
 ## Recently done
 
+- **Polishing reaches every function, then tidies each file.** A floor of 8 instructions and a ceiling of 400 kept
+  polishing off a game's smallest and biggest functions for good: every size comes now, the middle first, and a
+  function three tries didn't make readable is left. Once a source file's functions are all readable, a helper tidies
+  it: types it shares with other files in one header, fields and classes named, the globals it still knows by
+  address named (read_data first), dead declarations gone, one naming style (`tidy_done`). On an Xbox LTCG demo,
+  polishing made all 33 of its functions readable with real names, still matching.
 - **Real names on Windows PC and Xbox.** A PC or Xbox project names functions and data by address (`func_0041B470`,
   `D_0066DDA4`), and `tools/names.py` pairs them with the original's symbols by that address, so rename_symbol refused
   them. A real name is kept by address in `config/<version>/functions.json` ("names"), and names.py takes it as that

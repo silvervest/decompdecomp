@@ -69,7 +69,7 @@ def test_polishing_takes_the_games_own_code_and_leaves_set_aside_library_code(tm
     slug = _project(net, root, monkeypatch)
     net.forks.sync(slug, log=lambda *_: None)
     net.store.conn.execute("UPDATE functions SET n_insns=16, matched_source='int f(void) { return 0; }'")
-    monkeypatch.setattr(type(net.forks), "_current_source", lambda self, fp, fn: None)
+    monkeypatch.setattr(type(net.forks), "_current_source", lambda self, fp, fn, comment=False: None)
     assert net.readability.counts(net._project(slug)) == {"matched": 1, "readable": 0}  # game_a, not lib_a
     agent, _ = net.local_agent("claude-sonnet-5-5-1")
     assert "MAKE READABLE: game_a" in net.readability.claim(agent, slug)

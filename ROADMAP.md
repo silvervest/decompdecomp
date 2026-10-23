@@ -42,6 +42,7 @@ folder, `src/decompnet/consoles/<id>/`; a new console adds a column (CONTRIBUTIN
 | Twins across your games | ✓ | ✓ | ✓ | — | — | — | — |
 | Shared knowledge (two models agree) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Polish matched code (still matching) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Tidy each source file once it's polished (shared types in one header, names, dead declarations) | — | — | — | ✓ | ✓ | ✓ | ✓ |
 | Real names for the game's symbols (`rename_symbol`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | dtk and ds-decomp projects |
 | Save and restore (`progress/`, Open a saved project) | ✓ | ✓ | ✓ | the project's git; best attempts saved | the project's git; best attempts saved | the project's git; best attempts saved | the project's git; best attempts saved |
 | Reimport: a new split, matched work kept (Settings) | ✓ | ✓ | ✓ | — | — | — | — |
@@ -55,6 +56,9 @@ Where to start on a gap:
 - **Windows PC**: autopilot needs drafts that compile (Ghidra's output doesn't, as it is); the export needs a linker
   story (the project is delinked COFF objects).
 - **Function-end reports** cut MIPS functions (`engine._cut`).
+- **Tidying a ROM project**: its C is the database's, one function at a time, with one shared header per segment
+  (`edit_context`), so there's no file to tidy (`app/readable.py`, `_untidy`). The header is the place to start: its
+  types and names, then the functions' C that uses them, each still matching.
 - **Struct layouts** read MIPS loads and stores (`arch/mips_fields.py`); another processor adds its reader as its
   `Arch.field_accesses`, and structs.py does the rest. Still open on MIPS: the PS2's fifth to eighth arguments
   (t0-t3), and a pointer into the middle of a struct handed to a callee (`&this->pos`).
@@ -64,6 +68,11 @@ Where to start on a gap:
 
 ## Recently done
 
+- **Polishing reaches every function, then tidies each file.** A floor of 8 instructions and a ceiling of 400 kept
+  polishing off a game's smallest and biggest functions for good: every size comes now, the middle first, and a
+  function three tries didn't make readable is left. Once a source file's functions are all readable, a helper tidies
+  it: types it shares with other files in one header, fields and classes named, the globals it still knows by
+  address named (read_data first), dead declarations gone, one naming style (`tidy_done`).
 - **Real names on Windows PC.** A PC project names functions and data by address (`func_0041B470`, `D_0066DDA4`),
   and `tools/names.py` pairs them with the original's symbols by that address, so rename_symbol refused them. A real
   name is kept by address in `config/<version>/functions.json` ("names"), and names.py takes it as that address in C

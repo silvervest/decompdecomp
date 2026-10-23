@@ -32,9 +32,11 @@ from __future__ import annotations
 import bisect
 import hashlib
 import json
+import os
 import re
 import struct
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -175,6 +177,24 @@ class Program:
             if start <= va and va + n <= start + size:
                 return self.data[offset + va - start:offset + va - start + n]
         return None
+
+
+REPLACE_TRIES, REPLACE_WAIT = 50, 0.1  # Windows refuses to replace a file another process has open
+
+
+def write_whole(path: Path, data: bytes) -> None:
+    """Write a file in one step: the app reads the object and its checks while units build, and a half-written
+    checks file once read as "no conflicts", which matched a function with two swapped globals."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    for attempt in range(REPLACE_TRIES):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == REPLACE_TRIES - 1:
+                raise
+            time.sleep(REPLACE_WAIT)
 
 
 def unresolved_by_function(link_said: str) -> dict[str, list[str]]:
@@ -734,8 +754,8 @@ def main() -> None:
     data = delink.coff(cuts, img.data)
     path = Path(out)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
-    path.with_suffix(".ltcg.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
+    write_whole(path, data)
+    write_whole(path.with_suffix(".ltcg.json"), json.dumps(report, indent=1).encode("utf-8"))
     bad = {n: f["conflicts"] for n, f in report["functions"].items() if f["conflicts"]}
     for p in problems:
         print(f"{unit}: {p}")

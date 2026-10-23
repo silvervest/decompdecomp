@@ -6,6 +6,7 @@ import json
 import re
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -25,6 +26,8 @@ REPORT_OPTIONS = {"functionRelocDiffs": "none", "combineDataSections": True, "co
                   "ppc.calculatePoolRelocations": False}
 # Symbol names compilers make up for literals and pools, which never have to match the original's names.
 _GENERATED = re.compile(r"^(@\d+|\$LC\d+|_\$E\d+|\.\.\..*|@stringBase\d*|\.L.*)$")
+# An LTCG unit's checks file that can't be read (being rewritten as the unit builds): tries and the wait between
+SIDECAR_TRIES, SIDECAR_WAIT = 5, 0.2
 
 
 class ObjdiffError(NetworkError):
@@ -198,11 +201,21 @@ class DataConflict(MappingConflict):
     check): two globals used once each and swapped keep the mapping one to one, and only this sees them."""
 
 
-def _sidecar(base: Path) -> dict:
-    try:
-        return json.loads(base.with_suffix(".ltcg.json").read_text(encoding="utf-8")).get("functions", {}) or {}
-    except (OSError, ValueError):
-        return {}
+def _sidecar(base: Path) -> dict | None:
+    """The address mapping and data checks of an LTCG unit's functions (<object>.ltcg.json): {} for a unit with none,
+    None for one whose file can't be read. dll2coff rewrites it each time the unit builds, an agent's compile or the
+    permuter's; read then, it once looked like "no conflicts" and the progress report matched a 100% function with
+    two swapped globals, twice. A read that fails is tried again (the rewrite takes milliseconds); after that the
+    unit's checks are unknown, and callers count its functions as not confirmed."""
+    path = base.with_suffix(".ltcg.json")
+    for _ in range(SIDECAR_TRIES):
+        if not path.is_file():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8")).get("functions", {}) or {}
+        except (OSError, ValueError):
+            time.sleep(SIDECAR_WAIT)
+    return None
 
 
 def ltcg_problems(base: Path | None) -> list[str]:
@@ -222,7 +235,11 @@ def mapping_conflicts(base: Path | None, symbol: str | None) -> list[MappingConf
     a function."""
     if base is None or symbol is None:
         return []
-    found = _sidecar(base).get(symbol) or {}
+    side = _sidecar(base)
+    if side is None:
+        return [MappingConflict(f"the unit's address checks ({base.with_suffix('.ltcg.json').name}) couldn't be "
+                                "read, so this 100% isn't confirmed; it's being rebuilt: compile again")]
+    found = side.get(symbol) or {}
     return [MappingConflict(c) for c in found.get("conflicts", [])] + [DataConflict(c) for c in found.get("data", [])]
 
 
@@ -243,7 +260,10 @@ def subtract_conflicts(project: Path, rep: dict) -> dict:
         side = _sidecar(base)
         u_fns, u_code = 0, 0
         for f in unit.get("functions", []):
-            bad = side.get(f.get("name")) or {}
+            if side is None:  # its checks couldn't be read: no 100% of the unit is confirmed
+                bad = {"conflicts": ["unread"]}
+            else:
+                bad = side.get(f.get("name")) or {}
             if (bad.get("conflicts") or bad.get("data")) and float(f.get("fuzzy_match_percent") or 0) >= 100.0:
                 f["fuzzy_match_percent"] = 99.99
                 u_fns, u_code = u_fns + 1, u_code + int(f.get("size") or 0)

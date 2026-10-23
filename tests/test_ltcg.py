@@ -255,6 +255,47 @@ def test_the_progress_report_counts_functions_failing_the_ltcg_checks_as_not_mat
     assert out["measures"]["matched_code_percent"] == 25.0 and out["measures"]["matched_functions_percent"] == 50.0
 
 
+def test_a_checks_file_that_cant_be_read_confirms_no_100_percent_of_its_unit(tmp_path, monkeypatch):
+    """dll2coff rewrites a unit's checks file as the unit builds (an agent's compile, the permuter's): read then, it
+    once counted as "no conflicts", and the report matched a function with two swapped globals, twice."""
+    monkeypatch.setattr(objdiff, "SIDECAR_WAIT", 0)
+    (tmp_path / "objdiff.json").write_text(json.dumps({"units": [{"name": "u", "base_path": "build/u.obj"},
+                                                                {"name": "v", "base_path": "build/v.obj"}]}))
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "u.ltcg.json").write_text('{"functions": {"_a": {"conf')  # half written
+    unit = lambda name: {"name": name, "measures": {"total_code": "10", "matched_code": "10", "total_functions": 1,  # noqa: E731
+                                                     "matched_functions": 1},
+                         "functions": [{"name": "_a", "size": "10", "fuzzy_match_percent": 100.0}]}
+    rep = {"measures": {"total_code": "20", "matched_code": "20", "matched_code_percent": 100.0, "total_functions": 2,
+                        "matched_functions": 2, "matched_functions_percent": 100.0}, "units": [unit("u"), unit("v")]}
+    out = objdiff.subtract_conflicts(tmp_path, rep)
+    assert out["units"][0]["functions"][0]["fuzzy_match_percent"] == 99.99  # u: unknown, so unconfirmed
+    assert out["units"][1]["functions"][0]["fuzzy_match_percent"] == 100.0  # v has no checks file: as before
+    found = objdiff.mapping_conflicts(tmp_path / "build" / "u.obj", "_a")
+    assert len(found) == 1 and "couldn't be read" in found[0].describe() and "compile again" in found[0].describe()
+    assert objdiff.mapping_conflicts(tmp_path / "build" / "v.obj", "_a") == []
+
+
+def test_dll2coff_writes_the_object_and_its_checks_whole(tmp_path, monkeypatch):
+    """Readers never see a half-written file; Windows refusing the replace while a reader has the file open is
+    waited out."""
+    monkeypatch.setattr(dll2coff, "REPLACE_WAIT", 0)
+    target = tmp_path / "u.ltcg.json"
+    target.write_text("old")
+    real, refused = dll2coff.os.replace, []
+
+    def replace(src, dst):
+        if not refused:
+            refused.append(dst)
+            raise PermissionError("in use")
+        real(src, dst)
+
+    monkeypatch.setattr(dll2coff.os, "replace", replace)
+    dll2coff.write_whole(target, b'{"functions": {}}')
+    assert target.read_text() == '{"functions": {}}' and refused == [target]
+    assert [p.name for p in tmp_path.iterdir()] == ["u.ltcg.json"]  # no temporary file left
+
+
 def test_the_image_scan_for_function_pointers_runs_once_per_program():
     code = bytes.fromhex("e8 0b000000" "68 10100010" "c3") + b"\xcc" * 5 + bytes.fromhex("c3")
     pe = scratch_pe.PE(code, BASE, 0x2000, BASE + 0x1000, 0,

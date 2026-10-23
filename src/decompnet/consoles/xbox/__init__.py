@@ -128,6 +128,24 @@ class Xbox(Console):
 
         return scratch.check_program(fp, version, log=log)
 
+    # Real names as on PC: kept by address in functions.json's "names", which names.py and (LTCG) dll2coff read
+    renames_in_report = False
+
+    def rename_symbol(self, fp, version: str, old: str, new: str) -> dict:
+        from ..pc import PC
+
+        return PC.rename_symbol(fp, version, old, new)
+
+    def real_names(self, fp, version: str) -> dict[str, str]:
+        from ..pc import PC
+
+        return PC.real_names(fp, version)
+
+    def rename_pattern(self, old: str) -> str:
+        from ..pc import PC
+
+        return PC.rename_pattern(old)
+
     def read_program(self, data: bytes):
         """The program in the shape the PC path reads a Windows one into (consoles/pc/scratch.py read_program)."""
         from . import scratch

@@ -178,6 +178,67 @@ def test_swapped_globals_keep_the_mapping_but_fail_the_data_check(tmp_path):
     assert d.why_not().endswith("refers to other globals or callees than the original")
 
 
+def test_real_names_find_a_function_and_check_a_global_as_their_addresses(tmp_path):
+    """A function and a global given real names (functions.json's "names": rename_symbol on PC and Xbox) are found in
+    the harness link's map and checked as the addresses they name: a renamed global left unchecked would have
+    weakened the judge."""
+    src, info = _project(tmp_path)
+    info["names"] = {"func_00011020": "Lookup", "D_00030004": "g_table"}
+    (tmp_path / "functions.json").write_text(json.dumps(info))
+    # (and library code with a method of the same name: the unit's own object's is the one)
+    (tmp_path / "u.map").write_text(MAP.replace("?F1@@YAHXZ", "?func_00011000@@YAHXZ")
+                                    .replace("?F2@@YAHH@Z                10001020 f   a.obj",
+                                             "?Lookup@@YAHH@Z            10001020 f   00_u.obj")
+                                    .replace("_D_00030004", "?g_table@@3HA")
+                                    + " 0001:00000038       ?Lookup@CLib@@QAEHH@Z      10001038 f   xapilib:lib.obj\n")
+    src.write_text("int func_00011000()\n{ return 0; }\n\nint Lookup(int x)\n{ return x; }\n")  # no annotations
+    data, report = _run_dll2coff(tmp_path, src)
+    sections, names = _coff(data)
+    assert names[:2] == ["?F1@@YAHXZ", "?F2@@YAHH@Z"] and report["problems"] == []  # the original's, for objdiff
+    assert [(off, names[i]) for off, i, _ in sections[1][1]][0] == (2, "_D_00030004")
+    assert report["functions"]["?F2@@YAHH@Z"]["data_checked"] == 1 and report["functions"]["?F2@@YAHH@Z"]["data"] == []
+    info["names"] = {"func_00011020": "Lookup", "D_00030008": "g_table"}  # g_table is another address than F2 reads
+    (tmp_path / "functions.json").write_text(json.dumps(info))
+    _, report = _run_dll2coff(tmp_path, src)
+    (said,) = report["functions"]["?F2@@YAHH@Z"]["data"]
+    assert "(0x30008) where the original refers to 0x30004" in said
+
+
+def test_an_xbox_function_is_renamed_in_its_unit_and_its_harness_driver(tmp_path, monkeypatch):
+    """An LTCG unit's driver (harness/) calls its functions by name: renamed only in src/, the harness link would
+    have lost them. The row keeps the report's name (the original's symbol) and gets the real one."""
+    from decompnet.app.engine import RomNetwork
+    from decompnet.forks.project import ForkProject, Unit
+
+    net = RomNetwork(tmp_path / "decomp.db", tmp_path / "ws")
+    root = tmp_path / "ws" / "p"
+    (root / "config" / "v").mkdir(parents=True)
+    (root / "config" / "v" / "functions.json").write_text(json.dumps(
+        {"units": {"u": [{"name": "_func_00011000", "addr": 0x11000, "relocs": []}]}}, indent=1))
+    (root / "src" / "auto").mkdir(parents=True)
+    (root / "src" / "auto" / "u.cpp").write_text("int func_00011000(int x)\n{\n    return x;\n}\n")
+    (root / "harness").mkdir()
+    (root / "harness" / "u.drv.cpp").write_text("int func_00011000(int x);\nint HarnessEntry() { return func_00011000(1); }\n")
+    (root / ".decomp.wtf.json").write_text(json.dumps({"version": "v", "platform": "xbox"}))
+    (root / "objdiff.json").write_text(json.dumps({"units": []}))
+    net.forks._register("p", "P", "fork", root, {"kind": "fork", "origin": "scratch", "version": "v",
+                                                  "platform": "xbox", "ready": True}, "x")
+    report = {"units": [{"name": "u", "functions": [{"name": "_func_00011000", "size": "8", "fuzzy_match_percent": 100.0,
+                                                     "metadata": {"virtual_address": str(0x11000)}}]}]}
+    monkeypatch.setattr(ForkProject, "report", lambda self: report)
+    monkeypatch.setattr(ForkProject, "units", lambda self: [Unit("u", None, None, "src/auto/u.cpp", False, None)])
+    monkeypatch.setattr(ForkProject, "setup_commands", lambda self, version: [])
+    monkeypatch.setattr(ForkProject, "git", lambda self, *args: "")
+    net.forks.sync("p", log=lambda *_: None)
+    agent, _ = net.local_agent("claude-1")
+    assert net.rename_symbol(agent, "p", "_func_00011000", "Update").startswith("✅")
+    assert "Update(1)" in (root / "harness" / "u.drv.cpp").read_text()
+    assert "int Update(int x)" in (root / "src" / "auto" / "u.cpp").read_text()
+    assert json.loads((root / "config" / "v" / "functions.json").read_text())["names"] == {"func_00011000": "Update"}
+    fn = net._function("_func_00011000", "p")
+    assert fn["status"] == "matched" and json.loads(fn["meta"])["real"] == "Update"
+
+
 def test_a_global_annotation_says_which_original_address_a_named_global_is(tmp_path):
     src, _ = _project(tmp_path)
     src.write_text("// GLOBAL: 0x30000\nextern int g_a;\n" + src.read_text())

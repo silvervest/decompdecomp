@@ -620,7 +620,13 @@ def main() -> None:
     syms = map_symbols(Path(mapf))
     objects = map_objects(Path(mapf))
     wanted = names.wanted(info)
-    starts = sorted({a for a in syms.values() if img.section(a) is not None})
+    real = names.real_names(info)  # functions.json's "names": a real name stands for its address, as in names.py
+
+    def key_of(s: str) -> bytes | None:
+        """func_XXXXXXXX / D_XXXXXXXX a map symbol stands for, by the address in its name or its real name."""
+        return names.address_of(s.encode(), real)
+
+    starts =sorted({a for a in syms.values() if img.section(a) is not None})
     by_addr = sorted((a, s) for s, a in syms.items())
     addrs = [a for a, _ in by_addr]
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
@@ -635,7 +641,10 @@ def main() -> None:
     for addr, fn in functions.items():
         want = hints.get(addr)
         if want is None:
-            m = [s for s in syms if re.search(f"func_{addr:08X}(?![0-9A-Fa-f])", s, re.I)]
+            m = [s for s in syms if key_of(s) == f"func_{addr:08X}".encode()]
+            if len(m) > 1:  # a real name library code has too (an XDK class's Add): the unit's own object's
+                own = own_objects(sources)
+                m = [s for s in m if any(objects.get(s, "").endswith(o) for o in own)]
             if len(m) == 1:
                 found[addr] = (m[0], syms[m[0]])
             continue
@@ -662,9 +671,10 @@ def main() -> None:
         if i < 0:
             return f"$A{va:08X}", 0
         a, s = by_addr[i]
-        m = names.REF.search(s.encode())
-        if m:
-            s = wanted.get(m.group(1) + b"_" + m.group(2).upper(), s.encode()).decode()
+        if names.REF.search(s.encode()):
+            s = wanted.get(key_of(s), s.encode()).decode()
+        elif (key := key_of(s)) is not None:  # a real name: as names.py names it, the original's or _D_<address>
+            s = wanted.get(key, b"_" + key).decode()
         return s, va - a
 
     program = Program(exe)
@@ -684,8 +694,8 @@ def main() -> None:
         shown = s if not delta else f"{s}+0x{delta:X}"
         if s in annotated:
             return shown, annotated[s] + delta
-        m = names.REF.search(s.encode())
-        return (shown, int(m.group(2), 16) + delta) if m else None
+        key = key_of(s)  # (a real name too: a renamed global is checked as its address was)
+        return (shown, int(key.split(b"_", 1)[1], 16) + delta) if key else None
 
     def claim(va: int) -> tuple[list[tuple[str, int]], bool]:
         if va in orig_of:

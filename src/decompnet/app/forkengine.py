@@ -1634,9 +1634,10 @@ class ForkEngine:
         checks = consoles.REBUILD_CHECK in console.features
         with self._tree(proj).exclusive(), self._build_locks[proj["id"]]:
             # read under the lock: eight polishing helpers renamed at once, each wrote back files it had read before
-            # the others' renames, and half of an Xbox game's renames were undone in some files and not others
-            files = sorted(p for d in ("src", "include") if (fp.root / d).is_dir() for p in (fp.root / d).rglob("*")
-                           if p.is_file() and p.suffix in self.SOURCE_SUFFIXES)
+            # the others' renames, and half of an Xbox game's renames were undone in some files and not others.
+            # (harness/: an LTCG unit's driver and stand-ins call its functions and read its globals by name)
+            files = sorted(p for d in ("src", "include", "harness") if (fp.root / d).is_dir()
+                           for p in (fp.root / d).rglob("*") if p.is_file() and p.suffix in self.SOURCE_SUFFIXES)
             texts = {p: p.read_text(errors="replace", encoding="utf-8") for p in files}
             if any(taken.search(t) for t in texts.values()):
                 raise NetworkError(f"{new} is used in the project already: pick another name")

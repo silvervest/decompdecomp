@@ -292,7 +292,7 @@ def test_settings_switch_between_releases_and_a_branch(monkeypatch):
     monkeypatch.setattr(updates, "_branch_version", lambda repo, sha: "1.0.6a0")
     found = updates.switch_to("branch", "polish-everywhere")
     assert found["available"] and found["current"]["branch"] == "polish-everywhere"
-    assert found["spec"] == f"decompnet @ https://github.com/n-delic/decompdecomp/archive/{head}.tar.gz"
+    assert found["spec"] == f"decompnet @ https://github.com/{updates.REPO}/archive/{head}.tar.gz"
     with pytest.raises(ValueError, match="no branch gone-branch on GitHub"):
         updates.switch_to("branch", "gone-branch")
     with pytest.raises(ValueError, match="isn't a branch name"):

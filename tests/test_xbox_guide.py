@@ -25,6 +25,17 @@ def test_unresolved_data_isnt_called_harmless_and_volatile_in_the_harness_is_for
     assert "only as a documented exception" in text
 
 
+def test_pool_constants_stay_out_of_the_harness_and_address_escapes_are_allowed():
+    """An Xbox racing game: agents defined .rdata floats in a driver, then with a volatile seed so LTCG wouldn't fold
+    them (97.6%; the literals gave 99%), and the guide's volatile ban contradicted the escape arrays the project's
+    rules and the agents' shared knowledge rely on."""
+    text = _xbox()
+    assert "Never define a pool constant in harness/" in text
+    assert "(`t / 60.0f`, `t * (1.0f / 60.0f)`)" in text
+    assert ("An address escape (`void *volatile esc[] = { &g_x };`) for a global the game writes or takes the "
+            "address of elsewhere is faithful") in text
+
+
 def test_adding_a_helper_or_call_site_says_to_check_the_convention_again():
     text = _xbox()
     assert "Adding a helper function or a call site changes conventions under LTCG" in text

@@ -7,16 +7,15 @@ The compiler, headers and kernel
 - Visual C++ 7.1 (XDK 5849: 13.10.3077), default flags `/O2 /G6 /GF /Gy /arch:SSE /D_XBOX` (tools/configure.py).
   The headers are the user's own XDK: include `<xtl.h>` for Xbox types; never copy XDK headers into the project.
 - `/Gy` pads functions to 16 bytes with int3: that padding isn't part of a function.
-- Kernel calls are `call dword ptr [__imp__<Name>]` (the kernel thunk table, named like Windows imports). Declare
+- Kernel calls are `call dword ptr [__imp__<Name>]` (the kernel thunk table). Declare
   them as imports (`extern "C" __declspec(dllimport) LONG NTAPI NtClose(HANDLE);`); `xtl.h` declares most.
 - /arch:SSE: floats are mostly x87 (`fld`, `fcomp` + `fnstsw ax`), some SSE (`movss`, `mulss`, `comiss`,
   `cvttss2si` instead of `_ftol`). `__declspec(align(16))` locals give `and esp, -16` frames. Intrinsics
   (`memcpy`, `strlen`, `fabs`, `sqrt`) are inline at /O2. Direct3D calls are often inlined push-buffer writes from
   `d3d8.h`: write the D3D call, not the stores.
-- The XDK's own code (Direct3D, DirectSound, XNet, the C runtime, XAPI) is set aside and never reaches you, unless
-  the project covers the whole program: then its functions (units named `xdk_<address>`) are yours too, built as
-  plain units (no harness driver is made for them). In a project of the game's own code, if a function still looks like CRT or XAPI code (`_memcpy`,
-  `XapiInitProcess`), say so in a note and release it.
+- The XDK's own code (Direct3D, DirectSound, XNet, the C runtime, XAPI) is set aside, unless the project covers
+  the whole program (units `xdk_<address>`, built plain, no driver). A game function that looks like CRT or XAPI
+  code (`_memcpy`, `XapiInitProcess`): say so in a note and release it.
 
 Link-time code generation (LTCG)
 Games built with `/GL` and `/LTCG` pass arguments and `this` in eax, esi, edi or ebx, with no standard convention,
@@ -51,7 +50,7 @@ compiles can't match those functions: note "LTCG register convention" and releas
   registers at the same offsets is a function of two objects ("Two objects alike").
 - Unresolved names: the harness link goes on without them (`/FORCE:UNRESOLVED`) and the judge writes the
   original's reference in their place. The brief and compile_and_diff list them by kind:
-  - data (a global, a D_<address>, a pool constant): not always harmless. Under LTCG the compiler sees a
+  - data (a global, a D_<address>; not a pool float, below): not always harmless. Under LTCG the compiler sees a
     global's definition, type and constness, and an unresolved one can change scheduling and code around its
     loads. Define it, with its real type, in the unit or a harness file; don't release or wait for it. An
     unresolved D_<address> isn't checked, so a wrong address only shows once it's defined;
@@ -63,13 +62,15 @@ compiles can't match those functions: note "LTCG register convention" and releas
     the calls to it (sprintf: a match unresolved, 89% stood in). If one is needed, `<name>.nogl.cpp`.
 - Float constants the target loads by address (the diff shows their values): try both forms, the literal (`0.5f`)
   and an `extern const float D_<address>`, and keep the better score; the loads schedule differently and either
-  can win (ParticleStep matched only with the literal; on Burnout 3 the literal gave 59.1%, the externs 65.8%).
-  On equal scores prefer the literal: the game's literal lives in .rdata, and a named D_ extern doesn't port.
-  Sometimes the matching form is a folded expression (`1.0f - 1.3f`, not `-0.3f`).
+  can win (ParticleStep: only the literal; an Xbox racing game: the externs 65.8% to 59.1% once, the literal
+  98.9% to 97.6% once). On equal scores prefer the literal: the game's literal
+  lives in .rdata, and a named D_ extern doesn't port. Never define a pool constant in harness/ (it folds).
+  The matching form can be a folded expression (`1.0f - 1.3f`, not `-0.3f`); a product the target computes
+  twice is two forms not seen as equal (`t / 60.0f`, `t * (1.0f / 60.0f)`).
 - 100% isn't a match until the references map one to one onto the original's, a name that says an address
   (`D_<address>`, `func_<address>`, a global with `// GLOBAL: 0x<address>` before it) means the original's, and
   floats and strings have its values. The judge says so when they don't.
 - `volatile` in a harness driver or stand-in, to steer the compiler, is forbidden. The harness must reproduce the
-  original's call sites and callees faithfully: on Burnout 3, unfaithful harness contexts gave false MATCHes the
-  final link lost. In the game's own source, `volatile` is allowed only as a documented exception (a comment
-  saying why) when it's the only form that matches.
+  original's call sites and callees faithfully: unfaithful ones gave false MATCHes the final link lost. An address escape (`void *volatile esc[] = { &g_x };`) for a global the game
+  writes or takes the address of elsewhere is faithful, not steering. In the game's own source, `volatile` is
+  allowed only as a documented exception (a comment saying why) when it's the only form that matches.

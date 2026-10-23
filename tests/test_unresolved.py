@@ -66,6 +66,27 @@ def test_which_unresolved_names_change_the_code():
     assert kind("?ClampedDot@@YAMABUCVec4@@0@Z").matters is None
 
 
+def test_a_float_in_the_originals_read_only_data_is_a_pooled_literal_not_data_to_define():
+    """An Xbox racing game: agents defined .rdata floats (60.0, 1/60) in a harness driver, then gave them a volatile
+    seed so LTCG wouldn't fold them, and stayed at 97.6%; written as literals, the same function got to 99%."""
+    import struct
+    from types import SimpleNamespace
+
+    prog = _program()
+    rdata = SimpleNamespace(name=".rdata", va=0x30000, vsize=0x100, size=0x100, code=False)
+    data = SimpleNamespace(name=".data", va=0x40000, vsize=0x100, size=0x100, code=False)
+    prog.pe.code[0x30000] = struct.pack("<ff", 60.0, 0.0) + b"text\0"
+    prog.pe.code[0x40000] = struct.pack("<f", 60.0)
+    prog.pe.section_at = lambda a: next((s for s in (rdata, data) if s.va <= a < s.va + s.vsize), None)
+    sixty = unresolved.classify(prog, 0x11000, "_D_00030000")
+    assert (sixty.kind, sixty.matters) == ("data", None)
+    assert "(60 as a float)" in sixty.why and "write the literal" in sixty.why and "don't define it" in sixty.why
+    assert "(0 as a float)" in unresolved.classify(prog, 0x11000, "_D_00030004").why
+    assert "real type" in unresolved.classify(prog, 0x11000, "_D_00030008").why  # a string: data like any other
+    assert "real type" in unresolved.classify(prog, 0x11000, "_D_00040000").why  # .data: a global
+    assert unresolved.constant(_program(), 0x30000) is None  # a program read without sections
+
+
 def test_a_summary_names_what_to_do_first_and_says_the_rest_is_harmless():
     prog = _program()
     code = "void f(Accum *a) { func_00011100(); D_0001F200 = a->func_00011200(1); }"

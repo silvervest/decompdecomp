@@ -195,7 +195,7 @@ def test_mac_installer_skips_linux_packages_and_tracks_upstream(tmp_path):
                             capture_output=True, text=True, env=env, timeout=20)
     assert result.returncode == 0, result.stdout + result.stderr
     recorded = calls.read_text()
-    assert "--repo n-delic/decompdecomp" in recorded and "--branch main" in recorded
+    assert f"--repo {updates.REPO}" in recorded and "--branch main" in recorded  # (the installs' repository)
     assert "setup" in recorded and "shortcut" in recorded
     assert "GTK" not in result.stdout and "sudo" not in result.stdout
 

@@ -35,12 +35,12 @@ def test_install_info_round_trip():
 def test_release_update(monkeypatch):
     newer = ".".join(str(x + (1 if i == 2 else 0)) for i, x in enumerate(updates.version_key(__version__)[:3]))
     def get(url, timeout=15):
-        assert url == "https://raw.githubusercontent.com/n-delic/decompdecomp/main/site/public/install.sh"
+        assert url == f"https://raw.githubusercontent.com/{updates.REPO}/main/site/public/install.sh"
         return f'#!/bin/sh\nVERSION="{newer}"\n'.encode()
     monkeypatch.setattr(updates, "_get", get)
     found = updates.check()
     assert found["available"] and found["latest"]["version"] == newer and found["error"] is None
-    assert found["spec"] == f"decompnet @ https://github.com/n-delic/decompdecomp/archive/refs/tags/v{newer}.tar.gz"
+    assert found["spec"] == f"decompnet @ https://github.com/{updates.REPO}/archive/refs/tags/v{newer}.tar.gz"
     monkeypatch.setattr(updates, "_get", lambda url, timeout=15: f'VERSION="{__version__}"\n'.encode())
     assert not updates.check()["available"]
 
@@ -57,7 +57,7 @@ def test_branch_update(monkeypatch):
     monkeypatch.setattr(updates, "_branch_version", lambda repo, sha: "0.10.0")
     found = updates.check()
     assert found["available"] and found["latest"]["commit"] == head and found["notes"] == ["Newest", "Older one"]
-    assert found["spec"] == f"decompnet @ https://github.com/n-delic/decompdecomp/archive/{head}.tar.gz"
+    assert found["spec"] == f"decompnet @ https://github.com/{updates.REPO}/archive/{head}.tar.gz"
 
     # installed from a commit newer than the branch (pushed elsewhere): not an "update"
     answers[f"compare/{have}...{head}"] = {"status": "behind", "commits": []}
@@ -99,7 +99,7 @@ def test_install_runs_uv_then_the_new_setup(tmp_path, monkeypatch):
     monkeypatch.setattr(updates.edition, "DEV", False)  # (the tests run from a checkout: a development copy)
     updates.record("branch", "cross-platform", "1" * 40)
     found = {"current": updates.installed(), "available": True, "latest": {"version": "0.10.0", "commit": "2" * 40},
-             "spec": "decompnet @ https://github.com/n-delic/decompdecomp/archive/" + "2" * 40 + ".tar.gz"}
+             "spec": f"decompnet @ https://github.com/{updates.REPO}/archive/" + "2" * 40 + ".tar.gz"}
     said = []
     updates.install(found, log=said.append)
     ran = calls.read_text().splitlines()

@@ -116,6 +116,11 @@ RICH_LINKERS = {0x04, 0x13, 0x1E, 0x20, 0x25, 0x28, 0x3C, 0x3D, 0x47, 0x56, 0x5A
                 0xF0, 0x102}
 MAIN_BUILD_SHARE = 10  # without the linker's build: the newest build that compiled a tenth of the files or more
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+MAX_FN = 0x40000  # the most of a function's surroundings analyse() reads at once: bigger than any function
+_PADDING = re.compile(rb"\x90*[\xcc\x00]*")  # between functions: Visual C++ 6's nops, then the linker's int3 or zeros
+_NOT_PADDING = re.compile(rb"[^\x90\xcc\x00]")
+_NOPS = re.compile(rb"\x90*")
+_INT3S = re.compile(rb"\xcc*")
 
 
 @dataclass
@@ -736,11 +741,16 @@ class Function:
     name: str  # the symbol, decorated as MSVC decorates the C name
     relocs: list[tuple[int, int, str | None, int]] = field(default_factory=list)  # (offset, type, symbol, addend)
     unit: str = ""  # its source file (functions.json's unit), once the project has them
+    pad: int = 0  # int3 bytes the linker put after it (Visual C++ 7): not in its section, but no gap between files
 
 
 def decorate(name: str, convention: str, purge: int, params: int) -> str:
     """The symbol MSVC makes for a C function: _f (__cdecl), _f@8 (__stdcall), @f@8 (__fastcall). __thiscall
-    functions (C++ methods, `this` in ecx) are written in C as __fastcall with an unused second argument (edx)."""
+    functions (C++ methods, `this` in ecx) are written in C as __fastcall with an unused second argument (edx).
+    A purge Ghidra couldn't work out comes as 2147483647 (it made `_func_0001190E@2147483647` on an Xbox program):
+    no function pops that many bytes, so it counts as none."""
+    if not 0 <= purge <= 0xFFFF:
+        purge = 0
     if convention == "__thiscall":
         return f"@{name}@{purge + 8}"
     if convention == "__fastcall":
@@ -782,14 +792,148 @@ def _tables(md, pe: PE, start: int, code_end: int, limit: int) -> tuple[int, int
             entries.append(at - start)
             at += 4
         data_end = max(data_end, at)
-    for b in sorted(set(bytes_at)):  # a byte table runs to the next function, less its padding
+    for b in sorted(set(bytes_at)):
         tail = pe.read(b, limit - b).rstrip(b"\x90\xcc")
+        if entries:
+            # a byte table indexes the jump table, so every byte is below its entry count: the first one that isn't
+            # is past the table (Burnout 3: code that only a vtable reaches followed a byte table and was swallowed)
+            n = len(entries)
+            stop = next((k for k, v in enumerate(tail) if v >= n), len(tail))
+            tail = tail[:stop]
         data_end = max(data_end, b + len(tail))
     return code_end, data_end, entries
 
 
-def analyse(pe: PE, found: list[dict]) -> list[Function]:
-    """Every function's extent, name and relocations, from Ghidra's function list."""
+def flow_end(md, pe: PE, start: int, limit: int) -> int:
+    """Where a function's code ends, by following it: linear disassembly up to a ret, or an unconditional jump, that
+    no earlier branch jumps past. A jump out of [start, limit) is a tail call and doesn't extend it, a switch's jump
+    table extends it to its furthest case and ends the code (MSVC puts the tables after the code), and an int3 or
+    bytes that don't decode end it too. Ghidra's own extent stops short when a function returns in the middle and
+    goes on after it (code reached by an earlier jump): taken as the end, the rest became a false start."""
+    code = pe.read(start, limit - start)
+    reach, table_at, end = start, None, start
+    for ins in _disasm(md, code, start):
+        if (table_at is not None and ins.address >= table_at) or ins.id == x86.X86_INS_INT3:
+            break
+        end = ins.address + ins.size
+        ops = ins.operands
+        imm = bool(ops) and ops[0].type == x86.X86_OP_IMM
+        if ins.id == x86.X86_INS_JMP and ops and ops[0].type == x86.X86_OP_MEM and ops[0].mem.scale == 4 \
+                and ops[0].mem.base == 0 and start < (ops[0].mem.disp & 0xFFFFFFFF) < limit:
+            table = ops[0].mem.disp & 0xFFFFFFFF
+            table_at = table if table_at is None else min(table_at, table)
+            at = table
+            while at + 4 <= limit:
+                value = struct.unpack("<I", pe.read(at, 4).ljust(4, b"\0"))[0]
+                if not start <= value < table:
+                    break
+                reach, at = max(reach, value), at + 4
+        if imm and x86.X86_GRP_JUMP in ins.groups:
+            target = ops[0].imm & 0xFFFFFFFF
+            if start < target < limit:
+                reach = max(reach, target)
+            elif ins.id == x86.X86_INS_JMP and ins.address >= reach:
+                break  # a tail call
+        if ins.address >= reach and (ins.id in (x86.X86_INS_RET, x86.X86_INS_RETF) or (
+                ins.id == x86.X86_INS_JMP and (not imm or ops[0].imm & 0xFFFFFFFF <= ins.address))):
+            break  # nothing falls through: a ret, an indirect jump, or a jump back (a loop's or a shared tail)
+    return end
+
+
+def _flow_end(md, pe: PE, start: int, limit: int) -> int:
+    """flow_end, reading a small window first and a bigger one only when the code reaches its end: a function's
+    surroundings run to the section's end after the last start, and reading all of that for each function found
+    there was quadratic."""
+    size = 0x1000
+    while True:
+        stop = min(limit, start + size)
+        end = flow_end(md, pe, start, stop)
+        if stop >= limit or end < stop - 16:
+            return end
+        size *= 8
+
+
+def referenced(pe: PE) -> frozenset[int]:
+    """Code addresses something points at the way only function starts are pointed at: `call rel32` targets, and
+    words in data sections (vtables, callback tables) or pushed as immediates (callbacks). Jump tables are left out
+    on purpose: they sit in the code sections and point at a switch's cases, inside their function.
+
+    It scans the whole image, so it's worked out once per program object (analyse() is called per unit by tools
+    that re-analyse a few functions at a time: every call scanned the image again)."""
+    key = (id(pe.data), tuple((s.va, s.size, s.offset, s.code) for s in pe.sections))
+    cached = pe.__dict__.get("_referenced")
+    if cached is not None and cached[0] == key and cached[1] is pe.data:
+        return cached[2]
+    code = [(s.va, s.va + s.size) for s in pe.sections if s.code]
+
+    def in_code(a: int) -> bool:
+        return any(lo <= a < hi for lo, hi in code)
+
+    out: set[int] = set()
+    for s in pe.sections:
+        data = pe.data[s.offset:s.offset + s.size]
+        if s.code:
+            for op in (b"\xe8", b"\x68"):
+                i = data.find(op)
+                while 0 <= i <= len(data) - 5:
+                    value = struct.unpack_from("<I", data, i + 1)[0]
+                    a = (s.va + i + 5 + value) & 0xFFFFFFFF if op == b"\xe8" else value
+                    if in_code(a):
+                        out.add(a)
+                    i = data.find(op, i + 1)
+        else:
+            out.update(a for (a,) in struct.iter_unpack("<I", data[:len(data) // 4 * 4]) if in_code(a))
+    pe.__dict__["_referenced"] = (key, pe.data, frozenset(out))  # (the data itself: an id can be reused)
+    return pe.__dict__["_referenced"][2]
+
+
+def _whole_instructions(md, pe: PE, start: int, code_end: int, limit: int) -> int:
+    """`code_end` moved past the instruction it cuts, if any: Ghidra's body for a function ending in a tail call
+    (`jmp` to another function) can stop a byte short of the jmp's end, and the cut byte then decodes as garbage
+    on the original's side only (seen in a real Xbox game, against an LTCG harness that matched it)."""
+    at = code_end
+    for ins in _disasm(md, pe.read(start, limit - start), start):
+        if ins.address >= code_end:
+            break
+        at = ins.address + ins.size
+    return max(code_end, min(at, limit))
+
+
+def _mid_code(pe: PE, value: int, starts, start: int, end: int) -> bool:
+    """An immediate that lands inside another function's code: a constant, not an address. Xbox programs load at
+    0x10000, so flag masks like `and edx, 0x70000` fall inside .text (seen in a real Xbox game; the LTCG harness,
+    comparing numbers, matched where objdiff saw a relocation on one side). A real code address in an immediate is
+    a function (a callback) or a label of the function itself."""
+    sec = pe.section_at(value)
+    return sec is not None and sec.code and value not in starts and not start <= value < end
+
+
+def analyse(pe: PE, found: list[dict], *, linker_padding: bool = False, sweep: bool = True,
+            known: dict[int, str] | None = None) -> list[Function]:
+    """Every function's extent, name and relocations, from Ghidra's function list.
+
+    A row with `exact` (library code matched byte for byte, scratch_xbe) keeps its extent as given.
+
+    `known`: address -> symbol of the functions a project already has, when only part of the program is analysed
+    (code an older import left out, scratch_xbe.analyse_library_sections): references to them name them, and an
+    immediate holding one's address is that function's, as if the whole program had been analysed at once.
+
+    `sweep` (an import's full function list): code after the last row, to its section's end, is looked for missed
+    functions too. A caller re-analysing a few functions passes False: the last row then ends with its own code
+    and padding (else one call analysed all of a big game's .text after it, function after function).
+
+    Visual C++ 6 pads a function's own section with nops (0x90), so they're part of the function. From Visual C++ 7
+    on (Xbox games, PC games of 2002 on) the compiler pads nothing and the linker fills the space up to the next
+    function's 16-byte boundary with int3 (0xCC). `linker_padding` (for those programs) records that run as the
+    function's `pad`: the compiled section doesn't hold it, so it isn't delinked, but units() doesn't take it for
+    the gap between two object files either (with /Gy every function has one). Multi-byte nops inside a function
+    (`lea ecx, [ecx]` before a loop) are code, and Ghidra's extent already covers them.
+
+    `linker_padding` is the Xbox import's: it also follows each function's own code to its end (flow_end), takes a
+    start nothing vouches for that this flow runs past as part of the function (a switch's case Ghidra cut off),
+    and finds missed functions by their flow. A PC program keeps Ghidra's starts and extents: its import joins the
+    pieces Ghidra cut off afterwards (merge_pieces), where a start's piece shape decides, and units() reads the
+    linker's padding itself (linker_padding())."""
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
     md.detail = True
     rows: dict[int, dict] = {}
@@ -800,36 +944,94 @@ def analyse(pe: PE, found: list[dict]) -> list[Function]:
             continue  # (a thunk to one of the program's own functions: part of the code it's in, as Ghidra found it)
         rows[r["entry"]] = r if not r.get("thunk") else {**r, "end": r["entry"] + THUNK_BYTES}
     starts = sorted(rows)
+    refs = referenced(pe) if linker_padding else frozenset()
+
+    def doubtful(addr: int) -> bool:
+        """A start nothing vouches for: not the entry point, not named, no call or pointer to it, and not after
+        padding (padding only ever comes between functions)."""
+        r, sec = rows[addr], pe.section_at(addr)
+        return addr != pe.entry and r.get("source") not in ("IMPORTED", "USER_DEFINED", "LIBRARY") and \
+            addr not in refs and \
+            addr > sec.va and pe.read(addr - 1, 1) not in (b"\xcc", b"\x90")
+
     i = 0
-    extents: dict[int, tuple[int, int, list[int]]] = {}  # start -> (code end, end, jump table entries)
+    extents: dict[int, tuple[int, int, list[int], int]] = {}  # start -> (code end, end, jump table entries, pad)
     while i < len(starts):
         start = starts[i]
         sec = pe.section_at(start)
+        if not linker_padding:  # a PC program: Ghidra's starts and extents, and what's between them
+            limit = min(starts[i + 1] if i + 1 < len(starts) else sec.va + sec.size, sec.va + sec.size)
+            code_end = max(start + 1, min(rows[start].get("end", limit), limit))
+            code_end, end, entries = _tables(md, pe, start, code_end, limit)
+            gap = pe.read(end, limit - end)
+            rest = gap.lstrip(b"\x90").lstrip(b"\xcc\x00")
+            if rest and not rest.strip(b"\x90\xcc\x00") == b"":
+                # code nobody calls directly (callbacks, vtables) that Ghidra didn't make a function: one of its own
+                missed = limit - len(rest)
+                # less the padding after it, but not its last instruction's zeros (a `ret 8` ends with one)
+                body = len(rest.rstrip(b"\x90\xcc\x00"))
+                # or up to the int3s Visual C++ 2005 and later pad each function of a file with: what follows them is
+                # another function (inlined everywhere, so nothing calls it: Ghidra missed several in a row there)
+                body = next((i.address + i.size for i in _disasm(md, rest, 0) if i.address + i.size >= body or (
+                    i.mnemonic in ("ret", "jmp") and rest[i.address + i.size:i.address + i.size + 1] == b"\xcc")), body)
+                rows[missed] = {"entry": missed, "end": missed + body, "name": "",
+                                "source": "DEFAULT", "purge": 0, "convention": "__cdecl"}
+                starts.insert(i + 1, missed)
+                limit = missed
+                gap = pe.read(end, limit - end)
+            if gap and gap.strip(b"\x90") == b"":
+                end = limit  # Visual C++ 6's own padding: part of the compiled function's section too
+            extents[start] = (code_end, end, entries, 0)
+            i += 1
+            continue
+        # Ghidra makes functions of switch cases it couldn't tie to their switch (an x86 game: dozens): a doubtful
+        # start that this function's own flow runs past is part of it
+        while i + 1 < len(starts) and doubtful(starts[i + 1]):
+            far = next((s for s in starts[i + 2:] if not doubtful(s)), sec.va + sec.size)
+            if _flow_end(md, pe, start, min(far, sec.va + sec.size)) <= starts[i + 1]:
+                break
+            del rows[starts.pop(i + 1)]
         limit = min(starts[i + 1] if i + 1 < len(starts) else sec.va + sec.size, sec.va + sec.size)
-        code_end = max(start + 1, min(rows[start].get("end", limit), limit))
-        code_end, end, entries = _tables(md, pe, start, code_end, limit)
-        gap = pe.read(end, limit - end)
-        rest = gap.lstrip(b"\x90").lstrip(b"\xcc\x00")
-        if rest and not rest.strip(b"\x90\xcc\x00") == b"":
-            # code nobody calls directly (callbacks, vtables) that Ghidra didn't make a function: one of its own
-            missed = limit - len(rest)
-            # less the padding after it, but not its last instruction's zeros (a `ret 8` ends with one)
-            body = len(rest.rstrip(b"\x90\xcc\x00"))
-            # or up to the int3s Visual C++ 2005 and later pad each function of a file with: what follows them is
-            # another function (inlined everywhere, so nothing calls it: Ghidra missed several in a row there)
-            body = next((i.address + i.size for i in _disasm(md, rest, 0) if i.address + i.size >= body or (
-                i.mnemonic in ("ret", "jmp") and rest[i.address + i.size:i.address + i.size + 1] == b"\xcc")), body)
-            rows[missed] = {"entry": missed, "end": missed + body, "name": "",
-                            "source": "DEFAULT", "purge": 0, "convention": "__cdecl"}
+        if not sweep and i + 1 == len(starts):  # a few functions re-analysed: the last one's code and padding, not
+            ends = max(_flow_end(md, pe, start, limit), min(rows[start].get("end", start + 1), limit))  # all after it
+            at = pe.offset(ends)
+            limit = min(limit, ends + (_PADDING.match(pe.data, at, at + 0x100).end() - at if at is not None else 0))
+        window = min(limit, start + MAX_FN)  # what's read of the code after it (the last start: not all the rest)
+        if rows[start].get("exact"):  # a library function: its size is the library object's, not a guess
+            code_end, end, entries = _tables(md, pe, start, min(rows[start]["end"], limit), window)
+            end = min(rows[start]["end"], limit)
+            code_end = min(code_end, end)
+        else:
+            code_end = max(start + 1, min(rows[start].get("end", limit), limit), _flow_end(md, pe, start, window))
+            code_end = _whole_instructions(md, pe, start, code_end, window)
+            # Ghidra's body can run over the linker's int3s into a function it missed
+            code_end = start + max(1, len(pe.read(start, code_end - start).rstrip(b"\xcc")))
+            code_end, end, entries = _tables(md, pe, start, code_end, window)
+        # what follows, up to the next start: padding, or code Ghidra missed (found without copying the gap, which
+        # runs to the section's end after the last start: copied for every function found in it, that was quadratic)
+        off = pe.offset(end) if end < limit else None
+        stop = off + min(limit - end, max(0, sec.offset + sec.size - off)) if off is not None else 0
+        skip = _PADDING.match(pe.data, off, stop).end() if off is not None else 0
+        if off is not None and skip < stop and _NOT_PADDING.search(pe.data, skip, stop):
+            # code nobody calls directly (callbacks, vtables) that Ghidra didn't make a function: one of its own,
+            # as far as its own flow goes (to its ret, or the int3s Visual C++ 2005 and later pad each function of a
+            # file with); what follows it (a run of small vtable methods, inlined functions) is looked at in turn
+            missed = end + skip - off
+            flow = _flow_end(md, pe, missed, min(limit, missed + MAX_FN))
+            rows[missed] = {"entry": missed, "end": max(missed + 1, flow), "name": "", "source": "DEFAULT", "purge": 0,
+                            "convention": "__cdecl"}
             starts.insert(i + 1, missed)
             limit = missed
-            gap = pe.read(end, limit - end)
-        if gap and gap.strip(b"\x90") == b"":
+            stop = off + (limit - end)
+        pad = 0
+        if off is not None and stop > off and _NOPS.fullmatch(pe.data, off, stop):
             end = limit  # Visual C++ 6's own padding: part of the compiled function's section too
-        extents[start] = (code_end, end, entries)
+        elif off is not None and stop > off and _INT3S.fullmatch(pe.data, off, stop):
+            pad = stop - off
+        extents[start] = (code_end, end, entries, pad)
         i += 1
 
-    names = {}
+    names = {a: n for a, n in (known or {}).items() if a not in rows}
     for start, r in rows.items():
         base = r.get("name", "")
         named = r.get("source") in ("IMPORTED", "USER_DEFINED") and _IDENT.fullmatch(base) and base != "entry"
@@ -839,7 +1041,8 @@ def analyse(pe: PE, found: list[dict]) -> list[Function]:
         if r.get("thunk") and (symbol := _thunk_symbol(import_thunk(pe, start), r)) not in names.values():
             names[start] = symbol
 
-    return [Function(start, extents[start][1] - start, names[start], _relocations(md, pe, start, *extents[start], names))
+    return [Function(start, extents[start][1] - start, names[start],
+                     _relocations(md, pe, start, *extents[start][:3], names), pad=extents[start][3])
             for start in starts]
 
 
@@ -873,10 +1076,11 @@ def _relocations(md, pe: PE, start: int, code_end: int, end: int, entries: list[
             if op.type == x86.X86_OP_MEM and ins.disp_size == 4 and pe.contains(op.mem.disp & 0xFFFFFFFF):
                 name, addend = symbol(op.mem.disp & 0xFFFFFFFF)
                 relocs.append((at + ins.disp_offset, DIR32, name, addend))
-            elif op.type == x86.X86_OP_IMM and ins.imm_size == 4 and pe.contains(op.imm & 0xFFFFFFFF):
+            elif op.type == x86.X86_OP_IMM and ins.imm_size == 4 and pe.contains(op.imm & 0xFFFFFFFF) \
+                    and not _mid_code(pe, op.imm & 0xFFFFFFFF, names, start, end):
                 name, addend = symbol(op.imm & 0xFFFFFFFF)
                 relocs.append((at + ins.imm_offset, DIR32, name, addend))
-    for off in entries:
+    for off in sorted(set(entries)):  # a table two jumps go through is found twice (an x86 game has such switches)
         relocs.append((off, DIR32, None, struct.unpack("<I", pe.read(start + off, 4))[0] - start))
     return sorted(relocs)
 
@@ -1087,7 +1291,8 @@ def units(functions: list[Function], pe: PE | None = None, sources: dict[int, st
         -> dict[str, list[Function]]:
     """Source files: runs of neighbouring functions of about UNIT_BYTES each. A gap between two functions ends a file
     (an object's end), unless it's only the padding the program's linker puts before every function (linker_padding:
-    a 2005 game got 19,028 source files for its 20,863 functions). Where the game's debug information names the
+    a 2005 game got 19,028 source files for its 20,863 functions; or the function's own `pad`, which analyse records
+    when told the linker pads, as an Xbox import does). Where the game's debug information names the
     source file of the code at an address (`sources`, debuginfo.find), the functions from there on are that file's,
     the game's own: src/auto/game.cpp for game.c, whose functions all go in it, wherever the linker put them."""
     if sources:
@@ -1096,8 +1301,8 @@ def units(functions: list[Function], pe: PE | None = None, sources: dict[int, st
     out: dict[str, list[Function]] = {}
     cur: list[Function] = []
     for fn in functions:
-        if cur and (fn.addr + fn.size - cur[0].addr > UNIT_BYTES or fn.addr != cur[-1].addr + cur[-1].size and
-                    (filler is None or _padding(pe, cur[-1], fn) != filler)):
+        if cur and (fn.addr + fn.size - cur[0].addr > UNIT_BYTES or fn.addr != cur[-1].addr + cur[-1].size + cur[-1].pad
+                    and (filler is None or _padding(pe, cur[-1], fn) != filler)):
             out[f"text_{cur[0].addr:08X}"] = cur
             cur = []
         cur.append(fn)
@@ -1832,7 +2037,8 @@ def _programs_of(root: Path, manifest: dict) -> list[PE]:
         info = json.loads(config.read_text(encoding="utf-8")) if config.is_file() else {}
         modules = programs(root, info) if info.get("modules") else {}
         _PROGRAMS.clear()
-        _PROGRAMS[key] = [read_pe(paths[0].read_bytes()), *(pe for name, pe in modules.items() if name)]
+        _PROGRAMS[key] = [read_program(paths[0].read_bytes(), manifest.get("platform", "pc")),
+                          *(pe for name, pe in modules.items() if name)]
     return _PROGRAMS[key]
 
 
@@ -1863,8 +2069,17 @@ def _named_data(root: Path, manifest: dict, name: str) -> str | None:
     return next((key for key, real in (info.get("names") or {}).items() if real == name and key.startswith("D_")), None)
 
 
+def read_program(data: bytes, platform: str) -> PE:
+    """The program of a project made here, read by its console's reader: a console whose programs aren't PE files
+    reads them into the same shape (`read_program` on the console: the Xbox's XBE)."""
+    from .. import get
+
+    reader = getattr(get(platform), "read_program", None)
+    return reader(data) if reader is not None else read_pe(data)
+
+
 def read_data(root: Path, manifest: dict, name: str, length: int = READ_DEFAULT_BYTES) -> str:
-    """What read_data shows on a PC project: the bytes at a D_<address> (or any address) in the user's copy, the
+    """What read_data shows on a PC or Xbox project: the bytes at a D_<address> (or any address) in the user's copy, the
     addresses its words point to, and a string or floats when it reads as one."""
     m = re.fullmatch(r"_?D_([0-9A-Fa-f]{8})|(?:0x)?([0-9A-Fa-f]{6,8})", name)
     real = None
@@ -1981,12 +2196,72 @@ def _run(cmd: list[str], root: Path, what: str, log) -> None:
         raise ForkError(f"{what} failed:\n{tail[-ERROR_TAIL:]}")
 
 
+TEMPLATE_TOOLS = ("configure.py", "delink.py", "names.py", "ltcg.py", "dll2coff.py", "export.py", "ninja_syntax.py",
+                  "cldeps.py", "compile.py", "rebuild.py")
+SETTINGS = ("MSVC_VERSION", "CL_FLAGS", "LTCG")  # configure.py's per-game settings, kept when it's refreshed
+
+
+def made_here(fp: ForkProject) -> bool:
+    """A PC or Xbox project this app made (its tools/ are the template's)."""
+    from .. import get
+
+    m = fp.manifest or {}
+    return m.get("created") == "from scratch" and get(m.get("platform")).arch == "x86" and \
+        (fp.root / "tools" / "delink.py").is_file()
+
+
+def refresh_tools(fp: ForkProject, log=print, *, force: bool = False) -> list[str]:
+    """Bring a PC or Xbox project's tools/ up to this decompdecomp's template (fixes in the build and the judge
+    reach projects made before them): every template tool that differs is copied in, configure.py with the
+    project's own settings (compiler, flags, LTCG) kept, and configure runs again if anything changed. Returns
+    the tools replaced. `force`: also when the manifest doesn't say the project was made here."""
+    if not force and not made_here(fp):
+        return []
+    changed = []
+    for name in TEMPLATE_TOOLS:
+        src, dst = TEMPLATE / "tools" / name, fp.root / "tools" / name
+        new = src.read_text(encoding="utf-8")
+        old = dst.read_text(encoding="utf-8") if dst.exists() else ""
+        if name == "configure.py" and old:
+            for k in SETTINGS:
+                if (m := re.search(rf"^{k} = .*$", old, re.M)):
+                    line = m.group(0)
+                    new = re.sub(rf"^{k} = .*$", lambda _, line=line: line, new, count=1, flags=re.M)
+        if new != old:
+            dst.write_text(new, encoding="utf-8")
+            changed.append(name)
+    if changed:
+        log(f"updated the project's tools from decompdecomp's template: {', '.join(changed)}")
+        # configure again with them, pointed at this computer's tools: the manifest's setup names the ones of the
+        # computer that made the project (a project made in WSL and opened on Windows was configured with
+        # /home/... compilers, and every unit then failed to build)
+        for cmd in fp.setup_commands()[:1]:
+            fp.run(cmd, log=log)
+    return changed
+
+
+def check_program(fp: ForkProject, version: str, log=print) -> dict:
+    """The project's export (`ninja export`, the template's tools/export.py): the game's program rebuilt with its own
+    linker from the matched functions and the rest of the user's copy, compared byte for byte. {"identical",
+    "detail", "compiled", "functions"}; a project made before the export existed gets the template's tool first."""
+    refresh_tools(fp, log=log, force=True)  # a project made by an older decompdecomp gets the export and its ninja rule
+    ok, tail = fp.run(["ninja", "export"], log=log, timeout=3600)
+    report = fp.root / "build" / version / "export" / "export.json"
+    try:
+        rep = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"identical": False, "detail": (tail.strip().splitlines() or ["the export failed"])[-1][-300:]}
+    detail = f"{rep['compiled_count']} of {rep['functions']} functions from src/; " + \
+        ("identical to your copy" if rep["identical"] else "; ".join(rep["differences"][:3]) or "differs")
+    return {"identical": bool(rep["identical"] and ok), "detail": detail, "compiled": rep["compiled_count"],
+            "functions": rep["functions"]}
+
+
 def create(root: Path, game: Path, *, compiler: str | None = None, log=print) -> dict:
     """Make the project in `root` (which must not exist yet) and build it once. Returns facts about the game."""
     from ...forks import ghidra
 
     info = game_info(game)
-    version = info["id"]
     compiler = (compiler or f"MSVC/{info['compiler']}").removeprefix("MSVC/")
     log(f"the program: {info['summary']}")
     for why in info["cannot_match"]:
@@ -2069,32 +2344,75 @@ def create(root: Path, game: Path, *, compiler: str | None = None, log=print) ->
             log(f"what can't match in {m.rel}: {why}")
         log(f"{m.rel}: {len(starts)} functions, {named} named by its "
             + ("debug information and " if found_debug is not None else "") + "exports")
+    return write_project(root, game, info=info, compiler=compiler, args=args, pe=pe, groups=groups, pack=pack,
+                         modules=modules, pes=pes, debugs=debugs, names=real, own=own, analysis=True, log=log)
 
+
+def source_stub(fns: list[Function]) -> str:
+    """A new unit's source file: what it covers, and the project's header."""
+    return (f"/* {len(fns)} function{'s' if len(fns) != 1 else ''} from 0x{fns[0].addr:08X} to "
+            f"0x{fns[-1].addr + fns[-1].size:08X}, found by Ghidra. */\n#include \"common.h\"\n")
+
+
+def function_entry(pe: PE, f: Function) -> dict:
+    """A function as functions.json lists it (_entry), for the Xbox import's own analyses."""
+    return _entry(pe, f)
+
+
+def write_project(root: Path, game: Path | bytes, *, info: dict, compiler: str, args: list[str], pe: PE,
+                  groups: dict[str, list[Function]], platform: str = "pc", suffix: str = ".exe",
+                  what: str = "your copy of the game's program (.exe)", cl_flags: list[str] | None = None,
+                  set_aside: dict[str, str] | None = None, prepare=None, manifest: dict | None = None,
+                  pack: str = "msvc", modules: list[Module] = (), pes: dict[str, PE] | None = None,
+                  debugs: list = (), names: dict[str, str] | None = None, own: dict[str, str] | None = None,
+                  analysis: bool = False, log=print) -> dict:
+    """Write the project for analysed functions (the template, the user's program in orig/, functions.json, a source
+    file per unit, the manifest) and build it once. Shared by PC and Xbox (scratch_xbe), which differ in the
+    program's format, not in the project. `game`: the program's file, or its bytes (an XBE read off a disc image);
+    `cl_flags` replace the template's compiler flags; `set_aside`: symbol -> why agents don't get it (library
+    code), kept in config/<version>/set_aside.json and read when the project is measured; `prepare(root, units)`
+    adds a mode's files and settings before the first build and `manifest` its keys (an Xbox LTCG project, ltcg.py).
+    A PC game's (create): `pack` its compiler's, its DLLs (`modules`, each one's program in `pes` by name), what its
+    debug information says (`debugs`, `names`: real names by func_/D_ key), the files built by another Visual C++
+    (`own`), and `analysis`: the steps WindowsPC.ANALYSIS counts done here (exception stubs, import thunks, frame
+    flags) and the rebuild check of its code, which reads PE programs only."""
+    version = info["id"]
+    pes = pes or {"": pe}
     shutil.copytree(TEMPLATE, root)
     (root / "orig").mkdir()
-    for source, dest in ((game, root / "orig" / f"{version}.exe"), *((m.path, root / "orig" / m.rel) for m in modules)):
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            dest.hardlink_to(source)
-        except OSError:
-            shutil.copyfile(source, dest)
+    exe = root / "orig" / f"{version}{suffix}"
+    if isinstance(game, (bytes, bytearray)):
+        exe.write_bytes(game)
+    else:
+        for source, dest in ((game, exe), *((m.path, root / "orig" / m.rel) for m in modules)):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                dest.hardlink_to(source)
+            except OSError:
+                shutil.copyfile(source, dest)
     (root / "include").mkdir()
     (root / "include" / "common.h").write_text(TYPES_H, encoding="utf-8")
     cfg = root / "tools" / "configure.py"
     text = cfg.read_text(encoding="utf-8").replace(f'MSVC_VERSION = "{MSVC_DEFAULT}"', f'MSVC_VERSION = "{compiler}"')
     if pack != "msvc":  # /GX is /EHsc from 2005 on, and saying /GX warns on every file
         text = text.replace('"/GX"]  # /GX:', '"/EHsc"]  # /EHsc (/GX before 2005):')
+    if cl_flags is not None:
+        text = re.sub(r"^CL_FLAGS = .*$", lambda _: f"CL_FLAGS = {json.dumps(cl_flags)}", text, count=1, flags=re.M)
     cfg.write_text(text, encoding="utf-8")
     conf = root / "config" / version
     conf.mkdir(parents=True)
+    if set_aside:
+        (conf / "set_aside.json").write_text(json.dumps(set_aside, indent=1), encoding="utf-8")
+    real = names or {}
     (conf / "functions.json").write_text(json.dumps({
-        "exe": f"orig/{version}.exe", "sha1": info["sha1"], "image_base": pe.image_base,
+        "exe": f"orig/{version}{suffix}", "sha1": info["sha1"], "image_base": pe.image_base,
         **({"modules": [{"name": m.name, "exe": f"orig/{m.rel}", "sha1": hashlib.sha1(m.path.read_bytes()).hexdigest(),
                          "image_base": m.pe.image_base, "preferred_base": m.preferred} for m in modules]}
            if modules else {}),
         "units": {u: [_entry(pes[unit_module(u)], f) for f in fns] for u, fns in groups.items()},
         **({"names": dict(sorted(real.items()))} if real else {}),
     }, indent=1), encoding="utf-8")
+    debugs = list(debugs)
     if debugs:
         # shortcut: one program's types for include/debug_types.h (the first with any), every program's prototypes;
         # two PDBs' headers would define the same types twice. Merge them when a game ships PDBs for its DLLs too.
@@ -2102,14 +2420,14 @@ def create(root: Path, game: Path, *, compiler: str | None = None, log=print) ->
             debugs[0].functions.update(more.functions)
             debugs[0].header = debugs[0].header or more.header
         write_debug(root, version, debugs[0])
-    _write_compilers(compilers_file(root, version), own)  # (the DLLs built by another Visual C++; the rest: its own)
+    _write_compilers(compilers_file(root, version), own or {})  # (DLLs built by another Visual C++; the rest: its own)
     _write_compilers(flags_file(root, version), {})  # (set_frame_flags below: once the thunks are functions)
-    if stubs := mark_exception_stubs(root, version):
+    if analysis and (stubs := mark_exception_stubs(root, version)):
         log(f"{stubs} of them are exception-handling code Visual C++ makes from the function they belong to: set aside")
-    if thunks := name_import_thunks(root, version):
+    if analysis and (thunks := name_import_thunks(root, version)):
         log(f"{thunks} of them are import thunks the linker adds for calls to DLLs' functions: named after the "
             "function each calls, and set aside")
-    if frames := set_frame_flags(root, version):
+    if analysis and (frames := set_frame_flags(root, version)):
         log(f"{frames} of {len(groups)} source files keep an ebp frame in most of their functions: they build "
             f"with {FRAME_FLAG} (Visual C++ keeps the frame pointer)")
     sources = {addr: source for known in debugs for addr, source in known.units.items()}
@@ -2118,12 +2436,15 @@ def create(root: Path, game: Path, *, compiler: str | None = None, log=print) ->
         src.parent.mkdir(parents=True, exist_ok=True)
         named = next((sources[f.addr] for f in fns if f.addr in sources), "") \
             if not u.rsplit("/", 1)[-1].startswith("text_") else ""
-        where = (f"the game's {named}, as its debug information says" if named else
-                 f"0x{fns[0].addr:08X} to 0x{fns[-1].addr + fns[-1].size:08X}, found by Ghidra")
-        src.write_text(f"/* {len(fns)} function{'s' if len(fns) != 1 else ''} from {where}. */\n"
-                       "#include \"common.h\"\n", encoding="utf-8")
+        if named:
+            src.write_text(f"/* {len(fns)} function{'s' if len(fns) != 1 else ''} from the game's {named}, as its "
+                           "debug information says. */\n#include \"common.h\"\n", encoding="utf-8")
+        else:
+            src.write_text(source_stub(fns), encoding="utf-8")
     log(f"{len(groups)} source files for agents to write into"
         + (f" (each DLL's in src/auto/<its name>/: {', '.join(m.name for m in modules)})" if modules else ""))
+    if prepare is not None:  # a mode's own files and settings before the first build (forks/ltcg.py)
+        prepare(root, list(groups))
 
     _run([sys.executable, "tools/configure.py", version, *args], root, "the first build", log)
     if (root / "include" / DEBUG_TYPES).exists() and not _header_compiles(root, version, next(iter(groups)), log):
@@ -2133,30 +2454,36 @@ def create(root: Path, game: Path, *, compiler: str | None = None, log=print) ->
     _run(["ninja", "prepare"], root, "the first build", log)
     if not (root / "objdiff.json").exists():
         raise ForkError("the first build finished without writing objdiff.json")
-    rebuild = check_code(root, version, log=log)
+    rebuild = check_code(root, version, log=log) if analysis else None
 
     (root / ".decomp.wtf.json").write_text(json.dumps({
-        "created": "from scratch", "platform": "pc", "version": version, "compiler": f"MSVC/{compiler}",
-        "analysis": 6,  # (WindowsPC.ANALYSIS: nothing to repair, stubs set aside, pieces joined, thunks named, frames read)
+        "created": "from scratch", "platform": platform, "version": version, "compiler": f"MSVC/{compiler}",
+        # (WindowsPC.ANALYSIS: nothing to repair, stubs set aside, pieces joined, thunks named, frames read)
+        **({"analysis": 6, "rebuild": rebuild} if analysis else {}),
         "tools": tools_version(),
-        "game": {"what": "your copy of the game's program (.exe)", "path": f"orig/{version}.exe", "sha1": info["sha1"]},
+        "game": {"what": what, "path": f"orig/{version}{suffix}", "sha1": info["sha1"]},
         "setup": [["python", "tools/configure.py", version, *args], ["ninja", "prepare"]],
-        "rebuild": rebuild,
+        **({"set_aside": f"config/{version}/set_aside.json"} if set_aside else {}), **(manifest or {}),
     }, indent=2), encoding="utf-8")
     (root / ".gitignore").write_text("# made from your copy of the game, or by the build\norig/\nbuild/\nbuild.ninja\n"
                                      ".ninja_*\nobjdiff.json\n__pycache__/\n.decomp-wtf/\n", encoding="utf-8")
+    rebuilt = (f"4. `ninja rebuild` puts the whole program back together in `build/{version}/{version}.exe`, each "
+               "function from its C\n   where that compiles to the game's code (else from your copy's), and says "
+               "whether it's your copy, byte for byte." if analysis else
+               "4. `ninja export` rebuilds the game's program from the matched functions and the rest of your copy, "
+               f"with the game's\n   own linker{" (and the XDK's imagebld)" if platform == 'xbox' else ''}, and checks "
+               f"it byte for byte:\n   `build/{version}/export/export.json` says what came from `src/` and what differs.")
     (root / "README.md").write_text(f"""# {info['title']} decompilation
 
 Started from scratch with [decompdecomp](https://github.com/n-delic/decompdecomp): the game's functions, found by Ghidra, are cut out of your
 copy of its program and compared with what `src/` compiles to, function by function, with objdiff.
 
-1. Put your own copy of the game's program here as `orig/{version}.exe` (never commit it).
-2. `python tools/configure.py {version} --msvc <Visual C++ folder> [--wibo <wibo>]`, then `ninja`. A file built with
+1. Put your own copy of the game's program here as `orig/{version}{suffix}` (never commit it).
+2. `python tools/configure.py {version} --msvc <Visual C++ folder> [--wibo <wibo>]{" --xdk <your XDK's xbox folder>" if platform == "xbox" else ""}`, then `ninja`. A file built with
    Visual C++ 2017 on Linux or macOS runs it through wine: set `DECOMPNET_WINE` (or have wine on the PATH) and
    `DECOMPNET_WINE_PREFIX` (a wine prefix of its own) first.
 3. Decompiled code goes in `src/`; `objdiff.json` shows each function's progress in [objdiff](https://github.com/encounter/objdiff).
-4. `ninja rebuild` puts the whole program back together in `build/{version}/{version}.exe`, each function from its C
-   where that compiles to the game's code (else from your copy's), and says whether it's your copy, byte for byte.
+{rebuilt}
 
 Compiler: Visual C++ {compiler} (change `MSVC_VERSION` and `CL_FLAGS` in tools/configure.py if the game was built
 with another version or other flags; `config/{version}/file_compilers.json` names the files built with another
@@ -2174,5 +2501,5 @@ one) is moved by its base relocations at build time, as Windows moves it.
                     ["git", "-c", "user.name=decompdecomp", "-c", "user.email=noreply@decompdecomp.invalid", "commit", "-q", "-m",
                      f"Start the {info['title']} decompilation (decompdecomp, Ghidra)"]):
             subprocess.run(cmd, cwd=root, capture_output=True, creationflags=NO_WINDOW)
-    return {"platform": "pc", "id": version, "title": info["title"], "compiler": f"MSVC/{compiler}",
+    return {"platform": platform, "id": version, "title": info["title"], "compiler": f"MSVC/{compiler}",
             "sources": len(groups), "sha1": info["sha1"]}

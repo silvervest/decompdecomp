@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Write build.ninja and objdiff.json for this PC (Windows) decompilation, then run `ninja`.
 
-    python tools/configure.py VERSION --msvc DIR [--msvc DIR ...] [--wibo PATH]
+    python tools/configure.py VERSION --msvc DIR [--msvc DIR ...] [--wibo PATH] [--xdk DIR]
+
+An Xbox game (--xdk: your own XDK's xbox folder) compiles against the XDK's headers instead of Visual C++'s.
 
 The build cuts every function out of your copy of the game (orig/, see config/VERSION/functions.json) into objects,
 one per source file (tools/delink.py), and compiles src/ with the game's Visual C++ (run through wibo on Linux and
@@ -10,7 +12,9 @@ $DECOMPNET_WINE and $DECOMPNET_WINE_PREFIX, which decompdecomp sets): each file 
 config/VERSION/file_compilers.json names one, and with the more flags config/VERSION/file_flags.json gives it
 (/Oy-: the frame pointer kept). objdiff.json (for objdiff and decompdecomp) compares every source file's functions
 with the original's. `ninja rebuild` puts the whole program back together from them (tools/rebuild.py) and checks
-it against your copy. Made by decompdecomp.
+it against your copy. `ninja export` rebuilds the game's program from the matched functions and your copy, with the
+game's own linker (an Xbox game's: the XDK's, then its imagebld), and says whether it's byte for byte your copy
+(tools/export.py). Made by decompdecomp.
 """
 
 import argparse
@@ -26,6 +30,9 @@ import ninja_syntax
 # Settings (decompdecomp wrote these for this game; change them if the game was built differently)
 MSVC_VERSION = "6.0"  # every file's, unless config/<version>/file_compilers.json names another for it
 CL_FLAGS = ["/nologo", "/c", "/O2", "/W3", "/GX"]  # /GX: C++ exceptions, as games of the time were built
+# Link-time code generation (games built with /GL and /LTCG): units whose driver in harness/ defines HarnessEntry
+# compile with CL_FLAGS plus /GL and link in harness mode (tools/ltcg.py); the rest compile with CL_FLAGS alone.
+LTCG = False
 
 ROOT = Path(__file__).resolve().parent.parent
 os.chdir(ROOT)
@@ -35,8 +42,7 @@ parser.add_argument("--msvc", required=True, action="append",
                     help="Visual C++ directory (holds 6.0/Bin/CL.EXE, 10.0SP1/Bin/cl.exe, ...); several: the first "
                          "with MSVC_VERSION")
 parser.add_argument("--wibo", default="", help="runs the Windows compilers on Linux and macOS")
-parser.add_argument("--facts", action="store_true", help="only bring build/VERSION/configure.facts up to date (the "
-                                                         "build runs this, see facts())")
+parser.add_argument("--xdk", default="", help="an Xbox game: your own XDK's xbox folder (holds include/xtl.h)")
 args = parser.parse_args()
 WINE_FROM = 14  # the first Visual C++ wibo can't run (2015 and newer: 14.x), which wine runs
 INCLUDES = "includes.txt"  # in a version's folder: more header folders, relative to it (decompdecomp's toolchains.py)
@@ -46,7 +52,6 @@ CONFIG = Path("config") / VERSION / "functions.json"
 FILE_COMPILERS = CONFIG.parent / "file_compilers.json"  # {"src/auto/text_00401000.cpp": "7.1"}: files built with another
 FILE_FLAGS = CONFIG.parent / "file_flags.json"  # {"src/auto/text_00401000.cpp": ["/Oy-"]}: files built with more flags
 BUILD = Path("build") / VERSION
-FACTS = BUILD / "configure.facts"
 
 
 def q(argv: list[str]) -> str:
@@ -61,12 +66,16 @@ PYTHON = str(_W.with_name("python.exe")) if _W.name.lower() == "pythonw.exe" and
 PY = q([PYTHON]).replace("$", "$$")
 
 
-def msvc(version: str) -> tuple[str, list[str]]:
+def msvc(version: str, required: bool = True) -> tuple[str, list[str]]:
     """A Visual C++ version's compiler and its header folders, from the first --msvc folder that has it: its own
-    Include, then the ones its includes.txt names (a Windows SDK installed beside the pack), searched in that order."""
+    Include, then the ones its includes.txt names (a Windows SDK installed beside the pack), searched in that order.
+    Not `required` (the game's own, MSVC_VERSION): the first folder's, found or not, as an Xbox game's build names it
+    (on Windows it compiles with the XDK's own CL instead)."""
     homes = [Path(d) / version for d in args.msvc]
     home, cl = next(((h, p) for h in homes for p in (h / "Bin" / "CL.EXE", h / "Bin" / "cl.exe") if p.exists()),
                     (None, None))
+    if cl is None and not required:
+        home, cl = homes[0], homes[0] / "Bin" / "CL.EXE"
     if cl is None:
         sys.exit(f"configure: Visual C++ {version} isn't in {' or '.join(args.msvc)} (file_compilers.json or "
                  "MSVC_VERSION)")
@@ -90,6 +99,25 @@ def runner(version: str) -> list[str]:
     return ["--wine"]
 
 
+def shows_includes(version: str) -> bool:
+    """/showIncludes (header dependencies): Visual C++ .NET 2003 (7.1) and later have it, Visual C++ 6 doesn't."""
+    return tuple(int(x) for x in version.split(".")[:2] if x.isdigit()) >= (7, 1)
+
+
+_CL, _INCLUDES = msvc(MSVC_VERSION, required=False)
+MSVC = Path(_CL).parent.parent
+CL = Path(_CL)
+# On Windows itself an Xbox game compiles with the XDK's own CL (bin/vc71, the same 13.10.3077): the portable 7.1's
+# cl.exe doesn't start there without the runtime DLLs wibo stands in for on Linux
+if args.xdk and sys.platform == "win32":
+    CL = next((p for p in (Path(args.xdk) / "bin" / "vc71" / n for n in ("CL.Exe", "cl.exe")) if p.exists()), CL)
+# the headers: Visual C++'s own for a PC game; for an Xbox game the XDK's (its C runtime and xtl.h replace them)
+INCLUDE_DIRS = [str(Path(args.xdk) / "include")] if args.xdk else _INCLUDES
+INCLUDE = Path(INCLUDE_DIRS[0])  # (LTCG harness mode's rules take the one: an Xbox game's XDK headers)
+WRAP = f'"{args.wibo}" ' if args.wibo and sys.platform != "win32" else ""  # (LTCG harness mode's rules)
+SHOW_INCLUDES = shows_includes(MSVC_VERSION)
+
+
 def file_compilers() -> dict[str, str]:
     return json.loads(FILE_COMPILERS.read_text(encoding="utf-8")) if FILE_COMPILERS.exists() else {}
 
@@ -108,52 +136,78 @@ def source_of(unit: str) -> str:
     return cpp.as_posix() if cpp.exists() or not cpp.with_suffix(".c").exists() else cpp.with_suffix(".c").as_posix()
 
 
-def facts(headers: list[str], sources: list[str]) -> str:
-    """What build.ninja is made from besides this file, the config and the compiler maps: which source files and
-    headers there are, not what's in them. build.ninja depended on every one of them, so each edit of a source wrote
-    the whole build again before compiling: on a game of 1,400 units, 3 s of every compile, an agent's or each of the
-    permuter's variants (which judge in under one). Now the build brings this file up to date first (rule facts,
-    restat): it changes, and configure runs, only when a file is added or removed."""
-    return json.dumps({"headers": headers, "sources": sources}, indent=0) + "\n"
+def linker() -> Path:
+    """The game's linker: an Xbox game's is the XDK's own (bin/vc71), a PC game's the Visual C++ it was built with."""
+    xbin = Path(args.xdk) / "bin" / "vc71"
+    found = [xbin / "Link.Exe", xbin / "link.exe"] if args.xdk else []
+    return next((p for p in [*found, MSVC / "Bin" / "link.exe", MSVC / "Bin" / "LINK.EXE"] if p.exists()),
+                found[0] if found else MSVC / "Bin" / "link.exe")
 
 
-def write_facts(text: str) -> None:
-    """Written only when it changes: its date is what tells ninja whether build.ninja is out of date."""
-    if not FACTS.is_file() or FACTS.read_text(encoding="utf-8") != text:
-        FACTS.parent.mkdir(parents=True, exist_ok=True)
-        FACTS.write_text(text, encoding="utf-8")
+def compiler_for(version: str) -> tuple[str, list[str]]:
+    """A file's compiler and header folders: the game's own (an Xbox game's XDK CL and headers), or the version
+    file_compilers.json names, with an Xbox game's headers still the XDK's."""
+    if version == MSVC_VERSION:
+        return str(CL), INCLUDE_DIRS
+    cl, includes = msvc(version)
+    return cl, INCLUDE_DIRS if args.xdk else includes
 
 
 def main() -> None:
-    headers = [p.as_posix() for p in files("include", (".h", ".hpp"))]
-    sources = [s.as_posix() for s in files("src", (".c", ".cpp"))]
-    write_facts(facts(headers, sources))
-    if args.facts:
-        return
     info = json.loads(CONFIG.read_text(encoding="utf-8"))
     units = info["units"]
-    with open("build.ninja", "w", encoding="utf-8") as f:
+    headers = [p.as_posix() for p in files("include", (".h", ".hpp"))]
+    # written aside and put in place whole: a configure that stops half way (a driver it can't read) leaves the
+    # last build.ninja, so ninja runs this again and shows why, instead of missing the rest of the build
+    with open("build.ninja.tmp", "w", encoding="utf-8") as f:
         n = ninja_syntax.Writer(f)
         n.rule("delink", f"{PY} tools/delink.py {CONFIG.as_posix()} {(BUILD / 'target').as_posix()}", restat=True)
         compiler = [PYTHON, "tools/compile.py", "--config", CONFIG.as_posix()]
         # The runner invokes the compiler and names.py separately: cmd /c misparsed quoted compiler paths.
         # $runner: what runs the file's compiler (wibo, wine or nothing: runner())
-        n.rule("cl", q(compiler).replace("$", "$$") + " $runner --compiler $cl $includes --output $out "
-               "--source $in -- " + q(CL_FLAGS).replace("$", "$$") + " $cflags")
+        command = (q(compiler).replace("$", "$$") + " $runner --compiler $cl $includes --output $out --source $in -- "
+                   + q(CL_FLAGS).replace("$", "$$") + " $cflags")
+        n.rule("cl", command)
+        # The headers a 7.1 or later compiler reads are its file's dependencies (--deps: tools/cldeps.py): editing
+        # one rebuilds only what includes it. Visual C++ 6 has no /showIncludes: there every file depends on every
+        # header (rule cl)
+        n.rule("cl_deps", command.replace(" --output ", " --deps --output ", 1), deps="gcc", depfile="$out.d")
         n.rule("configure", f"{PY} tools/configure.py " + q(sys.argv[1:]).replace("$", "$$"), generator=True)
-        n.rule("facts", f"{PY} tools/configure.py " + q([*sys.argv[1:], "--facts"]).replace("$", "$$"), restat=True,
-               description="configure: which files there are")
 
         targets = [(BUILD / "target" / f"{u}.obj").as_posix() for u in units]
         n.build(targets, "delink", [CONFIG.as_posix(), "tools/delink.py"])
-        objs = []
+        objs, harness_units, harness_files = [], set(), []
+        if LTCG:  # ---- LTCG harness mode (tools/ltcg.py, tools/dll2coff.py)
+            import ltcg
+
+            xbin = Path(args.xdk) / "bin" / "vc71"
+            link = next((p for p in (xbin / "Link.Exe", xbin / "link.exe", MSVC / "Bin" / "link.exe") if p.exists()),
+                        xbin / "Link.Exe")
+            lib = next((p for p in (xbin / "Lib.Exe", xbin / "lib.exe", MSVC / "Bin" / "lib.exe") if p.exists()),
+                       xbin / "Lib.Exe")
+            harness_units, harness_files = ltcg.write_rules(
+                n, units=list(units), source_of=source_of, build=BUILD, config=CONFIG, cl=CL, link=link, lib=lib,
+                wrap=WRAP, py=PY, sh="", include=INCLUDE, libpath=Path(args.xdk) / "lib" if args.xdk else None,
+                cl_flags=CL_FLAGS, headers=headers)
+            objs += [(BUILD / Path(source_of(u)).with_suffix(".obj")).as_posix() for u in sorted(harness_units)]
+        # ---- end of LTCG harness mode
+        watch = []  # folders whose new files change the build: configure runs again when one is added
+        if LTCG:
+            watch = [d for d in ("src/auto", "harness") if Path(d).is_dir()]
         versions, more = file_compilers(), file_flags()
         for src in files("src", (".c", ".cpp")):
+            if src.parent == Path("src") / "auto" and src.stem in harness_units:
+                continue
+            if LTCG and ltcg.is_part(src, units):  # a unit's code split over files: only its harness link builds it
+                continue
             obj = (BUILD / src.with_suffix(".obj")).as_posix()
             src_posix = src.as_posix()
             version = versions.get(src_posix, MSVC_VERSION)
-            cl, includes = msvc(version)
-            n.build(obj, "cl", src_posix, implicit=[*headers, CONFIG.as_posix(), "tools/compile.py", "tools/names.py"],
+            cl, includes = compiler_for(version)
+            deps = shows_includes(version)
+            n.build(obj, "cl_deps" if deps else "cl", src_posix,
+                    implicit=[CONFIG.as_posix(), "tools/compile.py", "tools/names.py", "tools/cldeps.py"] if deps
+                    else [*headers, CONFIG.as_posix(), "tools/compile.py", "tools/names.py"],
                     variables={"cl": q([cl]).replace("$", "$$"),
                                "includes": q([a for d in includes for a in ("--include", d)]).replace("$", "$$"),
                                "runner": q(runner(version)).replace("$", "$$"),
@@ -171,10 +225,21 @@ def main() -> None:
         n.build(programs, "rebuild", [*targets, *objs],
                 implicit=[CONFIG.as_posix(), *exes, "tools/rebuild.py", "tools/delink.py"])
         n.build("rebuild", "phony", programs)
-        n.build(FACTS.as_posix(), "facts", [*headers, *sources], implicit=["tools/configure.py"])
-        n.build("build.ninja", "configure", ["tools/configure.py", CONFIG.as_posix(), FACTS.as_posix(),
+        # `ninja export`: the game's program rebuilt from the project with the game's own linker and checked byte for
+        # byte (tools/export.py; an Xbox game's XBE too, which rebuild.py doesn't write)
+        xdk = [f'--xdk "{args.xdk}"'] if args.xdk else []
+        wibo = [f'--wibo "{args.wibo}"'] if WRAP else []
+        n.rule("export", " ".join([f"{PY} tools/export.py {CONFIG.as_posix()} {(BUILD / 'export').as_posix()}",
+                                   f'--link "{linker()}"', *wibo, *xdk]),
+               description="rebuild the game's program and compare it")
+        n.build((BUILD / "export" / "export.json").as_posix(), "export", [*targets, *objs],
+                implicit=["tools/export.py", "objdiff.json"])
+        n.build("export", "phony", [(BUILD / "export" / "export.json").as_posix()])
+        n.build("build.ninja", "configure", ["tools/configure.py", CONFIG.as_posix(), *headers, *harness_files,
+                                             *[s.as_posix() for s in files("src", (".c", ".cpp"))], *watch,
                                              *[p.as_posix() for p in (FILE_COMPILERS, FILE_FLAGS) if p.exists()]])
         n.default(["prepare"])
+    os.replace("build.ninja.tmp", "build.ninja")
 
     objdiff = {
         "$schema": "https://raw.githubusercontent.com/encounter/objdiff/main/config.schema.json",
@@ -184,7 +249,8 @@ def main() -> None:
                    "base_path": (BUILD / "src" / "auto" / f"{u}.obj").as_posix(),
                    "metadata": {"source_path": source_of(u), "complete": False}} for u in units],
     }
-    Path("objdiff.json").write_text(json.dumps(objdiff, indent=2), encoding="utf-8")
+    Path("objdiff.json.tmp").write_text(json.dumps(objdiff, indent=2), encoding="utf-8")
+    os.replace("objdiff.json.tmp", "objdiff.json")
 
 
 if __name__ == "__main__":

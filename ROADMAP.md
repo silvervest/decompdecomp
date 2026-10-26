@@ -15,47 +15,53 @@ Each feature and the platforms it covers today. A — is a gap: pick one up (the
 start). Keep this table true when a feature ships or reaches another platform. Each column's code is its console's
 folder, `src/decompnet/consoles/<id>/`; a new console adds a column (CONTRIBUTING.md, "Consoles").
 
-| Feature | N64 | PS1 | PS2 | PSP | GBA | GameCube · Wii | Windows PC | DS | Public decomps |
-| :-- | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
-| Status | recommended | beta | beta | beta | beta | beta | beta | beta | the project's own |
-| Start from your own copy | ✓ | ✓ | ✓ | ✓ unencrypted or decrypted program and modules (ISO, CSO, CHD) | ✓ ROM | ✓ | ✓ | ✓ | fork by address |
-| Judge | link · compare | link · compare | link · compare | link · compare | link · compare | objdiff | objdiff | objdiff | objdiff |
-| Machine drafts (m2c, Ghidra for x86) | ✓ | ✓ | ✓ | ✓ | ✓ (m2c `gba-gcc-c`) | ✓ | ✓ Ghidra | — | by architecture |
-| Autopilot: free matches from drafts | ✓ | ✓ | ✓ | ✓ | ✓ (demo: 34 matches) | ✓ | ✓ exact drafts of tiny shapes; Ghidra's made compilable | — | — |
-| Drafts follow the header, made in the background; `redraft` | ✓ | ✓ | ✓ | ✓ | ✓ (m2c and `redraft`) | — | ✓ Ghidra's | — | — |
-| C++ methods drafted as `Class::method` | ✓ | ✓ | ✓ | ✓ | — | — | ✓ (RTTI, and classes from the vtables constructors store) | — | — |
-| Twins: free matches from identical code | ✓ | ✓ | ✓ | ✓ | ✓ (ran; no pairs in demo) | ✓ | ✓ | ✓ | ✓ |
-| Permuter on near misses | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ |
-| Hand-written assembly set aside | ✓ | ✓ | ✓ | ✓ | ✓ (`_call_via` helpers, `svc`/`swi` stubs) | ✓ | Visual C++'s exception-handling stubs | BIOS call stubs, pieces of functions | MIPS, PowerPC, ARM's BIOS stubs and pieces of functions |
-| Pieces of functions joined to their function | — | — | — | — | — | — | ✓ (`scratch.merge_pieces`) | ✓ (`recover.merge_pieces`) | — |
-| Agents' verdict "no C makes this" (3 agents of 2 models: set aside, red in the map) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Check again (and before helpers start, once after each update) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Kernel stubs set aside and named | — | set aside (BIOS calls) | ✓ | set aside, named by library and NID | set aside (BIOS calls) | — | ✓ import thunks | — | — |
-| Function-end reports (`report_boundary`) | ✓ | ✓ | ✓ | ✓ | ✓ (2-byte boundaries) | — | ✓ (agents agree, the rebuild checks) | — | — |
-| Compiler ranges and suggestions | ✓ | ✓ | ✓ | ✓ | — | from scratch: per source file (`try_compiler`, Settings); else the project's build | per source file (`try_compiler`, Settings) | per source file (`try_compiler`, Settings) | the project's build |
-| Flag search (`search_flags`) | ✓ | ✓ | ✓ | ✓ | — | the project's build | per source file (/Oy-, /O1, /Ob1) | the project's build | the project's build |
-| Compiler map and the judge's survey | ✓ | ✓ | ✓ | ✓ | — | — | ✓ per source file, Rich header | — | — |
-| Range checks: a range applies after its neighbours confirm it | ✓ | ✓ | ✓ | ✓ | — | — | ✓ over source files | — | — |
-| C++ classes from the code (`get_class`) | ✓ | ✓ | ✓ | ✓ | — | — | ✓ (named by RTTI where the program has it) | — | — |
-| Struct layouts from loads and stores (`guess_struct`) | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | — | — |
-| The game's own debug symbols: names, types, prototypes | — | — | ✓ symbol table, STABS, DWARF 1; the compiler of each object file | ✓ symbol table, DWARF 1 | — | — | ✓ PDB (Visual C++ 6.0's PDB 2.0, MSF 7.00), linker map, COFF symbols | — | — |
-| Twins across your games | ✓ | ✓ | ✓ | ✓ | — | — | ✓ (between PC projects) | — | — |
-| Shared knowledge (two models agree) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Tidy each source file once it's polished (shared types in one header, names, dead declarations) | — | — | — | — | — | ✓ | ✓ | ✓ | ✓ |
-| Polish matched code (still matching) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Real names for the game's symbols (`rename_symbol`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | dtk and ds-decomp projects |
-| Save and restore (`progress/`, Open a saved project) | ✓ | ✓ | ✓ | ✓ | ✓ | the project's git; best attempts saved | the project's git; best attempts saved | the project's git; best attempts saved | the project's git; best attempts saved |
-| Saved README preserves notes, with completion bar and function map | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Reimport: a new split, matched work kept (Settings) | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ (Ghidra again, the newest rules) | — | — |
-| Rebuildable export | ✓ | ✓ | ✓ | ✓ | ✓ | the project | the project (`ninja rebuild`) | the project | the project |
-| Progress bars for foreground jobs | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Rooms: decompile together | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Feature | N64 | PS1 | PS2 | PSP | GBA | GameCube · Wii | Windows PC | DS | Xbox | Public decomps |
+| :-- | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
+| Status | recommended | beta | beta | beta | beta | beta | beta | beta | beta | the project's own |
+| Start from your own copy | ✓ | ✓ | ✓ | ✓ unencrypted or decrypted program and modules (ISO, CSO, CHD) | ✓ ROM | ✓ | ✓ | ✓ | ✓ XBE or disc, your own XDK | fork by address |
+| Judge | link · compare | link · compare | link · compare | link · compare | link · compare | objdiff | objdiff | objdiff | objdiff | objdiff |
+| Machine drafts (m2c, Ghidra for x86) | ✓ | ✓ | ✓ | ✓ | ✓ (m2c `gba-gcc-c`) | ✓ | ✓ Ghidra | — | ✓ Ghidra | by architecture |
+| Autopilot: free matches from drafts | ✓ | ✓ | ✓ | ✓ | ✓ (demo: 34 matches) | ✓ | ✓ exact drafts of tiny shapes; Ghidra's made compilable | — | — | — |
+| Drafts follow the header, made in the background; `redraft` | ✓ | ✓ | ✓ | ✓ | ✓ (m2c and `redraft`) | — | ✓ Ghidra's | — | — | — |
+| C++ methods drafted as `Class::method` | ✓ | ✓ | ✓ | ✓ | — | — | ✓ (RTTI, and classes from the vtables constructors store) | — | — | — |
+| Twins: free matches from identical code | ✓ | ✓ | ✓ | ✓ | ✓ (ran; no pairs in demo) | ✓ | ✓ | ✓ | ✓ (an XDK test program: a free match) | ✓ |
+| Permuter on near misses | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ (an XDK test program: a method matched) | ✓ |
+| Hand-written assembly set aside | ✓ | ✓ | ✓ | ✓ | ✓ (`_call_via` helpers, `svc`/`swi` stubs) | ✓ | Visual C++'s exception-handling stubs | BIOS call stubs, pieces of functions | — | MIPS, PowerPC, ARM's BIOS stubs and pieces of functions |
+| Pieces of functions joined to their function | — | — | — | — | — | — | ✓ (`scratch.merge_pieces`) | ✓ (`recover.merge_pieces`) | — | — |
+| Agents' verdict "no C makes this" (3 agents of 2 models: set aside, red in the map) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Check again (and before helpers start, once after each update) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
+| Kernel stubs set aside and named | — | set aside (BIOS calls) | ✓ | set aside, named by library and NID | set aside (BIOS calls) | — | ✓ import thunks | — | ✓ XDK library code | — |
+| Function-end reports (`report_boundary`) | ✓ | ✓ | ✓ | ✓ | ✓ (2-byte boundaries) | — | ✓ (agents agree, the rebuild checks) | — | — | — |
+| Compiler ranges and suggestions | ✓ | ✓ | ✓ | ✓ | — | from scratch: per source file (`try_compiler`, Settings); else the project's build | per source file (`try_compiler`, Settings) | per source file (`try_compiler`, Settings) | the project's build | the project's build |
+| Flag search (`search_flags`) | ✓ | ✓ | ✓ | ✓ | — | the project's build | per source file (/Oy-, /O1, /Ob1) | the project's build | the project's build | the project's build |
+| Compiler map and the judge's survey | ✓ | ✓ | ✓ | ✓ | — | — | ✓ per source file, Rich header | — | — | — |
+| Range checks: a range applies after its neighbours confirm it | ✓ | ✓ | ✓ | ✓ | — | — | ✓ over source files | — | — | — |
+| C++ classes from the code (`get_class`) | ✓ | ✓ | ✓ | ✓ | — | — | ✓ (named by RTTI where the program has it; member functions under LTCG) | — | ✓ structs and classes, member functions in briefs and stand-ins (XDK test programs) | — |
+| Struct layouts from loads and stores (`guess_struct`) | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | — | — | — |
+| The game's own debug symbols: names, types, prototypes | — | — | ✓ symbol table, STABS, DWARF 1; the compiler of each object file | ✓ symbol table, DWARF 1 | — | — | ✓ PDB (Visual C++ 6.0's PDB 2.0, MSF 7.00), linker map, COFF symbols | — | — | — |
+| Twins across your games | ✓ | ✓ | ✓ | ✓ | — | — | ✓ (between PC projects) | — | — | — |
+| Shared knowledge (two models agree) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Tidy each source file once it's polished (shared types in one header, names, dead declarations) | — | — | — | — | — | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
+| Polish matched code (still matching) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ LTCG units too | ✓ |
+| Real names for the game's symbols (`rename_symbol`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ as PC; LTCG units too | dtk and ds-decomp projects |
+| Save and restore (`progress/`, Open a saved project) | ✓ | ✓ | ✓ | ✓ | ✓ | the project's git; best attempts saved | the project's git; best attempts saved | the project's git; best attempts saved | the project's git; best attempts saved | the project's git; best attempts saved |
+| Saved README preserves notes, with completion bar and function map | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Reimport: a new split, matched work kept (Settings) | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ (Ghidra again, the newest rules) | — | — | — |
+| Rebuildable export | ✓ | ✓ | ✓ | ✓ | ✓ | the project | the project (`ninja rebuild`; `ninja export` relinks with the game's own linker) | the project | `ninja export`: the game's linker and imagebld, LTCG units from their harness links | the project |
+| LTCG games (`/GL`: register conventions, cross-file inlining) |  |  |  |  |  |  |  |  | harness mode, detected at import (or chosen); convention evidence, stand-in drafts, data check; a unit's code split over files in link order |  |
+| Progress bars for foreground jobs | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Rooms: decompile together | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | as PC (untested) | ✓ |
 
 Where to start on a gap:
 - **PowerPC (GameCube, Wii) and x86 (PC)**: class recovery and the compiler map work on a project's objects in fork
   mode, not on a ROM; the readers are the part to write (CodeWarrior's vtable pointer is often not at offset 0). x86
   has its reader (`arch/x86_fields.py`): PC classes and struct layouts come from it (`Console.classes`,
   `Console.structs`); a PowerPC reader would give GameCube and Wii the same through those parts.
+- **x86 member functions** (Xbox, and games built with link-time code generation: `forks/methods.py`, which
+  follows `this` in any register, where PC's reader expects it in ecx): it can't tell a free function taking a
+  pointer from a member function when LTCG moves both into a register, and it groups a base class's functions, and
+  a member object's at +0, with the object they're called on. Names from another build would settle both; one
+  reader for both, PC's with methods.py's register tracking, would give Xbox RTTI names and struct layouts too.
 - **Windows PC**: autopilot's Ghidra drafts compile, but rarely match beyond the tiny shapes exact drafts cover:
   Ghidra drafts a delinked object without its callees' prototypes, so a method call loses `this` and a callee's
   arguments are guessed (a draft fed the project's headers, through a Ghidra script that applies them, is the next
@@ -66,7 +72,12 @@ Where to start on a gap:
   path; a dropped .exe comes alone (a browser doesn't hand over the folder), a project made before can't take its
   DLLs in yet (Reimport analyses the programs a project has), a project restored or cloned asks only for the .exe (`ForkProject.needs` names
   one file: the DLLs go in `orig/` by hand, as its README says), and a game whose .exe can't start (Visual C++
-  2017 and newer) can't start from its DLLs either.
+  2017 and newer) can't start from its DLLs either. `ninja export` (`tools/export.py`, the game's own linker) is
+  tested on homemade programs only: a real game's import table and resources are carried as bytes and its headers
+  are your copy's, and a program with base relocations (.reloc) is untested (it links /FIXED).
+- **PC and Xbox export**: data has no relocations of its own, so the rebuilt program can't move. A game built with
+  link-time code generation is rebuilt from each unit's harness link; a whole-program /LTCG link of the matched
+  source needs all of the game's code as source.
 - **Windows PC debug symbols** (`consoles/pc/debuginfo.py`): Ghidra's function boundaries stay Ghidra's, though a
   PDB gives each function's size; CodeView embedded in the program (NB09, NB11: Visual C++ 4-5 with /PDB:NONE) and
   Visual C++ 4's 16-bit type records aren't read; a class's methods aren't written into its struct (C++ calls a
@@ -78,6 +89,16 @@ Where to start on a gap:
 - **Tidying a ROM project**: its C is the database's, one function at a time, with one shared header per segment
   (`edit_context`), so there's no file to tidy (`app/readable.py`, `_untidy`). The header is the place to start: its
   types and names, then the functions' C that uses them, each still matching.
+- **Xbox**: rooms haven't been run on Xbox. Twins and the permuter have only been seen on a small test program built
+  with the XDK, not on a real game yet. PC's import steps (exception-handling stubs, pieces joined, import thunks,
+  frame flags, `report_boundary`'s cuts, Reimport, the code rebuild check), its compiler map and range checks,
+  `guess_struct` and debug symbols aren't Xbox's yet: they read the programs as PE files (`scratch.programs`,
+  `check_code`), where an Xbox program is an XBE (`read_program`), and the Xbox console has no `on_start` to bring a
+  project through `WindowsPC.ANALYSIS`'s steps. Reading the XBE there, step by step, is the way in. A draft parked
+  behind an `#if` whose flag also guards its stand-in in the unit's harness (`#ifndef ..._REAL`) can't come out by
+  one agent's change: a compile puts it where the build sees it, but the stand-in is still linked (LNK2005), and
+  `edit_file` takes the stand-in out only while nothing defines the function. Both changes in one, a claim that
+  covers the function and its harness files together, is the way through.
 - **Struct layouts** read MIPS and x86 loads and stores (`arch/mips_fields.py`, `arch/x86_fields.py`); another
   processor adds its reader as its `Arch.field_accesses`, and structs.py does the rest. Still open on MIPS: the PS2's
   fifth to eighth arguments (t0-t3), and a pointer into the middle of a struct handed to a callee (`&this->pos`). On
@@ -314,20 +335,23 @@ Where to start on a gap:
 - **Saved guides keep your notes.** Saving creates a basic README only when one is missing. Later saves update
   counts and visuals inside hidden comment pairs, preserving the rest of the guide. A local SVG progress card
   shows completion, platform and a function map in ROM and project mode; it contains no game code.
-- **Real names on Windows PC.** A PC project names functions and data by address (`func_0041B470`, `D_0066DDA4`),
-  and `tools/names.py` pairs them with the original's symbols by that address, so rename_symbol refused them. A real
-  name is kept by address in `config/<version>/functions.json` ("names"), and names.py takes it as that address in C
-  and C++ (a method's too): the function and its callers still match. The report keeps the original's symbol, so the
-  function's row does too, and agents find and call it by its real name.
-- **The compiler of each object file, from a PS2 game's symbols.** Games linked by CodeWarrior's linker are often
-  GCC's code with CodeWarrior's C library: the three with symbols had GCC's mark on 91-93% of their object files.
-  The one that built most of the code is the game's, and SN's GCC is told from Sony's by its own code; the others'
-  object files get their ranges at import, and Check again suggests them to older projects through the range check.
 - **Polishing reaches every function, then tidies each file.** A floor of 8 instructions and a ceiling of 400 kept
   polishing off a game's smallest and biggest functions for good: every size comes now, the middle first, and a
   function three tries didn't make readable is left. Once a source file's functions are all readable, a helper tidies
   it: types it shares with other files in one header, fields and classes named, the globals it still knows by
-  address named (read_data first), dead declarations gone, one naming style (`tidy_done`).
+  address named (read_data first), dead declarations gone, one naming style (`tidy_done`). On an Xbox LTCG demo,
+  polishing made all 33 of its functions readable with real names, still matching.
+- **Real names on Windows PC and Xbox.** A PC or Xbox project names functions and data by address (`func_0041B470`,
+  `D_0066DDA4`), and `tools/names.py` pairs them with the original's symbols by that address, so rename_symbol refused
+  them. A real name is kept by address in `config/<version>/functions.json` ("names"), and names.py takes it as that
+  address in C and C++ (a method's too): the function and its callers still match. The report keeps the original's
+  symbol, so the function's row does too, and agents find and call it by its real name. An LTCG unit's harness link
+  is cut (dll2coff) and checked the same way, a renamed global included, and the rename reaches its driver in
+  harness/.
+- **The compiler of each object file, from a PS2 game's symbols.** Games linked by CodeWarrior's linker are often
+  GCC's code with CodeWarrior's C library: the three with symbols had GCC's mark on 91-93% of their object files.
+  The one that built most of the code is the game's, and SN's GCC is told from Sony's by its own code; the others'
+  object files get their ranges at import, and Check again suggests them to older projects through the range check.
 - **Every compiler of the console, then the test of them all** (N64, PS1, PS2). The import offers to install the
   console's missing compilers, and a project page offers it until the first match; the compiler test then tries
   every one. A guess from the program alone can miss: one game's GCC code leaves its return delay slots empty as
@@ -355,6 +379,14 @@ Where to start on a gap:
   own file and is judged like any compile of a matched function: committed when it and the file's other matches
   still match, else the file is put back. Helpers there keep the function's name and describe types in the project's
   headers (edit_file).
+- **An LTCG unit's code can be split over files, in link order.** Under /LTCG the split into source files is part of
+  what the code compiles to. On the XDK test program built from known sources, main's three calls in one loop come
+  out in another order unless its two score helpers are in a file linked before the rest and main in one linked
+  after it. Agents tried it nearly 200 times as one file. A unit is a stretch of addresses, which can hold pieces of
+  several of the original's files, so its code can now be in `src/auto/<unit>.<part>.cpp` as well. Each file is its
+  own /GL object in the unit's harness link, in the order a `// LINK-ORDER:` line in the unit's source gives. The
+  engine rewrites a function in the file that has it, and an edit of a part rebuilds and protects that unit. The
+  agents' own C then matches all 33 functions of the unit, main too.
 - **Agents join what the rules miss** (project mode). `join_functions(function, with_function, reason)`: once 3
   agents of 2 models say two functions are one the analysis cut, the console joins them (DS: `recover.join_functions`,
   across two source files too), checked as an analysis is (the game rebuilt byte for byte, else taken back), never a
@@ -418,6 +450,25 @@ Where to start on a gap:
   against the session; `needs=<function>` records a prerequisite: the function waits (claimed last), the one it
   needs goes first and is handed over, and the match brings the waiting one back first. Notes saying "already
   matched" on a function that doesn't match are marked out of date.
+- **Unresolved names in an LTCG harness link, sorted by whether they matter.** Measured on an XDK test program, each
+  reference left unresolved and then defined: data and callees with a standard convention change nothing (the judge
+  writes the original's references in their place); callees the original passes registers or inlines do (83% ->
+  match with two stand-ins), and library code must stay unresolved (sprintf stood in: 100% -> 89%). Briefs,
+  compile_and_diff and a pushed-back release split a function's unresolved names into those (`forks/unresolved.py`),
+  and a field of an unresolved global no longer reads as an address conflict.
+- **Structs and classes for PC and Xbox** (MSVC, fork mode, `forks/methods.py`). A function that uses `this` (ecx
+  under __thiscall; under LTCG the register the convention evidence finds) as the base of field accesses is a member
+  function; functions called on one global object, local or returned pointer, passing `this` on, or sitting in a
+  vtable a constructor stores are one struct or class, with the fields they touch. The brief says "Looks like a
+  member function of ..." with the declaration to write, `get_class` has the layout and a declaration, and
+  `standins_for` drafts the structs. Why: on an Xbox test program agents wrote Accum::Add as a free function taking
+  an `Accum *`. Measured against the link maps of the XDK test programs: "is a member function" precision 100% /
+  recall 100% without LTCG (fog: 35 of 35; the demo: 7 of 7), 94% / 85% (fog) and 69% / 100% (the demo) with LTCG,
+  where free functions taking a pointer in a register look the same.
+- **Matches stay matched on PC and Xbox.** A free function that another function of its file calls was listed twice
+  by objdiff (the delinked original carried an undefined copy of its name), and the unscored copy set the match back
+  to open at the next attempt in the file. Each function now counts once, and delink.py refers to the definition.
+  With matches kept, twins and the permuter give free matches on an XDK test program.
 - **Rooms that say what's happening** (1.0.4-alpha). A guest waiting for the host sees "Waiting for the host to let
   you in" over the project, not an empty one and a red "Room offline"; then "Getting the host's work", counting down.
   A new guest starts at the room's newest event instead of replaying its history into the feed and notifications,
@@ -649,8 +700,9 @@ reports are approved now). Names only: matching is unaffected. It also names the
 ### C++ classes for PowerPC
 
 The class recovery reads MIPS and x86 (Windows PC: RTTI's names, the classes of code built without it, and their
-fields: done). Left: GameCube and Wii (CodeWarrior: the vtable pointer often isn't at offset 0), with a PowerPC
-reader (`Arch.field_accesses`), in fork mode.
+fields: done; Xbox and LTCG games: member functions with `this` in any register, `forks/methods.py`). Left: GameCube
+and Wii (CodeWarrior: the vtable pointer often isn't at offset 0), with a PowerPC reader (`Arch.field_accesses`), in
+fork mode.
 
 ### A modding-ready check for the export
 

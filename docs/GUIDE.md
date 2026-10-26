@@ -190,10 +190,11 @@ the game.
 | **PlayStation 2** | Beta | ✓ disc or ELF | EE-GCC 2.9 · 2.95.2/2.95.3 (SN) · 2.96 · 3.2 · CodeWarrior 2.3.3 / 3.0.1 | ✓ export | ✓ |
 | **PSP** | Beta | ✓ UMD image (ISO, CSO, CHD) with its other modules, or ELF/PRX, unencrypted or decrypted | CodeWarrior for PSP 3.0.1 · PSP SDK GCC 3.3.3 · SN pspsnc | ✓ export | ✓ |
 | **GameCube · Wii** | Beta | ✓ disc (ISO, RVZ, WBFS…) or DOL | CodeWarrior GC 1.0 – Wii 1.7 | ✓ dtk-template | ✓ |
-| **Windows PC** | Beta | ✓ program (32-bit x86 .exe) | Visual C++ 6.0 · 7.0 · 7.1 · 2005 · 2008 · 2010 · 2017 (wine) | — | ✓ |
+| **Windows PC** | Beta | ✓ program (32-bit x86 .exe) | Visual C++ 6.0 · 7.0 · 7.1 · 2005 · 2008 · 2010 · 2017 (wine) | ✓ `ninja rebuild`; `ninja export` (homemade programs) | ✓ |
 | **Nintendo DS** | Beta | ✓ ROM (.nds) | CodeWarrior for DS 1.2 – DSi 1.6 (24 versions), one per source file | ✓ ds-decomp | ✓ |
 | **Game Boy Advance** | Beta | ✓ ROM (.gba) | agbcc | ✓ luvdis export | ✓ |
-| **3DS · Switch · Xbox · Xbox 360** | Public decomps only | | | | ✓ |
+| **Xbox** | Beta | ✓ program (default.xbe) or disc image (XISO, full dump) | Visual C++ 7.1 with your own XDK | ✓ `ninja export` | ✓ |
+| **3DS · Switch · Xbox 360** | Public decomps only | | | | ✓ |
 
 [ROADMAP.md](../ROADMAP.md) has a table of which feature works on which platform.
 
@@ -227,6 +228,8 @@ different build, which is planned.
   and its own Visual C++. The C runtime, DirectX wrappers, middleware (Miles, Bink, FMOD...), copy protection, ASI
   plugins and DLLs built long after the game (mods) are left out, and the import's log says which and why.
   [VISUAL-CPP.md](VISUAL-CPP.md) lists the Visual C++ builds decompdecomp has, how it picks one, and where their code changes.
+- **Xbox** goes the Windows PC way, with your own XDK. It is tested on a homemade XBE and on small programs built
+  with the XDK.
 
 Please [report problems](https://github.com/n-delic/decompdecomp/issues). The status of a public decomp is the status of its own project.
 
@@ -237,6 +240,7 @@ Please [report problems](https://github.com/n-delic/decompdecomp/issues). The st
 | N64, PS1, PS2, PSP | splat and spimdisasm. They also find code that the game loads later, and overlays. |
 | GameCube, Wii | decomp-toolkit, in a [dtk-template](https://github.com/encounter/dtk-template) project (`consoles/gc_wii/scratch.py`) |
 | Windows PC | [Ghidra](https://github.com/NationalSecurityAgency/ghidra). decompdecomp cuts each function out of the .exe and the game's own DLLs into a project for Visual C++ and objdiff (`consoles/pc/scratch.py`). |
+| Xbox | Ghidra, as for Windows PC, on the XBE's memory image (`consoles/xbox/scratch.py`). The XDK's own library code is set aside: the functions of its library sections that hold x86 code (always analysed, whatever the project covers; another processor's program, such as the audio DSP's, and the data after a section's code stay data), and functions in .text that your XDK's libraries match. A project covering the whole program opens them to agents, as plain units even in an LTCG project; one imported before the library sections were always analysed brings them in from Settings. You set your own XDK folder in Setup; decompdecomp never downloads it. Games built with `/GL` (LTCG) are recognised at import from their call sites (registers loaded right before calls into functions that read them, which no standard convention does), or chosen in the import's LTCG setting (`DECOMP_XBOX_LTCG=1/0`): a unit then links in harness mode (its code, a driver calling it as the game does and stand-ins, linked with `/LTCG`) and its functions are cut out of that link for objdiff, with an address mapping check and a data check on top (progress counts neither failure as matched). The brief shows each function's original convention and call sites, and `standins_for` drafts a unit's harness files. |
 
 **C and C++.** GameCube, Wii, PS2 and Windows PC games are often C++. On these platforms, agents can write
 classes and methods, and decompdecomp changes the C++ names back to the names of the game. N64 games use C. Public decomps use the language of their project.
@@ -250,6 +254,22 @@ with a memory limit. Visual C++ 2017 needs wine on Linux and macOS (installing i
 and `build.py`. The export proves that the tree builds your game byte for byte. Game code and data are not in git.
 The build makes them again from your copy of the game. GameCube and Wii projects are dtk-template projects. They
 build the game again on each build.
+
+Windows PC and Xbox projects rebuild the game with `ninja export` (or *Rebuild the game and compare* on the
+project). It links the game's program again with the game's own linker:
+
+- Each function is a section of its own, with its calls and data addresses as relocations.
+- A function that `src/` compiles to the original's bytes comes from the compiled object. Its references to the
+  game keep their names, and must point where the original's do. The compiler's own data (floats, strings) is the
+  original's copy.
+- Everything else (data, padding) comes from your copy, at its address.
+- An Xbox game's kernel imports come from your XDK's `xboxkrnl.lib`. The XDK's `imagebld` makes the XBE.
+- The headers come from your copy once every section is identical. They hold the certificate and Microsoft's
+  signature, which no build can make.
+
+`build/<version>/export/export.json` says which functions came from `src/` and what differs. A game built with
+link-time code generation takes a unit's functions from its harness link, which the unit's match proved
+identical. The rebuilt program can't move code yet: its data keeps its addresses.
 
 ## Installation details
 

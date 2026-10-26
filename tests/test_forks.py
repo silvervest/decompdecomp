@@ -316,6 +316,18 @@ def test_a_cpp_constructor_or_destructor_is_found_as_the_function_it_stands_for(
     assert csource.structor("void CFoo::Update() {}\nCFoo::CFoo();\n" + c) is None
 
 
+def test_csource_takes_no_macro_written_prototype_for_a_definition():
+    """A function written inside a macro without a body (`HEADER_INLINE(int Clamp(int x))`, a project's marker for
+    a header inline) was found as a definition running to the next function's `{`: its brief showed the stretch in
+    between as its C, and a compile would have replaced it. Qualifiers, throw() and initialisers still count."""
+    src = ("// FUNCTION: 0x00013b80\nHEADER_INLINE(int Clamp(int x, int lo, int hi))\n\n// FUNCTION: 0x00013bd0\n"
+           "void Next(void)\n{\n}\nCFoo::CFoo(int a) : m_a(a), m_b(0) {\n}\nint Get() const throw() {\n    return 1;\n}\n")
+    assert csource.find(src, "Clamp") is None
+    assert csource.get(src, "Next").startswith("void Next(void)")
+    assert csource.get(src, "CFoo::CFoo").startswith("CFoo::CFoo(int a) : m_a(a)")
+    assert csource.get(src, "Get").startswith("int Get() const throw()")
+
+
 def test_clone_rejects_odd_sources(tmp_path):
     net = RomNetwork(tmp_path / "app.db", tmp_path)
     for bad in ("file:///etc", "https://evil.example/x/y", "--upload-pack=x", str(tmp_path)):

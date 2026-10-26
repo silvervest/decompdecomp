@@ -156,8 +156,9 @@ neighbours may come along in one claim; one function back is normal.)
    assembly): not_c=true, saying why. Part of another function the analysis cut (no prologue, registers
    the code before set, a switch's cases in the next symbol)? join_functions(it, the other part, why), so it
    becomes one whole function. Very large functions: get the structure right first; a near miss
-   is worth the extra compiles. Another function of the game it needs done first (a callee, an inlined
-   helper): release_function(needs=that one) hands it to you.
+   is worth the extra compiles. What the function needs in harness/ (a stand-in, a driver call) you write
+   yourself with edit_file in the same claim; another function of the game it needs done first (a callee, an
+   inlined helper): release_function(needs=that one) hands it to you.
 
 Rules: C/C++ only (no inline asm, asm functions or asm includes); don't touch targets, configs or build
 scripts (the tools refuse). Never fetch or copy code from outside this project (another repository, a
@@ -308,7 +309,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
         net.request_boundary(agent, slug, function, end, reason),
     "read_data": lambda net, agent, slug, what, length=64: (net.forks.read_data(agent, slug, what, length)
                                                             if net.fork_slug(slug) else net.read_data(slug, what, length)),
-    "get_class": lambda net, agent, slug, what="": net.get_class(slug, what),
+    "get_class": lambda net, agent, slug, what="": (net.forks.get_class(slug, what) if net.fork_slug(slug)
+                                                    else net.get_class(slug, what)),
     "guess_struct": lambda net, agent, slug, function, argument="arg0": net.guess_struct(slug, function, argument),
     "redraft": lambda net, agent, slug, function, context: net.redraft(slug, function, context),
     "compiler_map": lambda net, agent, slug, survey=False, check_ranges=False:
@@ -338,14 +340,16 @@ HANDLERS: dict[str, Callable[..., str]] = {
         net.forks.split_file(agent, _fork(net, slug, "split_file"), path, at, new_name, data),
     "join_functions": lambda net, agent, slug, function, with_function, reason:
         net.forks.propose_join(agent, _fork(net, slug, "join_functions"), function, with_function, reason),
+    "standins_for": lambda net, agent, slug, what: net.forks.standins_for(agent, _fork(net, slug, "standins_for"), what),
 }
 
 READ_ONLY = frozenset({"project_info", "get_function", "last_diff", "get_context", "read_data", "get_class",
                        "guess_struct", "compiler_map", "list_functions", "search_flags", "search_notes",
-                       "find_similar", "guide", "read_file", "search_code", "file_status"})
+                       "find_similar", "guide", "read_file", "search_code", "file_status", "standins_for"})
 
 ROM_ONLY = {"get_context", "edit_context", "split_function", "redraft", "search_flags"}
-FORK_ONLY = {"read_file", "search_code", "edit_file", "file_status", "split_file", "join_functions", "tidy_done"}
+FORK_ONLY = {"read_file", "search_code", "edit_file", "file_status", "split_file", "join_functions", "tidy_done",
+             "standins_for"}
 
 
 def tool_names(fork: bool, console=None) -> list[str]:
@@ -528,8 +532,10 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
     @mcp.tool(meta=ALWAYS_LOAD)
     async def get_class(ctx: Context, what: str = "") -> str:
         """C++ classes found in the game (MIPS games' and PC programs' code; a PC program's run-time type
-        information has the classes' own names): give a vtable address or a virtual function, constructor or destructor for its class's
-        fields (offset, type, which functions use them) and virtual functions by slot; nothing lists them all. A
+        information has the classes' own names; Xbox and link-time code generation projects also find structs with
+        member functions): give a vtable address or a virtual function, constructor or destructor (Xbox/LTCG: any
+        member function, or a global object) for its class's fields (offset, type, which functions use them), its
+        functions, virtual functions by slot and (Xbox/LTCG) a declaration to start from; nothing lists them all. A
         layout to write the class from: the judge still decides."""
         return await run(ctx, "get_class", what=what)
 
@@ -699,6 +705,19 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
         alone, a switch whose cases are in the next symbol. Say what in the code shows it. Once agents of two models
         say so of the same two, they're joined, if the game still builds byte for byte; never a matched function."""
         return await run(ctx, "join_functions", function=function, with_function=with_function, reason=reason)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def standins_for(ctx: Context, what: str = "", unit: str = "", function: str = "", path: str = "") -> str:
+        """Forks only (PC, Xbox; for games built with link-time code generation): starting points for a unit's
+        harness, from the original's references: stand-ins for the data and functions it uses from elsewhere
+        (each callee with the registers it reads and how it's called), a HarnessEntry calling the unit's functions
+        the way the original's callers do, and the declarations its source needs. `what`: a unit, its source file
+        or one of its functions. Write them into harness/ with edit_file, then shape them like the real ones."""
+        # agents called it as standins_for(unit=...) / (function=...) and got "rejected arguments: ['what']"
+        what = what or unit or function or path
+        if not what:
+            return "standins_for needs `what`: a unit, its source file or one of its functions"
+        return await run(ctx, "standins_for", what=what)
 
     @mcp.prompt(title="Decompile", description="Work loop: claim functions and match them byte for byte.")
     def work(count: str = "5") -> str:

@@ -4142,8 +4142,8 @@ class ForkEngine:
         if _CHEAT.search(_strip_comments(new)):
             raise NetworkError("inline assembly, asm functions and asm includes aren't allowed")
         rel = Path(os.path.relpath(p, fp.root)).as_posix()
-        units = [u for u in fp.units_for(rel) if u.base is not None]
-        if units:  # a unit's own source file: only that unit can change
+        units = [u for u in fp.units_built_from(rel) if u.base is not None]
+        if units:  # a unit's own source file (or harness), and the few units that include it: only they can change
             return self._edit_source(agent, proj, fp, p, rel, units, old, new, message)
         return self._edit_shared(agent, proj, fp, slug, p, rel, old, new, message)
 

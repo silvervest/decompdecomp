@@ -472,6 +472,46 @@ def test_an_ltcg_units_parts_belong_to_it_and_a_function_is_rewritten_where_it_i
     assert fp.units_for("src/auto/u.scores.cpp") == [] and fp.unit_files(unit) == ["src/auto/u.cpp"]
 
 
+def test_an_edit_rebuilds_the_units_that_compile_the_file_and_only_a_header_rebuilds_them_all(tmp_path):
+    """On an Xbox game built with LTCG every harness edit built all 1,420 units twice, every agent waiting: a harness
+    file is its unit's; and a unit's source that other units' drivers include is theirs too, so its edit checks them."""
+    from decompnet.forks import project
+    from decompnet.forks.project import ForkProject
+
+    root = tmp_path / "p"
+    for d in ("src/auto", "harness", "include"):
+        (root / d).mkdir(parents=True)
+    (root / ".decomp.wtf.json").write_text(json.dumps({"ltcg": True}))
+    names = ["u", "v", "w"]
+    (root / "objdiff.json").write_text(json.dumps({"units": [{
+        "name": n, "target_path": f"build/target/{n}.obj", "base_path": f"build/src/auto/{n}.obj",
+        "metadata": {"source_path": f"src/auto/{n}.cpp"}} for n in names]}))
+    for n in names:
+        (root / "src" / "auto" / f"{n}.cpp").write_text(f'#include "common.h"\nint {n}_f(void) {{ return 1; }}\n')
+    (root / "include" / "common.h").write_text("typedef int s32;\n")
+    (root / "harness" / "u.drv.cpp").write_text('#include "u.state.cpp"\n')
+    (root / "harness" / "u.state.cpp").write_text("int state;\n")
+    (root / "harness" / "v.drv.cpp").write_text('#include "../src/auto/u.cpp"\n#include "u.state.cpp"\n')
+    (root / "harness" / "w.drv.cpp").write_text("void HarnessEntry(void) {}\n")
+    fp = ForkProject(root)
+    built = lambda rel: sorted(u.name for u in fp.units_built_from(rel))  # noqa: E731
+    assert built("harness/w.drv.cpp") == ["w"]  # its own unit only
+    assert built("harness/u.state.cpp") == ["u", "v"]  # u's, and v's driver includes it
+    assert built("src/auto/u.cpp") == ["u", "v"]  # v's driver includes u's source
+    assert built("src/auto/w.cpp") == ["w"]
+    assert built("include/common.h") == []  # a header: the whole project
+    (root / "include" / "state.h").write_text('#include "../harness/u.state.cpp"\n')
+    assert built("harness/u.state.cpp") == []  # a header includes it: it could be anywhere
+    (root / "include" / "state.h").unlink()
+    project.EDIT_UNITS_MAX = 1
+    try:
+        assert built("src/auto/u.cpp") == []  # too many to be quicker than all of them
+    finally:
+        project.EDIT_UNITS_MAX = 16
+    (root / ".decomp.wtf.json").write_text(json.dumps({"ltcg": False}))
+    assert built("harness/w.drv.cpp") == [] and built("src/auto/u.cpp") == ["u"]  # without LTCG: as before
+
+
 def _xdk_tools() -> tuple[Path, Path, Path | None] | None:
     """(Visual C++ pack, the user's XDK folder, wibo-xbox or None on Windows), or None when any is missing."""
     try:

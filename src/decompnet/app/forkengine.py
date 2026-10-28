@@ -2586,6 +2586,7 @@ class ForkEngine:
             elif d.match_percent is not None and not d.matched:
                 d.rows = with_constant_values(d.rows, consoles.get(cfg.get("platform")), fp)
                 lines += ["", "### Diff against the current build", d.render()]
+                lines += self._link_check_lines(fp, meta, fn, unit)  # (LTCG) before the first compile, too
         except (ObjdiffError, ForkError) as e:
             lines.append(f"(objdiff couldn't diff this function: {e})")
         _, span = self._find(src_text, self._names(meta, fn)) if src_text else (None, None)

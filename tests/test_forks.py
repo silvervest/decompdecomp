@@ -205,6 +205,27 @@ def test_near_miss_gets_a_diff_and_release_restores_the_best(fork):
 
 
 @needs_tools
+def test_a_brief_checks_the_conventions_of_the_current_link_after_its_diff(fork, monkeypatch):
+    """An LTCG project's brief says from the start whether the harness link gives the function and its callees the
+    original's conventions (ForkEngine._link_check_lines, tested in test_ltcg.py), so an agent knows before compiling
+    whether the driver or the code is what to work on."""
+    from decompnet.app.forkengine import ForkEngine
+
+    net, slug, agent = fork
+    seen = []
+
+    def check(fp, meta, fn, unit):
+        seen.append(fn["name"])
+        return ["", "LINK CHECK"]
+    monkeypatch.setattr(ForkEngine, "_link_check_lines", staticmethod(check))
+    fn = net.store.one("SELECT * FROM functions WHERE name='player_take_damage'")
+    assert fn["status"] == "open"
+    text = net.forks.brief(fn, agent, "CLAIMED")
+    assert seen == ["player_take_damage"]
+    assert text.index("### Diff against the current build") < text.index("LINK CHECK")
+
+
+@needs_tools
 def test_guards(fork):
     net, slug, agent = fork
     root = Path(net.project_row(slug)["root"])

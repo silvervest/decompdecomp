@@ -797,6 +797,7 @@ def test_a_compile_says_which_conventions_in_the_harness_link_differ_from_the_or
     assert ("- _C (in harness/u.standins.cpp): the original reads esi; stack arguments [esp+4]; ret 4; the one in "
             "your link reads ecx; no stack arguments; ret.") in text
     assert "func_10001010 itself" not in text  # A takes its arguments as the original's A
+    assert "change them now with edit_file and compile again. Don't release the function for them" in text
 
     fp, unit = _link(tmp_path / "alike", LINK_C_LIKE)
     text = "\n".join(ForkEngine._link_check_lines(fp, {"symbol": "_func_10001010"}, {"name": "_func_10001010"}, unit))

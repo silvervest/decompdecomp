@@ -480,7 +480,11 @@ def link_lines(found: LinkCheck, name: str, where) -> list[str]:
                      f"{_brief_interface(b)}. Your function's code around the call follows the callee's convention: "
                      "shape that definition like the original's (its parameters, what it reads and returns) first.")
     if lines:
-        return ["", "### Conventions in your link that differ from the original's (fix these before the code)", *lines]
+        # agents read the first version of this, wrote what to fix into a note and released the function: the fix is
+        # theirs to make, in this claim
+        return ["", "### Conventions in your link that differ from the original's (fix these before the code)", *lines,
+                "These files are part of this claim's work: change them now with edit_file and compile again. Don't "
+                "release the function for them or leave them to a note: the next agent would find the same thing."]
     n = len(found.callees)
     saves = (f" (it saves {', '.join(ours.saves) or 'nothing'} where the original saves "
              f"{', '.join(orig.saves) or 'nothing'}: that follows from the code, how many values it keeps alive at "

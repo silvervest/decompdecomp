@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import capstone
 import pytest
@@ -717,6 +718,75 @@ def test_standins_are_written_from_the_units_references_with_their_conventions(t
     assert drv.startswith('extern "C" __declspec(dllexport) void HarnessEntry(void)')
     assert "//   _func_10001010+0x7 (u): mov esi, 0x10002000; push 5 -> call" in drv
     assert "harness/v.standins.cpp" in standins.render(prog, "v")
+
+
+LINK_A = bytes.fromhex("be00200010" "6a05" "e814000000" "a104200010" "c3")  # A, its call to 0x10001020
+LINK_C_LIKE = CONV_CODE[0x1000]  # C as the original: this in ESI, a stack argument, ret 4
+LINK_C_STUB = bytes.fromhex("8b4104" "c3")  # a stand-in for C: mov eax, [ecx+4]; ret (ECX, nothing on the stack)
+
+
+def _link(tmp_path: Path, callee: bytes, own: bytes = LINK_A) -> tuple[SimpleNamespace, SimpleNamespace]:
+    """The project of _conv_program with unit u built: its harness DLL holding A (src/auto/u.cpp) and a C
+    (harness/u.standins.cpp), its map and dll2coff's checks file."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    root, manifest = _conv_program(tmp_path)
+    text = own.ljust(0x20, b"\xcc") + callee.ljust(0x10, b"\xcc")
+    build = root / "build"
+    build.mkdir()
+    (build / "u.dll").write_bytes(_pe([(".text", 0x1000, text)], []))
+    (build / "u.map").write_text(" Address         Publics by Value              Rva+Base       Lib:Object\n\n"
+                                 " 0001:00000000       _func_10001010             10001000 f   00_u.obj\n"
+                                 " 0001:00000020       _C                         10001020 f   02_u_standins.obj\n")
+    (build / "u.ltcg.json").write_text(json.dumps({"dll": "build/u.dll", "functions": {
+        "_func_10001010": {"ours": "0x10001000", "size": len(own)}}}))
+    for rel in ("src/auto/u.cpp", "harness/u.drv.cpp", "harness/u.standins.cpp"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("")
+    return SimpleNamespace(root=root, manifest=manifest), SimpleNamespace(name="u", base=build / "u.obj")
+
+
+def test_a_compile_says_which_conventions_in_the_harness_link_differ_from_the_originals(tmp_path):
+    """Of an Xbox racing game's near misses, the ones whose link gave them (or a callee) another convention than the
+    original's had the most left to fix, and nothing said so; the rest were left "for a harness pass" when their calls
+    were already right."""
+    from decompnet.app.forkengine import ForkEngine
+
+    fp, unit = _link(tmp_path, LINK_C_STUB)
+    text = "\n".join(ForkEngine._link_check_lines(fp, {"symbol": "_func_10001010"}, {"name": "_func_10001010"}, unit))
+    assert "Conventions in your link that differ from the original's" in text
+    assert ("- _C (in harness/u.standins.cpp): the original reads esi; stack arguments [esp+4]; ret 4; the one in "
+            "your link reads ecx; no stack arguments; ret.") in text
+    assert "func_10001010 itself" not in text  # A takes its arguments as the original's A
+
+    fp, unit = _link(tmp_path / "alike", LINK_C_LIKE)
+    text = "\n".join(ForkEngine._link_check_lines(fp, {"symbol": "_func_10001010"}, {"name": "_func_10001010"}, unit))
+    assert ("Conventions: func_10001010 takes its arguments as the original does, and so does the 1 function it calls "
+            "in your link.") in text and "not from the calls" in text
+
+    # only LTCG projects get it
+    fp.manifest = {**fp.manifest, "ltcg": False}
+    assert ForkEngine._link_check_lines(fp, {"symbol": "_func_10001010"}, {"name": "_func_10001010"}, unit) == []
+
+
+def test_a_functions_own_convention_in_the_link_is_checked_by_how_it_takes_arguments(tmp_path):
+    from decompnet.forks import convention
+
+    root, manifest = _conv_program(tmp_path)
+    prog = convention.load(root, manifest)
+    c = BASE + 0x1000
+    dll = SimpleNamespace(read=lambda a, n: (LINK_C_STUB + b"\xcc" * 16)[a - BASE - 0x1000:][:n])
+    found = convention.check_link(prog, c, dll, BASE + 0x1000, len(LINK_C_STUB), {})
+    assert found.own_differs and not found.callees and not found.absent
+    lines = convention.link_lines(found, "C", str)
+    assert "- C itself: the original reads esi; stack arguments [esp+4]; ret 4; your link gives it reads ecx" in lines[2]
+    # reading another stack slot (half an argument, or not one it ignores) isn't another convention; nor is a tail
+    # jump in place of the ret
+    a = convention.Convention(["esi"], [4, 8], 4)
+    assert convention.same_interface(a, convention.Convention(["esi"], [6], 4))
+    assert convention.same_interface(a, convention.Convention(["esi"], [8], None))
+    assert not convention.same_interface(a, convention.Convention(["esi"], [], 4))
+    assert not convention.same_interface(a, convention.Convention(["esi"], [4], 8))
+    assert not convention.same_interface(a, convention.Convention(["eax", "esi"], [4], 4))
 
 
 def test_a_reference_the_link_left_unresolved_is_named_by_what_the_function_uses(tmp_path):

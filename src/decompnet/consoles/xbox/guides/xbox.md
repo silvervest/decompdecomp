@@ -40,6 +40,11 @@ compiles can't match those functions: note "LTCG register convention" and releas
 - The brief shows each function's convention in the original: registers read before written, stack arguments,
   `ret N`, registers saved, and call sites with what they load before the call. When yours differs, fix the
   driver's call or a stand-in so it looks like the original's call site.
+- Each compile_and_diff checks the conventions in your link against the original's: the function's own (registers
+  read, stack arguments, `ret N`) and every function it calls there. A section "Conventions in your link that
+  differ" names the driver call or the stand-in file to fix first. "takes its arguments as the original does" means
+  the calls are right: what's left is the function's code or its data, so keep working on it instead of releasing it
+  for a harness pass.
 - Adding a helper function or a call site changes conventions under LTCG. The linker specialises a callee with
   a single call site (arguments left where that caller has them, saves dropped); a second caller (a helper, a
   driver call, a stand-in) can make it standard again, or the reverse. After adding one, check the convention

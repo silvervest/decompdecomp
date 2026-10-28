@@ -2701,6 +2701,41 @@ class ForkEngine:
         return standins.render(prog, unit)
 
     @staticmethod
+    def _link_check_lines(fp: ForkProject, meta: dict, fn, unit) -> list[str]:
+        """For a compile result in an LTCG project: the convention the harness link gave the function, and the
+        functions it calls there, against the original's (convention.check_link). Of an Xbox racing game's near misses
+        at 80% or more, the 12% whose own convention differed had a median of 9.5 instructions left against 1-2 for
+        those whose calls all agreed, and nothing told the agent; and agents left most of the rest "for a harness pass"
+        when the calls were already right, so a check that passes says that too."""
+        manifest = fp.manifest or {}
+        if not manifest.get("ltcg") or unit.base is None:
+            return []
+        try:
+            report = json.loads(unit.base.with_suffix(".ltcg.json").read_text(encoding="utf-8"))
+            symbol = meta.get("symbol") or fn["name"]
+            mine = (report.get("functions") or {}).get(symbol)
+            prog = convention.load(fp.root, manifest)
+            addr = prog.find(symbol)
+            if not mine or addr is None or not report.get("dll"):
+                return []
+            dll_path = fp.root / report["dll"]
+            dll = convention.read_program(dll_path.read_bytes(), "win32")
+            functions = convention.link_functions(dll_path.with_suffix(".map").read_text(encoding="utf-8",
+                                                                                         errors="replace"))
+            found = convention.check_link(prog, addr, dll, int(mine["ours"], 16), int(mine["size"]), functions)
+        except Exception:  # a check: it never stands between an agent and its compile result
+            logging.getLogger("decompdecomp").exception("checking the link's conventions failed")
+            return []
+        name = unresolved.identifier(symbol)
+        files = [*(fp.root / "src" / "auto").glob(f"{unit.name}*.cpp"), *(fp.root / "harness").glob(f"{unit.name}.*.cpp")]
+        by_object = {p.stem.replace(".", "_").lower(): p.relative_to(fp.root).as_posix() for p in files}
+
+        def where(obj: str) -> str:  # tools/ltcg.py names each object <NN>_<file stem, dots as underscores>.obj
+            stem = re.sub(r"^\d+_", "", Path(obj).stem).lower()
+            return by_object.get(stem, obj)
+        return convention.link_lines(found, name, where)
+
+    @staticmethod
     def _convention_brief(fp: ForkProject, meta: dict, fn) -> list[str]:
         """For a brief, in a project built with link-time code generation: how the original passes the function its
         arguments (forks/convention.py), which the driver and stand-ins in harness/ must reproduce."""
@@ -3470,6 +3505,8 @@ class ForkEngine:
                         "matched": True}
         stall = self.net.stall_note(fn["id"], agent.id)
         found = self._unresolved_lines(fp, meta, fn, unit, code)
+        if d.match_percent is not None:
+            found += self._link_check_lines(fp, meta, fn, unit)
         missing = ((self._missing_note(unit, fn) if d.match_percent is None else "")
                    + ("\n\n" + "\n".join(found) if found else ""))
         if d.literals:

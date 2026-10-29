@@ -51,6 +51,52 @@ def _program(tmp_path: Path, ltcg: bool) -> tuple[Path, dict]:
     return tmp_path, {"platform": "win32", "version": "game", "game": {"path": "orig/game.exe"}, "ltcg": ltcg}
 
 
+def test_two_projects_keep_their_programs_and_never_wait_on_each_other(tmp_path, monkeypatch):
+    """One program was cached for every project: agents claiming in two Xbox games at once evicted each other's, and
+    each claim read the game and analysed it whole again under one lock both waited on (claims timed out at 5
+    minutes, compiles took 4)."""
+    import os
+    import threading
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    a_root, a = _program(tmp_path / "a", ltcg=False)
+    b_root, b = _program(tmp_path / "b", ltcg=True)
+    pa = convention.load(a_root, a)
+    objs_a = methods.recover(pa, ltcg=False)
+    pb = convention.load(b_root, b)
+    objs_b = methods.recover(pb, ltcg=True)
+    assert convention.load(a_root, a) is pa and methods.recover(pa, ltcg=False) is objs_a  # b didn't evict a
+    # an analysis of one project holding its program doesn't hold up another's
+    holding, done = threading.Event(), threading.Event()
+
+    def hold():
+        with pa.lock:
+            holding.set()
+            done.wait(10)
+
+    held = threading.Thread(target=hold)
+    held.start()
+    assert holding.wait(5)
+    got = []
+    other = threading.Thread(target=lambda: got.append(methods.recover(convention.load(b_root, b), ltcg=True)))
+    other.start()
+    other.join(5)
+    done.set()
+    held.join(5)
+    assert got == [objs_b]
+    # a project whose functions.json changed is read again, and only it
+    fj = a_root / "config" / "game" / "functions.json"
+    os.utime(fj, ns=(fj.stat().st_atime_ns, fj.stat().st_mtime_ns + 10**9))
+    assert convention.load(a_root, a) is not pa and convention.load(b_root, b) is pb
+    # and the cache keeps a few, the least recently used going first
+    monkeypatch.setattr(convention, "CACHED_PROGRAMS", 1)
+    monkeypatch.setattr(convention, "_CACHE", {})
+    pa = convention.load(a_root, a)
+    convention.load(b_root, b)
+    assert convention.load(a_root, a) is not pa
+
+
 def test_functions_called_on_one_global_object_are_member_functions_of_one_struct_with_its_fields(tmp_path):
     root, manifest = _program(tmp_path, ltcg=False)
     prog = convention.load(root, manifest)

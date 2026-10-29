@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 import capstone
 from capstone import x86
 
-from .convention import _ANALYSE_LOCK, _PARENT, ARGS, SCRATCH, Program, _rw, _setup, instructions
+from .convention import _PARENT, ARGS, SCRATCH, Program, _rw, _setup, instructions
 
 FLOAT = {"fld", "fst", "fstp", "fadd", "fsub", "fsubr", "fmul", "fdiv", "fdivr", "fcom", "fcomp", "fild", "fist",
          "fistp", "fadd", "fsubp", "faddp", "fmulp", "fdivp", "fdivrp", "fsubrp", "movss", "addss", "subss", "mulss",
@@ -299,7 +299,7 @@ def recover(prog: Program, ltcg: bool, skip: set[int] = frozenset()) -> Objects:
     """Every function of the program that looks like a member function, grouped by the object type it belongs to.
     `ltcg`: the program was built with link-time code generation (`this` can arrive in any register the convention
     reads); else only ECX (__thiscall). `skip`: library code."""
-    with _ANALYSE_LOCK:  # once per program, not once per agent claiming at the same moment
+    with prog.lock:  # once per program, not once per agent claiming at the same moment
         memo = prog.__dict__.setdefault("_objects", {})
         key = (ltcg, frozenset(skip))
         if key not in memo:

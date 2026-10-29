@@ -228,6 +228,9 @@ class Program:
     by_name: dict[str, int]
     calls: dict[int, list[tuple[int, int]]]  # callee address -> [(caller address, offset of the rel32)]
     pointers: dict[int, list[tuple[int, int]]]  # function address -> [(function using it as an address, offset)]
+    # its analyses one at a time (convention, methods.recover): agents claim in parallel threads and share it.
+    # Re-entrant for the callees' analyses. The program's own: analysing one project never waits for another's
+    lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
 
     def code(self, addr: int) -> bytes:
         fn = self.functions[addr]
@@ -236,7 +239,7 @@ class Program:
     def convention(self, addr: int) -> Convention:
         # One analysis at a time: the program is shared by every agent's claim (load caches it), and another thread
         # must never see the recursion guard below as a result. The lock is re-entrant for the callees' analyses.
-        with _ANALYSE_LOCK:
+        with self.lock:
             memo = self.__dict__.setdefault("_conventions", {})
             if addr not in memo:
                 memo[addr] = None  # a guard while it's worked out (recursion): a callee in a cycle passes nothing on
@@ -271,23 +274,38 @@ class Program:
         return None
 
 
-_CACHE: dict[tuple, Program] = {}
-_ANALYSE_LOCK = threading.RLock()  # agents claim in parallel threads, and they share the cached program
+# Each project's program, by its functions.json: (what it was read from, the program), the most recently used last.
+# One program was cached for every project: agents claiming in two Xbox games at once evicted each other's, and each
+# claim read a 13 MB functions.json and analysed the whole game again (methods.recover's memo lives on the program),
+# under one lock every claim and compile of both waited on: claims timed out at 5 minutes, compiles took 4.
+CACHED_PROGRAMS = 4
+_CACHE: dict[str, tuple[tuple, Program]] = {}
+_CACHE_LOCK = threading.Lock()  # the dict itself, and _LOADING
+_LOADING: dict[str, threading.Lock] = {}  # a project's functions.json -> held while its program is read
 
 
 def load(root: Path, manifest: dict) -> Program:
     """The project's program and function index (cached while functions.json and the program are unchanged)."""
     fj = root / "config" / manifest["version"] / "functions.json"
     exe = root / manifest["game"]["path"]
-    key = (str(fj), fj.stat().st_mtime_ns, str(exe), exe.stat().st_mtime_ns)
-    with _ANALYSE_LOCK:
-        if key in _CACHE:
-            return _CACHE[key]
+    key = (fj.stat().st_mtime_ns, str(exe), exe.stat().st_mtime_ns)
+    name = str(fj)
+    with _CACHE_LOCK:
+        loading = _LOADING.setdefault(name, threading.Lock())
+    with loading:  # one read of a project at a time; other projects' go on meanwhile
+        with _CACHE_LOCK:
+            hit = _CACHE.pop(name, None)
+            if hit is not None and hit[0] == key:
+                _CACHE[name] = hit  # (most recently used: last)
+                return hit[1]
         info = json.loads(fj.read_text(encoding="utf-8"))
         pe = read_program(exe.read_bytes(), manifest.get("platform", "win32"))
-        _CACHE.clear()
-        _CACHE[key] = index(pe, info)
-        return _CACHE[key]
+        prog = index(pe, info)
+        with _CACHE_LOCK:
+            _CACHE[name] = (key, prog)
+            while len(_CACHE) > CACHED_PROGRAMS:
+                _CACHE.pop(next(iter(_CACHE)))  # the least recently used
+        return prog
 
 
 def index(pe, info: dict) -> Program:

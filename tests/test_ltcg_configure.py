@@ -86,8 +86,10 @@ def test_a_units_code_split_over_files_links_in_its_link_order_and_only_there(tm
         assert f"build build/v/ltcg/u/{obj}.obj: ltcg_cc src/auto/{src}" in ninja
     assert "build build/v/ltcg/u/03_u_drv.obj: ltcg_cc harness/u.drv.cpp" in ninja
     assert "u.main.obj:" not in ninja and "u.scores.obj:" not in ninja  # never compiled on their own
-    # a new file in src/auto or harness (a part, a stand-in) makes ninja run configure again
-    assert re.search(r"^build build\.ninja: configure .* src/auto harness$", ninja, re.M)
+    # a new file in src/auto or harness (a part, a stand-in) makes ninja run configure again: the folders are inputs
+    # of configure.facts, which build.ninja depends on (and which a new file changes)
+    assert re.search(r"^build build/v/configure\.facts: facts .* src/auto harness \|", ninja, re.M)
+    assert re.search(r"^build build\.ninja: configure .*build/v/configure\.facts", ninja, re.M)
     body = (auto / "u.cpp").read_text()
     (auto / "u.cpp").write_text("// LINK-ORDER: u.scores.cpp src/auto/u.cpp\n" + body)
     assert _configure(root).returncode == 0

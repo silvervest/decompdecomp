@@ -35,6 +35,8 @@ parser.add_argument("--msvc", required=True, action="append",
                     help="Visual C++ directory (holds 6.0/Bin/CL.EXE, 10.0SP1/Bin/cl.exe, ...); several: the first "
                          "with MSVC_VERSION")
 parser.add_argument("--wibo", default="", help="runs the Windows compilers on Linux and macOS")
+parser.add_argument("--facts", action="store_true", help="only bring build/VERSION/configure.facts up to date (the "
+                                                         "build runs this, see facts())")
 args = parser.parse_args()
 WINE_FROM = 14  # the first Visual C++ wibo can't run (2015 and newer: 14.x), which wine runs
 INCLUDES = "includes.txt"  # in a version's folder: more header folders, relative to it (decompdecomp's toolchains.py)
@@ -44,6 +46,7 @@ CONFIG = Path("config") / VERSION / "functions.json"
 FILE_COMPILERS = CONFIG.parent / "file_compilers.json"  # {"src/auto/text_00401000.cpp": "7.1"}: files built with another
 FILE_FLAGS = CONFIG.parent / "file_flags.json"  # {"src/auto/text_00401000.cpp": ["/Oy-"]}: files built with more flags
 BUILD = Path("build") / VERSION
+FACTS = BUILD / "configure.facts"
 
 
 def q(argv: list[str]) -> str:
@@ -105,10 +108,30 @@ def source_of(unit: str) -> str:
     return cpp.as_posix() if cpp.exists() or not cpp.with_suffix(".c").exists() else cpp.with_suffix(".c").as_posix()
 
 
+def facts(headers: list[str], sources: list[str]) -> str:
+    """What build.ninja is made from besides this file, the config and the compiler maps: which source files and
+    headers there are, not what's in them. build.ninja depended on every one of them, so each edit of a source wrote
+    the whole build again before compiling: on a game of 1,400 units, 3 s of every compile, an agent's or each of the
+    permuter's variants (which judge in under one). Now the build brings this file up to date first (rule facts,
+    restat): it changes, and configure runs, only when a file is added or removed."""
+    return json.dumps({"headers": headers, "sources": sources}, indent=0) + "\n"
+
+
+def write_facts(text: str) -> None:
+    """Written only when it changes: its date is what tells ninja whether build.ninja is out of date."""
+    if not FACTS.is_file() or FACTS.read_text(encoding="utf-8") != text:
+        FACTS.parent.mkdir(parents=True, exist_ok=True)
+        FACTS.write_text(text, encoding="utf-8")
+
+
 def main() -> None:
+    headers = [p.as_posix() for p in files("include", (".h", ".hpp"))]
+    sources = [s.as_posix() for s in files("src", (".c", ".cpp"))]
+    write_facts(facts(headers, sources))
+    if args.facts:
+        return
     info = json.loads(CONFIG.read_text(encoding="utf-8"))
     units = info["units"]
-    headers = [p.as_posix() for p in files("include", (".h", ".hpp"))]
     with open("build.ninja", "w", encoding="utf-8") as f:
         n = ninja_syntax.Writer(f)
         n.rule("delink", f"{PY} tools/delink.py {CONFIG.as_posix()} {(BUILD / 'target').as_posix()}", restat=True)
@@ -118,6 +141,8 @@ def main() -> None:
         n.rule("cl", q(compiler).replace("$", "$$") + " $runner --compiler $cl $includes --output $out "
                "--source $in -- " + q(CL_FLAGS).replace("$", "$$") + " $cflags")
         n.rule("configure", f"{PY} tools/configure.py " + q(sys.argv[1:]).replace("$", "$$"), generator=True)
+        n.rule("facts", f"{PY} tools/configure.py " + q([*sys.argv[1:], "--facts"]).replace("$", "$$"), restat=True,
+               description="configure: which files there are")
 
         targets = [(BUILD / "target" / f"{u}.obj").as_posix() for u in units]
         n.build(targets, "delink", [CONFIG.as_posix(), "tools/delink.py"])
@@ -146,8 +171,8 @@ def main() -> None:
         n.build(programs, "rebuild", [*targets, *objs],
                 implicit=[CONFIG.as_posix(), *exes, "tools/rebuild.py", "tools/delink.py"])
         n.build("rebuild", "phony", programs)
-        n.build("build.ninja", "configure", ["tools/configure.py", CONFIG.as_posix(), *headers,
-                                             *[s.as_posix() for s in files("src", (".c", ".cpp"))],
+        n.build(FACTS.as_posix(), "facts", [*headers, *sources], implicit=["tools/configure.py"])
+        n.build("build.ninja", "configure", ["tools/configure.py", CONFIG.as_posix(), FACTS.as_posix(),
                                              *[p.as_posix() for p in (FILE_COMPILERS, FILE_FLAGS) if p.exists()]])
         n.default(["prepare"])
 

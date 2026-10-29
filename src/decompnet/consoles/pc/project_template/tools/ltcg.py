@@ -83,16 +83,37 @@ LINK_FLAGS = ["/nologo", "/DLL", "/NOENTRY", "/NODEFAULTLIB", "/OPT:REF", "/LTCG
 UNRESOLVED = re.compile(r"unresolved external symbol (?:\"[^\"]*\" \()?([^\s()\"]+)\)?")
 
 
-def harness_files(unit: str, harness: Path = Path("harness")) -> tuple[Path, list[Path]]:
-    """(driver, stand-ins) of a unit: harness/<unit>.drv.cpp and every other harness/<unit>.*.cpp."""
+def by_prefix(folder: Path, suffix: str) -> dict[str, list[Path]]:
+    """Every <prefix>.<more><suffix> file in `folder`, under each prefix it has (case as the file system matches it):
+    what a glob of `<prefix>.*<suffix>` finds, for every unit from one listing. A glob per unit read the folder once
+    for each of them: 2.3 s of configure's 3.9 on a game of 1,400 units."""
+    out: dict[str, list[Path]] = {}
+    if not folder.is_dir():
+        return out
+    for p in folder.iterdir():
+        if not p.name.lower().endswith(suffix.lower()):
+            continue
+        stem = p.name[:-len(suffix)]
+        for i, ch in enumerate(stem):
+            if ch == ".":
+                out.setdefault(os.path.normcase(stem[:i]), []).append(p)
+    return out
+
+
+def harness_files(unit: str, harness: Path = Path("harness"),
+                  listing: dict[str, list[Path]] | None = None) -> tuple[Path, list[Path]]:
+    """(driver, stand-ins) of a unit: harness/<unit>.drv.cpp and every other harness/<unit>.*.cpp. `listing`: the
+    folder's by_prefix(harness, ".cpp"), for many units at once."""
     driver = harness / f"{unit}.drv.cpp"
-    extras = sorted(p for p in harness.glob(f"{unit}.*.cpp") if p != driver)
-    return driver, extras
+    found = (listing if listing is not None else by_prefix(harness, ".cpp")).get(os.path.normcase(unit), [])
+    return driver, sorted(p for p in found if p != driver)
 
 
-def unit_parts(src: Path) -> list[Path]:
-    """The other files of a unit's own code: <unit>.<part>.cpp beside its source <unit>.cpp, in name order."""
-    return sorted(p for p in src.parent.glob(f"{src.stem}.*{src.suffix}") if p != src)
+def unit_parts(src: Path, listing: dict[str, list[Path]] | None = None) -> list[Path]:
+    """The other files of a unit's own code: <unit>.<part>.cpp beside its source <unit>.cpp, in name order.
+    `listing`: the folder's by_prefix(src.parent, src.suffix), for many units at once."""
+    found = (listing if listing is not None else by_prefix(src.parent, src.suffix)).get(os.path.normcase(src.stem), [])
+    return sorted(p for p in found if p != src)
 
 
 def is_part(path: Path, units) -> bool:
@@ -100,10 +121,10 @@ def is_part(path: Path, units) -> bool:
     return path.parent == Path("src") / "auto" and "." in path.stem and path.stem.split(".")[0] in units
 
 
-def unit_sources(src: Path) -> list[Path]:
+def unit_sources(src: Path, listing: dict[str, list[Path]] | None = None) -> list[Path]:
     """A unit's own source files in link order: as the source's `// LINK-ORDER:` line names them (the last such line;
     files it leaves out follow in name order), else the source first, then its parts in name order."""
-    files = [src, *unit_parts(src)]
+    files = [src, *unit_parts(src, listing)]
     try:
         text = src.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -129,6 +150,24 @@ def has_entry(driver: Path) -> bool:
         return bool(ENTRY.search(driver.read_text(encoding="utf-8", errors="replace")))
     except OSError:
         return False
+
+
+def directives(paths: list[Path]) -> dict[str, list[str]]:
+    """What configure reads inside these files: their LINK-ORDER and HARNESS-LINK lines and whether they define
+    HarnessEntry, by file (files with none left out). With the lists of files, it's all build.ninja is made from
+    (configure.py's facts), so editing a function's body doesn't write the build again, and editing these does."""
+    out: dict[str, list[str]] = {}
+    for p in paths:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        # (the words first: the build runs this before every compile, and most files have none of them)
+        found = [m.group(0).strip() for word, r in (("LINK-ORDER", ORDER_LINE), ("HARNESS-LINK", LINK_LINE),
+                                                    ("HarnessEntry", ENTRY)) if word in text for m in r.finditer(text)]
+        if found:
+            out[p.as_posix()] = found
+    return out
 
 
 def link_flags(paths: list[Path]) -> list[str]:
@@ -170,12 +209,17 @@ def write_rules(n, *, units: list[str], source_of, build: Path, config: Path, cl
     harness_paths = sorted(str(p) for p in Path("harness").rglob("*") if p.is_file()) if Path("harness").is_dir() else []
     done = set()
     gl = [f for f in cl_flags if f.upper() != "/GL"] + ["/GL"]
+    in_harness = by_prefix(Path("harness"), ".cpp")
+    beside = {}  # a unit source's folder and suffix -> by_prefix of it
     for unit in units:
-        driver, extras = harness_files(unit)
+        driver, extras = harness_files(unit, listing=in_harness)
         src = Path(source_of(unit))
         if not src.exists() or not has_entry(driver):
             continue
-        sources = [*unit_sources(src), driver, *extras]
+        key = (src.parent, src.suffix)
+        if key not in beside:
+            beside[key] = by_prefix(*key)
+        sources = [*unit_sources(src, beside[key]), driver, *extras]
         objs = []
         for i, path in enumerate(sources):
             obj = out / unit / f"{i:02d}_{path.stem.replace('.', '_')}.obj"

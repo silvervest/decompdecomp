@@ -43,6 +43,8 @@ parser.add_argument("--msvc", required=True, action="append",
                          "with MSVC_VERSION")
 parser.add_argument("--wibo", default="", help="runs the Windows compilers on Linux and macOS")
 parser.add_argument("--xdk", default="", help="an Xbox game: your own XDK's xbox folder (holds include/xtl.h)")
+parser.add_argument("--facts", action="store_true", help="only bring build/VERSION/configure.facts up to date (the "
+                                                         "build runs this, see facts())")
 args = parser.parse_args()
 WINE_FROM = 14  # the first Visual C++ wibo can't run (2015 and newer: 14.x), which wine runs
 INCLUDES = "includes.txt"  # in a version's folder: more header folders, relative to it (decompdecomp's toolchains.py)
@@ -52,6 +54,7 @@ CONFIG = Path("config") / VERSION / "functions.json"
 FILE_COMPILERS = CONFIG.parent / "file_compilers.json"  # {"src/auto/text_00401000.cpp": "7.1"}: files built with another
 FILE_FLAGS = CONFIG.parent / "file_flags.json"  # {"src/auto/text_00401000.cpp": ["/Oy-"]}: files built with more flags
 BUILD = Path("build") / VERSION
+FACTS = BUILD / "configure.facts"
 
 
 def q(argv: list[str]) -> str:
@@ -153,10 +156,39 @@ def compiler_for(version: str) -> tuple[str, list[str]]:
     return cl, INCLUDE_DIRS if args.xdk else includes
 
 
+def facts(headers: list[str], sources: list[str], harness: list[str]) -> str:
+    """What build.ninja is made from besides this file, the config and the compiler maps: which source files, headers
+    and harness files there are, and in LTCG harness mode the lines configure reads inside them (ltcg.directives:
+    LINK-ORDER, HARNESS-LINK, a driver's HarnessEntry), not the code in them. build.ninja depended on every one of
+    them, so each edit of a source wrote the whole build again before compiling: on a game of 1,400 units, 3 s of
+    every compile, an agent's or each of the permuter's variants (which judge in under one). Now the build brings this
+    file up to date first (rule facts, restat): it changes, and configure runs, only when one of those does."""
+    found = {"headers": headers, "sources": sources, "harness": harness}
+    if LTCG:
+        import ltcg
+
+        found["directives"] = ltcg.directives([Path(p) for p in (*sources, *harness)
+                                               if Path(p).parent in (Path("src") / "auto", Path("harness"))])
+    return json.dumps(found, indent=0) + "\n"
+
+
+def write_facts(text: str) -> None:
+    """Written only when it changes: its date is what tells ninja whether build.ninja is out of date."""
+    if not FACTS.is_file() or FACTS.read_text(encoding="utf-8") != text:
+        FACTS.parent.mkdir(parents=True, exist_ok=True)
+        FACTS.write_text(text, encoding="utf-8")
+
+
 def main() -> None:
+    headers = [p.as_posix() for p in files("include", (".h", ".hpp"))]
+    sources = [s.as_posix() for s in files("src", (".c", ".cpp"))]
+    harness = sorted(p.as_posix() for p in Path("harness").rglob("*") if p.is_file()) \
+        if LTCG and Path("harness").is_dir() else []  # (only LTCG harness mode builds from harness/)
+    write_facts(facts(headers, sources, harness))
+    if args.facts:
+        return
     info = json.loads(CONFIG.read_text(encoding="utf-8"))
     units = info["units"]
-    headers = [p.as_posix() for p in files("include", (".h", ".hpp"))]
     # written aside and put in place whole: a configure that stops half way (a driver it can't read) leaves the
     # last build.ninja, so ninja runs this again and shows why, instead of missing the rest of the build
     with open("build.ninja.tmp", "w", encoding="utf-8") as f:
@@ -173,6 +205,8 @@ def main() -> None:
         # header (rule cl)
         n.rule("cl_deps", command.replace(" --output ", " --deps --output ", 1), deps="gcc", depfile="$out.d")
         n.rule("configure", f"{PY} tools/configure.py " + q(sys.argv[1:]).replace("$", "$$"), generator=True)
+        n.rule("facts", f"{PY} tools/configure.py " + q([*sys.argv[1:], "--facts"]).replace("$", "$$"), restat=True,
+               description="configure: which files there are")
 
         targets = [(BUILD / "target" / f"{u}.obj").as_posix() for u in units]
         n.build(targets, "delink", [CONFIG.as_posix(), "tools/delink.py"])
@@ -235,8 +269,9 @@ def main() -> None:
         n.build((BUILD / "export" / "export.json").as_posix(), "export", [*targets, *objs],
                 implicit=["tools/export.py", "objdiff.json"])
         n.build("export", "phony", [(BUILD / "export" / "export.json").as_posix()])
-        n.build("build.ninja", "configure", ["tools/configure.py", CONFIG.as_posix(), *headers, *harness_files,
-                                             *[s.as_posix() for s in files("src", (".c", ".cpp"))], *watch,
+        n.build(FACTS.as_posix(), "facts", [*headers, *harness_files, *sources, *watch],
+                implicit=["tools/configure.py", *(["tools/ltcg.py"] if LTCG else [])])
+        n.build("build.ninja", "configure", ["tools/configure.py", CONFIG.as_posix(), FACTS.as_posix(),
                                              *[p.as_posix() for p in (FILE_COMPILERS, FILE_FLAGS) if p.exists()]])
         n.default(["prepare"])
     os.replace("build.ninja.tmp", "build.ninja")

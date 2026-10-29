@@ -432,6 +432,60 @@ def test_a_unit_joins_harness_mode_once_its_driver_defines_harness_entry(tmp_pat
     assert template_ltcg.link_flags([driver, *extras]) == ["d3d8ltcg.lib", "/d2:-inlT56"]
 
 
+def test_one_listing_finds_each_units_files_as_a_glob_per_unit_did(tmp_path):
+    # configure globbed harness/ and src/auto once per unit: 2.3 s of 3.9 on a game of 1,400 units
+    h = tmp_path / "harness"
+    h.mkdir()
+    for name in ("u.drv.cpp", "u.standins.cpp", "u.a.nogl.cpp", "u2.drv.cpp", "u_b.drv.cpp", "u.cpp", "u.drv.h",
+                 "v.u.x.cpp"):
+        (h / name).write_text("")
+    listing = template_ltcg.by_prefix(h, ".cpp")
+    for unit in ("u", "u2", "u_b", "v", "v.u", "w"):
+        want = sorted(p for p in h.glob(f"{unit}.*.cpp") if p != h / f"{unit}.drv.cpp")
+        assert template_ltcg.harness_files(unit, h, listing)[1] == want == template_ltcg.harness_files(unit, h)[1]
+    src = tmp_path / "u.cpp"
+    (tmp_path / "u.scores.cpp").write_text("")
+    assert template_ltcg.unit_parts(src, template_ltcg.by_prefix(tmp_path, ".cpp")) == [tmp_path / "u.scores.cpp"]
+
+
+def test_an_ltcg_build_configures_again_only_for_what_configure_reads(tmp_path):
+    # build.ninja depended on every source, so each compile wrote the whole build again first (3 s of a 4 s
+    # compile on a game of 1,400 units); it now depends on configure.facts, which changes only with these
+    root = tmp_path / "p"
+    shutil.copytree(TOOLS, root / "tools")
+    cfg = root / "tools" / "configure.py"
+    cfg.write_text(cfg.read_text().replace("\nLTCG = False\n", "\nLTCG = True\n"))
+    (root / "config" / "v").mkdir(parents=True)
+    (root / "config" / "v" / "functions.json").write_text(json.dumps({"exe": "orig/game.exe", "units": {"u": []}}))
+    (root / "include").mkdir()
+    (root / "src" / "auto").mkdir(parents=True)
+    source = root / "src" / "auto" / "u.cpp"
+    source.write_text("int f(int x)\n{\n    return x;\n}\n")
+    (root / "harness").mkdir()
+    driver = root / "harness" / "u.drv.cpp"
+    driver.write_text('extern "C" __declspec(dllexport) void HarnessEntry(int *p)\n{\n}\n')
+    tools = [str(tmp_path / "msvc"), "--xdk", str(tmp_path / "xdk")]
+    subprocess.run([sys.executable, "tools/configure.py", "v", "--msvc", *tools], cwd=root, check=True,
+                   capture_output=True, timeout=60)
+    facts = root / "build" / "v" / "configure.facts"
+    assert facts.is_file() and "build/v/configure.facts: facts" in (root / "build.ninja").read_text()
+
+    def after(change) -> bool:
+        before = facts.read_text()
+        change()
+        subprocess.run([sys.executable, "tools/configure.py", "v", "--msvc", *tools, "--facts"], cwd=root, check=True,
+                       capture_output=True, timeout=60)
+        return facts.read_text() != before
+
+    assert not after(lambda: source.write_text("int f(int x)\n{\n    return x + 1;\n}\n"))  # a body: nothing
+    assert not after(lambda: driver.write_text(driver.read_text() + "// a comment\n"))
+    assert after(lambda: source.write_text(source.read_text() + "// LINK-ORDER: u.b.cpp u.cpp\n"))
+    assert after(lambda: (root / "src" / "auto" / "u.b.cpp").write_text("int g(void) { return 1; }\n"))
+    assert after(lambda: driver.write_text(driver.read_text() + "// HARNESS-LINK: d3d8ltcg.lib\n"))
+    assert after(lambda: driver.write_text("// the entry taken out\n"))
+    assert after(lambda: (root / "include" / "u.h").write_text("int f(int x);\n"))
+
+
 def test_a_units_own_objects_are_its_files_in_link_order_and_not_the_harness():
     sources = [Path("src/auto/u.scores.cpp"), Path("src/auto/u.cpp"), Path("harness/u.drv.cpp"),
                Path("harness/u.x.nogl.cpp")]

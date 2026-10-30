@@ -2179,8 +2179,10 @@ class ForkEngine:
 
     @staticmethod
     def _missing_note(unit, fn) -> str:
-        """What to tell an agent whose compile built, but whose unit's object has no such function."""
-        return (f"\n\nNOT IN YOUR BUILD: {unit.name} compiled, but its object doesn't define {fn['name']}, so there "
+        """What to tell an agent whose compile built, but whose unit's object has no such function. It names the
+        symbol, not the row: a name made unique with a trailing "'" sent agents after a symbol no C could make."""
+        sym = ForkEngine._meta(fn).get("symbol") or fn["name"]
+        return (f"\n\nNOT IN YOUR BUILD: {unit.name} compiled, but its object doesn't define {sym}, so there "
                 "is nothing to compare yet.")
 
     def _apply_scores(self, proj, unit: str, scores: dict[str, float | None], skip: int | None = None,

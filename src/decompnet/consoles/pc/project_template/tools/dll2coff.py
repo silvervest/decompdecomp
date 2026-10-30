@@ -279,7 +279,9 @@ def annotations(paths: list[Path]) -> tuple[dict[int, str], list[str]]:
         found = list(FUNCTION.finditer(text))
         for n, m in enumerate(found):
             va, sym = m.group(1), m.group(2)
-            bound = found[n + 1].start() if n + 1 < len(found) else len(text)
+            if sym and "::" in sym:  # `// FUNCTION: 0x29080 Mode::Tick (NONMATCHING ...)`: the source's name, which
+                sym = symbol_hint(sym + "(")  # no decorated map symbol contains; looked for as "Mode::Tick" it never
+            bound = found[n + 1].start() if n + 1 < len(found) else len(text)  # was found, and never compiled in
             decl = None if sym else definition(text, clean, m.end(), bound)
             if not sym and decl is None:
                 problems.append(f"{p}: FUNCTION {va}: no function definition follows it")

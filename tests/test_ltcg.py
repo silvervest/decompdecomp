@@ -398,6 +398,19 @@ def test_annotations_name_map_symbols_and_constructors_need_an_explicit_one(tmp_
     assert len(problems) == 1 and "FUNCTION 0x200" in problems[0]
 
 
+def test_an_annotation_giving_the_source_name_finds_the_map_symbol(tmp_path):
+    # An imported project writes `// FUNCTION: <address> Class::method (NONMATCHING ...)`. The name was taken for a
+    # map symbol, which no decorated name contains, so two member functions were never in their unit's object.
+    p = tmp_path / "a.cpp"
+    p.write_text("// FUNCTION: 0x100 Mode::Tick (NONMATCHING one register copy)\nvoid Mode::Tick(Car *car)\n{}\n"
+                 "// FUNCTION: 0x200 Car::Car\nCar::Car(int)\n{}\n")
+    hints, problems = dll2coff.annotations([p])
+    assert hints == {0x100: "?Tick@Mode@@"}
+    assert len(problems) == 1 and "FUNCTION 0x200" in problems[0]  # a constructor still needs its map symbol
+    syms = {"?Tick@Mode@@UAEXPAUCar@@@Z": 0x10001000, "?Tick@Base@@UAEXXZ": 0x10001100}
+    assert dll2coff.find_symbol(syms, hints[0x100]) == ("?Tick@Mode@@UAEXPAUCar@@@Z", "")
+
+
 def test_declarations_between_an_annotation_and_its_definition_are_skipped(tmp_path):
     # The app places the externs an agent sends right before the definition, after its annotation and comments.
     # The annotation once took a comment line with a "(" in it for the definition (`?latch@@`), so the function

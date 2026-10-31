@@ -346,3 +346,54 @@ def hidden_by(text: str, pos: int, undefined: set[str]) -> tuple[int, str] | Non
         if value is False:
             return n, lines[n - 1].strip()
     return None
+
+
+def _when_defined(kind: str, cond: str, macro: str) -> bool | None:
+    """Whether an `#if` line's first branch is compiled once `macro` is defined: only for a test of `macro` alone
+    (`#ifdef M`, `#ifndef M`, `#if defined(M)`, `#if !defined M`); None for any other condition."""
+    if kind in ("ifdef", "ifndef"):
+        return None if cond != macro else kind == "ifdef"
+    m = re.fullmatch(r"(!\s*)?defined\s*(?:\(\s*(\w+)\s*\)|(\w+))", cond)
+    if kind == "if" and m and (m.group(2) or m.group(3)) == macro:
+        return not m.group(1)
+    return None
+
+
+def guard_macro(directive: str) -> str | None:
+    """The macro whose definition compiles a branch that starts with `directive` (hidden_by's): M for `#ifdef M`
+    or `#if defined(M)`, else None."""
+    m = _CONDITIONAL.match(_blank(directive))  # (the line as written: `#ifdef M // parked`)
+    if m is None or m.group(1) not in ("if", "ifdef"):
+        return None
+    cond = m.group(2).strip()
+    name = cond if m.group(1) == "ifdef" else next(iter(_IDENTIFIER.findall(cond.replace("defined", ""))), None)
+    return name if name and _when_defined(m.group(1), cond, name) else None
+
+
+def as_defined(text: str, macro: str) -> str:
+    """The text as the build sees it once `macro` is defined, with only the conditionals that test `macro` alone
+    resolved: their directive lines go, and so do the branches it leaves out (a stand-in under `#ifndef M`). The
+    rest, other conditionals included, is untouched; so is the whole text if such a conditional has an #elif."""
+    clean = _blank(text)
+    events = {clean.count("\n", 0, m.start()): (m.group(1), m.group(2).strip()) for m in _CONDITIONAL.finditer(clean)}
+    stack: list[bool | None] = []  # per open #if: whether its current branch is compiled (None: not about macro)
+    out = []
+    for n, line in enumerate(text.splitlines(keepends=True)):
+        kind, cond = events.get(n, (None, ""))
+        if kind in ("if", "ifdef", "ifndef"):
+            stack.append(_when_defined(kind, cond, macro))
+            if stack[-1] is not None:
+                continue
+        elif kind in ("elif", "else", "endif") and stack:
+            mine = stack[-1] is not None
+            if kind == "elif" and mine:
+                return text
+            if kind == "else" and mine:
+                stack[-1] = not stack[-1]
+            elif kind == "endif":
+                stack.pop()
+            if mine:
+                continue
+        if all(v is not False for v in stack):
+            out.append(line)
+    return "".join(out)

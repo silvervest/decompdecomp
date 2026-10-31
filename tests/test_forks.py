@@ -1246,3 +1246,20 @@ def test_a_macro_counts_as_never_defined_only_when_nothing_could_define_it(tmp_p
     assert ForkEngine._hidden(fp, text, text.index("int f")) == (1, "#ifdef PARKED")
     (tmp_path / "include" / "cfg.h").write_text("#define PARKED\n")
     assert ForkEngine._hidden(fp, text, text.index("int f")) is None
+
+
+def test_a_file_as_the_build_sees_it_once_one_flag_is_defined():
+    """An LTCG harness's stand-in under `#ifndef FLAG` goes when a draft parked under `#ifdef FLAG` comes out
+    (ForkEngine._attempt): only the conditionals testing FLAG alone are resolved; the rest stays as written."""
+    assert csource.guard_macro("#ifdef REAL // parked") == "REAL"
+    assert csource.guard_macro("#if defined( REAL )") == "REAL"
+    assert csource.guard_macro("#ifndef REAL") is None and csource.guard_macro("#if !defined(REAL)") is None
+    assert csource.guard_macro("#if defined(A) || defined(B)") is None and csource.guard_macro("#else") is None
+    text = ("int a;\n#ifndef REAL\nint stand_in(void) { return 0; }\n#if X\nint x;\n#endif\n#else\nint real;\n#endif\n"
+            "#if X\nint y;\n#else\nint z;\n#endif\n#if !defined REAL  /* x */\nint b;\n#endif\n"
+            "#if defined(REAL)\nint c;\n#endif\n/* #ifndef REAL */\nint d;\n")
+    assert csource.as_defined(text, "REAL") == ("int a;\nint real;\n#if X\nint y;\n#else\nint z;\n#endif\n"
+                                                "int c;\n/* #ifndef REAL */\nint d;\n")
+    assert csource.as_defined(text, "OTHER") == text
+    mixed = "#ifdef REAL\nint a;\n#elif X\nint b;\n#endif\n"
+    assert csource.as_defined(mixed, "REAL") == mixed  # an #elif: left as it is

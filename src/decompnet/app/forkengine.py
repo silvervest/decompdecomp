@@ -3310,7 +3310,8 @@ class ForkEngine:
                 was_matched = fn["status"] == "matched"
             hit, old_span = self._find(before, names)
             base, carried = before, ""  # what the new definition goes into; what of the parked copy goes with it
-            if old_span and self._hidden(fp, before, old_span[0]):
+            lifted: dict[Path, str] = {}  # harness files as they were, written as if the parked copy's flag were on
+            if old_span and (parked := self._hidden(fp, before, old_span[0])):
                 # parked in an #if branch the build leaves out: written there, the compile was judged on other code,
                 # and moved out with edit_file it was refused when it broke a matched neighbour (where whole-program
                 # optimisation couples them), so an agent could do nothing with it. It goes where the build sees it,
@@ -3321,6 +3322,15 @@ class ForkEngine:
                 mark = csource.marker_above(before, lo)
                 carried = before[mark:lo] + ("" if commented else before[lo:old_span[0]])
                 base, old_span = before[:mark] + before[old_span[1]:], None
+                # An LTCG unit parks a draft under `#ifdef FLAG` while its harness defines a stand-in under `#ifndef
+                # FLAG` (so the matched callers link). Moved out alone, the draft was defined twice and every compile
+                # of it a link error (LNK2005), and an agent can't change both files in one step: its harness is
+                # compiled as if FLAG were on, the stand-in left out, and undone or kept with the draft
+                if (flag := csource.guard_macro(parked[1])) and (fp.root / "harness").is_dir():
+                    for p in sorted((fp.root / "harness").glob(f"{unit.name}.*.cpp")):
+                        t = p.read_text(errors="replace", encoding="utf-8")
+                        if csource.as_defined(t, flag) != t:
+                            lifted[p] = t
             pre, post = "".join(ln + "\n" for ln in before_lines), "".join(ln + "\n" for ln in after_lines)
             if old_span:
                 lo, hi = old_span
@@ -3365,8 +3375,14 @@ class ForkEngine:
                     for p, t in renamed.items():
                         p.write_text(t, encoding="utf-8")
 
-            committed = [home, *(p.relative_to(fp.root).as_posix() for p in renamed)]
+            def unlift() -> None:
+                for p, t in lifted.items():
+                    _rewrite(p, t)
+
+            committed = [home, *(p.relative_to(fp.root).as_posix() for p in (*renamed, *lifted))]
             _rewrite(path, after)
+            for p, t in lifted.items():
+                _rewrite(p, csource.as_defined(t, flag))
 
             def remembered(text: str, score: int | None, kept: bool = True) -> str:
                 """A result as repeat_of gives it back later (agents' tries only), plus the note when this variant
@@ -3379,6 +3395,7 @@ class ForkEngine:
 
             def undo() -> None:
                 _rewrite(path, before)
+                unlift()
                 unname()
                 if (proj["id"], unit.name) in self._trials and scores is not None and not renamed:
                     self._trials[(proj["id"], unit.name)] = True  # (a run of tries: built once, at its end)
@@ -3392,6 +3409,7 @@ class ForkEngine:
                 # is set up again in the background (one project spent five compiles on a build.ninja whose python
                 # was in another home, then the sessions quit)
                 _rewrite(path, before)
+                unlift()
                 unname()
                 threading.Thread(target=self.preflight, args=(slug,), daemon=True, name=f"preflight-{slug}").start()
                 return {"text": f"❌ The project's build is broken, not your code: {broken}. Your change was undone, "

@@ -28,7 +28,7 @@ from decompnet.hostenv import NO_WINDOW, find_uv
 from .. import __version__, toolchains
 from . import edition, window
 
-REPO = "n-delic/decompdecomp"
+REPO = "silvervest/decompdecomp"  # our fork (Xbox support); upstream is n-delic/decompdecomp
 RECHECK = {"release": 3 * 3600, "branch": 15 * 60}  # GitHub allows 60 unauthenticated API calls an hour
 
 

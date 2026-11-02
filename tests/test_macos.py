@@ -116,7 +116,8 @@ def test_packaged_mac_app_keeps_its_own_bundle(monkeypatch, tmp_path):
     monkeypatch.setenv("DECOMP_PACKAGE", "macos")
     assert "already available" in launcher.install_launcher()
     assert not (tmp_path / "Applications").exists()
-    assert updates.can_apply() == (False, "this decompdecomp was installed as a macOS app: download the new one from https://github.com/n-delic/decompdecomp/releases")
+    assert updates.can_apply() == (False, "this decompdecomp was installed as a macOS app: download the new one from "
+                                          f"https://github.com/{updates.REPO}/releases")
 
 
 def test_mac_chooser_uses_the_apps_python_and_cancellation_is_empty(monkeypatch):
@@ -197,7 +198,7 @@ def test_mac_installer_skips_linux_packages_and_tracks_upstream(tmp_path):
                             capture_output=True, text=True, env=env, timeout=20)
     assert result.returncode == 0, result.stdout + result.stderr
     recorded = calls.read_text()
-    assert "--repo n-delic/decompdecomp" in recorded and "--branch main" in recorded
+    assert f"--repo {updates.REPO}" in recorded and "--branch main" in recorded  # (the installs' repository)
     assert "setup" in recorded and "shortcut" in recorded
     assert "GTK" not in result.stdout and "sudo" not in result.stdout
 
